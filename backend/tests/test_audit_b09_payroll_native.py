@@ -641,10 +641,13 @@ def test_d30_engine_refuses_what_would_take_pay_below_zero():
     assert _engine(advance_recovery=net)["net_pay"] == 0
     assert _engine(incentive=500, advance_recovery=net + 500)["net_pay"] == 0
     # nothing left to recover from: the message says so instead of "Rs 0.00 or less"
+    exactly_used_up = {**_CONFIG, "tds_monthly": 100 + net}
+    assert compute_payroll(exactly_used_up, month=MONTH, year=YEAR)["net_pay"] == 0
     with pytest.raises(ValueError, match="Enter 0"):
-        compute_payroll({**_CONFIG, "tds_monthly": 99999}, month=MONTH, year=YEAR, advance_recovery=1)
-    # a month with no recovery typed is not refused by this rule
-    assert compute_payroll({**_CONFIG, "tds_monthly": 99999}, month=MONTH, year=YEAR)["net_pay"] < 0
+        compute_payroll(exactly_used_up, month=MONTH, year=YEAR, advance_recovery=1)
+    # D58: below zero is refused even with no recovery typed (see test_d58_*)
+    with pytest.raises(ValueError, match="never takes pay below zero"):
+        compute_payroll({**_CONFIG, "tds_monthly": 99999}, month=MONTH, year=YEAR)
 
 
 @pytest.mark.parametrize("dry_run", [True, False], ids=["preview", "save"])
@@ -682,11 +685,12 @@ def test_d30_recovery_up_to_the_months_pay_is_saved(rig):
 
 
 # ---------------------------------------------------------------------------
-# D30 and the LOCKED incentive payout. Roadmap decision #31: a clawback (a
-# kicker taken back on a return) is a negative line folded into the locked
-# payout snapshot, the one incentive feed payroll reads. Nobody types it, so
-# it is not D30's "negative incentive override": it still comes off that
-# month's pay as it always did -- but never below zero.
+# D67 (corrects D30, confirms D58(3)) and the LOCKED incentive payout. Roadmap
+# decision #31: a clawback (a kicker taken back on a return) is a negative line
+# folded into the locked payout snapshot, the one incentive feed payroll reads.
+# An ordinary run never takes it off pay: the full amount is written on the
+# row as incentive_clawback_not_recovered and net pay is untouched. Only an
+# explicit Accounts action deducts it (follow-up F-1410-A).
 # ---------------------------------------------------------------------------
 
 SNAPSHOT = "SNAP-B09-N"
@@ -703,59 +707,31 @@ def _fed(rig):
     return rig.db.get_collection("payout_snapshots").find_one({"snapshot_id": SNAPSHOT}).get("payroll_fed_at")
 
 
-def test_d30_engine_takes_a_payout_clawback_off_pay_but_never_below_zero():
-    net = _engine()["net_pay"]
-    clawed = _engine(incentive_clawback=500)
-    assert clawed["earnings"]["incentive"] == -500 and clawed["net_pay"] == net - 500
-    assert _engine(incentive=200, incentive_clawback=500)["earnings"]["incentive"] == -300
-    assert _engine(incentive_clawback=net)["net_pay"] == 0
-    with pytest.raises(ValueError, match="clawback"):
-        _engine(incentive_clawback=net + 0.01)
-    with pytest.raises(ValueError):
-        _engine(incentive_clawback=-1)  # a clawback is an amount taken back
-    # with a recovery typed as well, the recovery is what the Admin can change
-    with pytest.raises(ValueError, match="Enter a smaller recovery"):
-        _engine(incentive_clawback=500, advance_recovery=net)
-    assert _engine(incentive_clawback=500, advance_recovery=net - 500)["net_pay"] == 0
+def _owed(rows):
+    return {r["employee_id"]: (r["incentives"], r["net_salary"], r["incentive_clawback_not_recovered"])
+            for r in rows}
 
 
 @pytest.mark.parametrize("dry_run", [True, False], ids=["preview", "save"])
-def test_d30_a_clawback_in_the_locked_payout_does_not_stop_the_shops_payroll(rig, dry_run):
+@pytest.mark.parametrize("clawed", [500.0, 90000.0], ids=["small", "bigger-than-pay"])
+def test_d67_a_locked_payout_clawback_is_recorded_and_never_taken_off_pay(rig, dry_run, clawed):
     plain = {r["employee_id"]: r["net_salary"] for r in rig.run(dry_run=True).json()["rows"]}
-    _lock_payout(rig, **{EMP: -500.0, EMP2: 300.0})
+    _lock_payout(rig, **{EMP: -clawed, EMP2: 300.0})
 
     reply = rig.run(dry_run=dry_run)
     assert reply.status_code == 200, reply.text
-    got = {r["employee_id"]: (r["incentives"], r["net_salary"]) for r in reply.json()["rows"]}
-    assert got == {EMP: (-500, plain[EMP] - 500), EMP2: (300, plain[EMP2] + 300)}
-    assert [(r["incentives"], r["net_salary"]) for r in rig.rows()] == (
-        [] if dry_run else [got[EMP], got[EMP2]])
+    want = {EMP: (0, plain[EMP], clawed), EMP2: (300, plain[EMP2] + 300, 0)}
+    assert _owed(reply.json()["rows"]) == want
+    assert _owed(rig.rows()) == ({} if dry_run else want)
+    assert (_fed(rig) is None) is dry_run  # a saving run used the payout, as before
     # a TYPED negative incentive is still refused, even a small one
     assert rig.run(dry_run=dry_run, incentives={EMP: -1}).status_code == 422
 
 
-def test_d30_a_payout_clawback_bigger_than_the_months_pay_is_refused(rig):
-    _lock_payout(rig, **{EMP: -90000.0, EMP2: 300.0})
-    for dry_run in (True, False):
-        reply = rig.run(dry_run=dry_run)
-        assert reply.status_code == 422, reply.text
-        assert "clawback" in _detail(reply) and "ZZ Native One" in _detail(reply)
-    assert rig.rows() == [] and _fed(rig) is None  # nothing saved, payout not consumed
-    g = rig.guard()
-    assert g is None or g.get("runs") == 0
-    # The message promises nothing IMS cannot do: no clawback is carried into
-    # a later month, so it does not tell the Admin to have it "spread".
-    said = _detail(reply)
-    assert "spread" not in said and "does not carry a clawback into later months" in said
-    assert "head office support" in said and "still owed" in said
-
-
 @pytest.mark.parametrize("dry_run", [True, False], ids=["preview", "save"])
-def test_d30_a_clawback_an_override_sets_aside_is_kept_on_the_row(rig, dry_run):
-    """The one way past a clawback bigger than the month's pay is the incentive
-    override (support, by API), which replaces the locked payout figure as it
-    always has. The clawback it did not take back is written on the payroll
-    row, so it is never dropped without a trace."""
+def test_d67_an_override_also_keeps_the_clawback_on_the_row(rig, dry_run):
+    """The incentive override (API only) replaces the locked figure as it always
+    has; the clawback is still recorded, never dropped without a trace."""
     _lock_payout(rig, **{EMP: -90000.0, EMP2: 300.0})
     reply = rig.run(dry_run=dry_run, incentives={EMP: 0})
     assert reply.status_code == 200, reply.text
@@ -765,20 +741,67 @@ def test_d30_a_clawback_an_override_sets_aside_is_kept_on_the_row(rig, dry_run):
 
     assert owed(reply.json()["rows"]) == {EMP: (0, 90000), EMP2: (300, 0)}
     assert owed(rig.rows()) == ({} if dry_run else {EMP: (0, 90000), EMP2: (300, 0)})
-    assert all(r["net_salary"] >= 0 for r in reply.json()["rows"])
     # an override where the locked figure is not a clawback sets nothing aside
     both = rig.run(dry_run=True, incentives={EMP: 0, EMP2: 100})
     assert owed(both.json()["rows"]) == {EMP: (0, 90000), EMP2: (100, 0)}
 
 
-def test_d30_a_rerun_that_takes_the_clawback_clears_the_amount_set_aside(rig):
+def test_d67_reruns_keep_the_clawback_recorded_and_pay_unchanged(rig):
+    plain = {r["employee_id"]: r["net_salary"] for r in rig.run(dry_run=True).json()["rows"]}
     _lock_payout(rig, **{EMP: -500.0})
     assert rig.run(incentives={EMP: 0, EMP2: 0}).status_code == 200
-    assert [(r["incentives"], r["incentive_clawback_not_recovered"]) for r in rig.rows()] == [(0, 500), (0, 0)]
+    want = {EMP: (0, plain[EMP], 500), EMP2: (0, plain[EMP2], 0)}
+    assert _owed(rig.rows()) == want
+    assert [str(r["incentive_clawback_not_recovered"]) for r in rig.rows()] == ["500.0", "0.0"]  # never -0.0
     assert _fed(rig) is None  # every figure was overridden: the payout is not marked as fed, as before
-    assert rig.run().status_code == 200  # no override: the clawback comes off this month's pay
-    assert [(r["incentives"], r["incentive_clawback_not_recovered"]) for r in rig.rows()] == [(-500, 0), (0, 0)]
-    assert _fed(rig) is not None  # now the payout was used
+    for _ in range(2):  # ordinary rerun, then its identical retry
+        assert rig.run().status_code == 200
+        assert _owed(rig.rows()) == want and len(rig.rows()) == 2
+    assert _fed(rig) is not None
+    # approving posts the untouched pay; the clawback stays recorded
+    assert rig.approve().status_code == 200
+    assert _owed(rig.rows()) == want and rig.statuses() == ["APPROVED", "APPROVED"]
+
+
+# A read that fails is not an empty read: the run refuses and saves nothing
+# rather than paying without the locked incentive (or its clawback) or without
+# Professional Tax.
+
+
+def _fail_reads_of(monkeypatch, rig, collection):
+    original = rig.coll_cls.find_one
+
+    def find_one(self, *a, **k):
+        if self.name == collection:
+            raise RuntimeError(f"{collection} read failed")
+        return original(self, *a, **k)
+
+    monkeypatch.setattr(rig.coll_cls, "find_one", find_one)
+
+
+@pytest.mark.parametrize("dry_run", [True, False], ids=["preview", "save"])
+def test_locked_payout_that_cannot_be_read_refuses_the_run(rig, monkeypatch, dry_run):
+    _lock_payout(rig, **{EMP: 500.0, EMP2: -200.0})
+    _fail_reads_of(monkeypatch, rig, "payout_snapshots")
+    reply = rig.run(dry_run=dry_run)
+    assert reply.status_code == 503, reply.text
+    assert "could not be read" in _detail(reply) and "nothing was calculated or saved" in _detail(reply)
+    monkeypatch.undo()
+    assert rig.rows() == [] and _fed(rig) is None
+    g = rig.guard()
+    assert g is None or g.get("runs") == 0
+
+
+@pytest.mark.parametrize("dry_run", [True, False], ids=["preview", "save"])
+def test_shop_that_cannot_be_read_refuses_the_run_instead_of_dropping_pt(rig, monkeypatch, dry_run):
+    rig.db.get_collection("stores").insert_one({"store_id": STORE, "state": "Maharashtra"})
+    with_pt = rig.run(dry_run=True).json()["rows"][0]
+    assert with_pt["breakdown"]["deductions"]["professional_tax"] > 0  # the shop's state charges PT
+    _fail_reads_of(monkeypatch, rig, "stores")
+    reply = rig.run(dry_run=dry_run)
+    assert reply.status_code >= 500, reply.text
+    monkeypatch.undo()
+    assert rig.rows() == []
 
 
 # ---------------------------------------------------------------------------
@@ -800,3 +823,184 @@ def test_p1_second_lock_arriving_before_the_first_has_written_leaves_one_lock_ro
     (row,) = rig.lock_rows()
     assert row["locked_by"] == ADMIN["user_id"] and row["without_payroll_for"] == 2
     assert rig.lock().status_code == 400  # already locked, as before
+
+
+# ===========================================================================
+# D58 (Codex round 2) -- net pay below zero is refused whatever its source;
+# a stalled run's late draft is fenced even when the run's own clean-up
+# fails or never runs.
+# ===========================================================================
+
+
+def test_d58_engine_refuses_fixed_tds_against_a_month_of_unpaid_leave():
+    """Codex's preview: basic 15000 / HRA 5000, the full month unpaid, fixed
+    TDS 100 -> net -100 with HTTP 200. Now refused, with what to change."""
+    with pytest.raises(ValueError, match="never takes pay below zero") as refused:
+        _engine(lwp_days=30)
+    assert "lower this month's TDS" in str(refused.value) and "TDS Rs 100.00" in str(refused.value)
+    # the same leave with no fixed deduction is a zero month, not a refusal
+    assert compute_payroll({**_CONFIG, "tds_monthly": 0}, month=MONTH, year=YEAR, lwp_days=30)["net_pay"] == 0
+    # a partial month that still covers the TDS is untouched
+    assert _engine(lwp_days=20)["net_pay"] > 0
+
+
+@pytest.mark.parametrize("dry_run", [True, False], ids=["preview", "save"])
+def test_d58_run_with_tds_above_leave_reduced_pay_is_refused_and_saves_nothing(rig, dry_run):
+    reply = rig.run(dry_run=dry_run, lwp_days={EMP: 30})
+    assert reply.status_code == 422, reply.text
+    assert "never takes pay below zero" in _detail(reply) and "ZZ Native One" in _detail(reply)
+    assert rig.rows() == []
+    g = rig.guard()
+    assert g is None or g.get("runs") == 0
+
+
+def _late_insert_after_lock(monkeypatch, rig, fail_release=False):
+    """Codex's P1: the run's first insert stalls past the guard's lease, the
+    month is locked "anyway" meanwhile, then the insert lands. With
+    ``fail_release`` the run's final guard write (runs -1) fails once."""
+    original = rig.coll_cls.insert_one
+    original_touch = rig.coll_cls.find_one_and_update
+    locked, failed = [], []
+
+    def insert_one(self, doc, *a, **k):
+        if self.name == "payroll" and not locked:
+            rig.db.get_collection(guard.COLLECTION).update_one(
+                {"_id": f"{YEAR}-{MONTH:02d}"},
+                {"$set": {"beat": time.time() - guard.LEASE_SECONDS - 1}},
+            )
+            locked.append(rig.lock(without_payroll=True))
+        return original(self, doc, *a, **k)
+
+    def find_one_and_update(self, query, update, *a, **k):
+        if (fail_release and self.name == guard.COLLECTION and not failed
+                and (update.get("$inc") or {}).get("runs") == -1):
+            failed.append(True)
+            raise OSError("transient failure of the final guard write")
+        return original_touch(self, query, update, *a, **k)
+
+    monkeypatch.setattr(rig.coll_cls, "insert_one", insert_one)
+    monkeypatch.setattr(rig.coll_cls, "find_one_and_update", find_one_and_update)
+    return locked, failed
+
+
+def test_d58_final_guard_write_failing_after_a_late_insert_leaves_no_draft(rig, monkeypatch):
+    rig.db.get_collection("salary_config").delete_one({"employee_id": EMP2})
+    locked, failed = _late_insert_after_lock(monkeypatch, rig, fail_release=True)
+    ran = rig.run()
+
+    assert locked[0].status_code == 200 and failed == [True]
+    assert ran.status_code == 423, ran.text  # the month closed under it: said so
+    assert rig.rows() == [] and not rig.stranded()
+    assert rig.run().status_code == 423 and rig.approve().status_code == 423
+    assert rig.rows() == [] and rig.pnl() == 0
+
+
+def test_d58_the_same_run_without_the_fault_still_cleans_up(rig, monkeypatch):
+    rig.db.get_collection("salary_config").delete_one({"employee_id": EMP2})
+    locked, failed = _late_insert_after_lock(monkeypatch, rig, fail_release=False)
+    assert rig.run().status_code == 423
+    assert locked[0].status_code == 200 and failed == []
+    assert rig.rows() == [] and not rig.stranded()
+
+
+def test_d58_release_failure_in_an_open_month_is_a_500_and_a_retry_succeeds(rig, monkeypatch):
+    """The final write fails but the month was NOT locked: the drafts are
+    ordinary drafts of an open month, nothing is deleted, and the retry
+    rewrites them (one row per employee)."""
+    original_touch = rig.coll_cls.find_one_and_update
+    failed = []
+
+    def find_one_and_update(self, query, update, *a, **k):
+        if self.name == guard.COLLECTION and not failed and (update.get("$inc") or {}).get("runs") == -1:
+            failed.append(True)
+            raise OSError("transient")
+        return original_touch(self, query, update, *a, **k)
+
+    monkeypatch.setattr(rig.coll_cls, "find_one_and_update", find_one_and_update)
+    assert rig.run().status_code == 500
+    assert rig.statuses() == ["DRAFT", "DRAFT"]
+    assert rig.run().status_code == 200 and rig.statuses() == ["DRAFT", "DRAFT"]
+    assert rig.approve().status_code == 200 and rig.statuses() == ["APPROVED", "APPROVED"]
+
+
+def _crashed_late_insert(rig) -> str:
+    """Stored state a run leaves when its server dies after a late insert and
+    before any clean-up: claim + renew (id recorded), stall past the lease,
+    lock anyway, the insert lands, nothing more."""
+    pid = "PAY-B09-LATE"
+    guard.claim_run(rig.db, YEAR, MONTH)
+    assert guard.renew_run(rig.db, YEAR, MONTH, inserting=pid) is True
+    rig.db.get_collection(guard.COLLECTION).update_one(
+        {"_id": f"{YEAR}-{MONTH:02d}"}, {"$set": {"beat": time.time() - guard.LEASE_SECONDS - 1}})
+    assert rig.lock(without_payroll=True).status_code == 200
+    rig.db.get_collection("payroll").insert_one(
+        {"payroll_id": pid, "employee_id": EMP, "store_id": STORE, "entity_id": ENTITY,
+         "year": YEAR, "month": MONTH, "status": "DRAFT", "net_salary": 19900,
+         "breakdown": {"ctc_cost": 20000}})
+    assert rig.stranded()
+    return pid
+
+
+@pytest.mark.parametrize(
+    "touch, status",
+    [
+        (lambda rig: rig.run(), 423),
+        (lambda rig: rig.approve(), 423),
+        (lambda rig: rig.pay(), 423),
+        (lambda rig: rig.lock(), 400),
+        (lambda rig: rig.client().get(
+            f"/api/v1/payroll/run/rows?month={MONTH}&year={YEAR}&entity_id={ENTITY}"), 200),
+        (lambda rig: rig.client().get(
+            f"/api/v1/payroll/salary-sheet?month={MONTH}&year={YEAR}&store_id={STORE}"), 200),
+    ],
+    ids=["run", "approve", "mark-paid", "lock-again", "register", "salary-sheet"],
+)
+def test_d58_a_crash_before_clean_up_is_put_right_by_the_next_payroll_touch(rig, touch, status):
+    _crashed_late_insert(rig)
+    reply = touch(rig)
+    assert reply.status_code == status, reply.text
+    assert rig.rows() == [] and not rig.stranded()
+    if reply.request.method == "GET":
+        body = reply.json()
+        assert (body.get("rows") if "rows" in body else body.get("salaries")) == []
+
+
+def test_d58_the_sweep_takes_only_the_late_rows_named_in_the_guard(rig):
+    """An APPROVED row, and a DRAFT nobody's stalled run inserted (e.g. from
+    before the guard existed), are never touched."""
+    assert rig.run().status_code == 200 and rig.approve().status_code == 200
+    approved = _saved_figures(rig)
+    assert guard.read(rig.db, YEAR, MONTH).get("pending") == []  # released rows leave it
+    assert rig.lock().status_code == 200
+    rig.db.get_collection("payroll").insert_one(
+        {"payroll_id": "PAY-B09-HISTORIC", "employee_id": "EMP-HIST", "year": YEAR,
+         "month": MONTH, "status": "DRAFT", "net_salary": 0})
+    assert guard.sweep_stranded(rig.db, YEAR, MONTH) == 0
+    assert rig.run().status_code == 423
+    assert _saved_figures(rig)[:2] == approved
+    assert rig.db.get_collection("payroll").find_one({"payroll_id": "PAY-B09-HISTORIC"})
+
+
+def test_d58_insert_whose_ack_is_lost_and_lands_after_the_lock_is_taken_back(rig, monkeypatch):
+    """Reviewer's must-fix: insert_one raises on the client (connection
+    dropped) while the server still holds the write. The month is open, so
+    the release succeeds -- and must NOT take the id out of ``pending``, or a
+    row landing after a later lock can never be swept."""
+    rig.db.get_collection("salary_config").delete_one({"employee_id": EMP2})
+    original = rig.coll_cls.insert_one
+    held = []
+
+    def insert_one(self, doc, *a, **k):
+        if self.name == "payroll" and not held:
+            held.append(dict(doc))
+            raise pymongo.errors.AutoReconnect("connection dropped; server still holds the insert")
+        return original(self, doc, *a, **k)
+
+    monkeypatch.setattr(rig.coll_cls, "insert_one", insert_one)
+    assert rig.run().status_code == 500
+    assert rig.rows() == [] and len(held) == 1
+    assert rig.lock(without_payroll=True).status_code == 200
+    rig.db.get_collection("payroll").insert_one(held[0])  # the server applies it now
+    assert rig.stranded()
+    assert rig.run().status_code == 423  # the next payroll touch
+    assert rig.rows() == [] and not rig.stranded() and rig.pnl() == 0

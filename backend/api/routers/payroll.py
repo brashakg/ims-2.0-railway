@@ -790,6 +790,7 @@ async def get_salary_sheet(
         return {"salaries": [], "total": 0, "store_id": store_id}
 
     active_store = store_in_view(store_id, current_user)
+    payroll_period_guard.sweep_stranded(db, year, month)
 
     try:
         query: dict = {"month": month, "year": year}
@@ -1527,18 +1528,16 @@ def _incentive_feed_for_store(db, store_id: Optional[str], month: int, year: int
     """
     if db is None or not store_id:
         return {}
-    try:
-        from database.repositories.payout_snapshot_repository import (
-            PayoutSnapshotRepository,
-        )
-        from api.services import scorecard_engine
+    from database.repositories.payout_snapshot_repository import (
+        PayoutSnapshotRepository,
+    )
+    from api.services import scorecard_engine
 
-        repo = PayoutSnapshotRepository(db.get_collection("payout_snapshots"))
-        return scorecard_engine.get_incentive_for_payroll(
-            store_id, year, month, snapshot_repo=repo
-        )
-    except Exception:  # pragma: no cover - defensive
-        return {}
+    # A read failure raises: an unreadable payout is not an empty one.
+    repo = PayoutSnapshotRepository(db.get_collection("payout_snapshots"))
+    return scorecard_engine.get_incentive_for_payroll(
+        store_id, year, month, snapshot_repo=repo
+    )
 
 
 def _stamp_consumed_snapshots(db, feed_cache: dict, month: int, year: int,
@@ -1592,12 +1591,11 @@ def _resolve_pt_slab(db, config: dict) -> Optional[dict]:
     state = None
     store_id = config.get("store_id")
     if db is not None and store_id:
-        try:
-            store = db.get_collection("stores").find_one({"store_id": store_id})
-            if store:
-                state = store.get("state") or store.get("gst_state_code")
-        except Exception:
-            state = None
+        # A read failure raises: an unreadable shop is not a shop with no
+        # Professional Tax, and pay saved without PT would overpay.
+        store = db.get_collection("stores").find_one({"store_id": store_id})
+        if store:
+            state = store.get("state") or store.get("gst_state_code")
     code = pt_code_for_state(state)
     if not code:
         return None
@@ -1618,6 +1616,19 @@ def _scope_configs(db, store_id: Optional[str], entity_id: Optional[str]) -> lis
     if store_id:
         query["store_id"] = store_id
     return list(db.get_collection("salary_config").find(query))
+
+
+def _refuse_if_month_locked(db, year: int, month: int) -> None:
+    """423 when the month's accounting period is locked. A locked month is
+    also where a stalled run's late draft could sit, so it is swept first:
+    that clean-up never waits for support."""
+    from .finance import check_period_locked
+
+    try:
+        check_period_locked(db, date(year, month, 1))
+    except HTTPException:
+        payroll_period_guard.sweep_stranded(db, year, month)
+        raise
 
 
 @router.post("/run")
@@ -1647,9 +1658,7 @@ async def run_payroll(
     # not, so a draft could still be rewritten inside a closed month. A preview
     # (dry_run) writes nothing, so it is not gated.
     if not req.dry_run:
-        from .finance import check_period_locked
-
-        check_period_locked(db, date(req.year, req.month, 1))
+        _refuse_if_month_locked(db, req.year, req.month)
     try:
         configs = _scope_configs(db, req.store_id, req.entity_id)
         payroll_coll = db.get_collection("payroll")
@@ -1664,9 +1673,20 @@ async def run_payroll(
             if not store_id:
                 return {}
             if store_id not in _feed_cache:
-                _feed_cache[store_id] = _incentive_feed_for_store(
-                    db, store_id, req.month, req.year
-                )
+                try:
+                    _feed_cache[store_id] = _incentive_feed_for_store(
+                        db, store_id, req.month, req.year
+                    )
+                except Exception as exc:
+                    # A failed read is not "no incentive": saving 0 would
+                    # underpay, or drop a clawback without a trace.
+                    logger.error("Payroll incentive feed read failed: %s", exc)
+                    raise HTTPException(
+                        status_code=503,
+                        detail=f"The locked incentive payout for shop {store_id}, "
+                        f"{req.month:02d}/{req.year}, could not be read, so nothing "
+                        "was calculated or saved. Try again.",
+                    )
             return _feed_cache[store_id]
 
         # Every employee is computed BEFORE anything is written, so a run the
@@ -1677,26 +1697,16 @@ async def run_payroll(
             cfg_store = cfg.get("store_id")
             lwp = float(req.lwp_days.get(emp, 0) or 0)
             incentive = (req.incentives or {}).get(emp)
-            clawback = set_aside = 0.0
-            try:
-                locked = round(float(_store_feed(cfg_store).get(emp, 0.0)), 2)
-            except (TypeError, ValueError):
-                locked = 0.0
+            locked = round(float(_store_feed(cfg_store).get(emp, 0.0)), 2)
             if incentive is None:
                 consumed.add(cfg_store)
-                incentive = locked
-                # A net clawback in the LOCKED payout (roadmap decision #31:
-                # returns took back more kicker than was earned) is not a
-                # typed negative incentive. The engine takes it off pay under
-                # its own name, never below zero; a typed negative is refused.
-                if incentive < 0:
-                    incentive, clawback = 0.0, -incentive
-            elif locked < 0:
-                # An override replaces the locked payout figure, as it always
-                # has. When that figure is a clawback, this run does not take
-                # it back and nothing carries it to a later month, so the
-                # amount is kept on the row instead of vanishing.
-                set_aside = -locked
+                incentive = max(locked, 0.0)
+            # D67 (corrects D30, confirms D58(3)): a net clawback in the LOCKED
+            # payout (roadmap decision #31: returns took back more kicker than
+            # was earned) is never taken off pay by a run, with or without an
+            # override. The full amount is kept on the row as not recovered;
+            # only an explicit Accounts action deducts it (F-1410-A).
+            set_aside = -locked if locked < 0 else 0.0  # never -0.0
             advance = float(req.advances.get(emp, 0) or 0)
             pt_slab = _resolve_pt_slab(db, cfg)
             employee_name = _get_employee_details(db, emp).get("full_name", "")
@@ -1707,7 +1717,6 @@ async def run_payroll(
                     year=req.year,
                     lwp_days=lwp,
                     incentive=incentive,
-                    incentive_clawback=clawback,
                     advance_recovery=advance,
                     pt_slab=pt_slab,
                     gender=cfg.get("gender", "ANY"),
@@ -1767,8 +1776,16 @@ async def run_payroll(
                             }
                         )
                         continue
+                    if not existing:
+                        doc["payroll_id"] = str(uuid.uuid4())
+                    # A new row's id is recorded in the guard in the same
+                    # step, so if this insert stalls past a lock it is taken
+                    # back (payroll_period_guard.sweep_stranded).
                     month_open = payroll_period_guard.renew_run(
-                        db, req.year, req.month
+                        db,
+                        req.year,
+                        req.month,
+                        inserting=None if existing else doc["payroll_id"],
                     )
                     if not month_open:
                         break
@@ -1798,26 +1815,30 @@ async def run_payroll(
                             )
                             continue
                     else:
-                        doc["payroll_id"] = str(uuid.uuid4())
                         doc["created_at"] = utc_now_iso()
                         doc["created_by"] = current_user.get("user_id")
-                        inserted.append(doc["payroll_id"])
                         payroll_coll.insert_one(doc)
+                        # Only once the insert is acknowledged: an insert
+                        # that raised may still land later, so its id stays
+                        # in the guard's ``pending`` for the sweep.
+                        inserted.append(doc["payroll_id"])
                 rows.append(_strip_id({k: v for k, v in doc.items()}))
                 totals["gross"] += breakdown["earnings"]["total_earnings"]
                 totals["deductions"] += breakdown["deductions"]["total_deductions"]
                 totals["net"] += breakdown["net_pay"]
                 totals["employer_cost"] += breakdown["ctc_cost"]
         finally:
+            # Release, and take back any draft that landed behind a lock (only
+            # after the run stalled past the guard's lease) -- also when the
+            # release write fails, so none is left where it can never be
+            # approved. A crash before this line is swept by the next payroll
+            # request for the month (_refuse_if_month_locked).
             if saving and month_open:
-                month_open = payroll_period_guard.release_run(db, req.year, req.month)
-            if not month_open and inserted:
-                # The month was locked under this run (only after the run
-                # stalled past the guard's lease): take back the drafts it
-                # added, so none is left where it can never be approved.
-                payroll_coll.delete_many(
-                    {"payroll_id": {"$in": inserted}, "status": "DRAFT"}
+                month_open = payroll_period_guard.finish_run(
+                    db, req.year, req.month, inserted
                 )
+            elif saving:
+                payroll_period_guard.sweep_stranded(db, req.year, req.month)
         if not month_open:
             raise HTTPException(
                 status_code=423,
@@ -1875,6 +1896,9 @@ async def list_payroll_rows(
         return {"rows": [], "total": 0, "totals": {}}
     # BUG-062 tail: scope the salary register to the caller's store reach.
     store_id = resolve_store_scope(store_id, current_user)
+    # A stalled run's draft that landed behind a lock is gone before anyone
+    # reads the register (payroll_period_guard.sweep_stranded).
+    payroll_period_guard.sweep_stranded(db, year, month)
     try:
         query: dict = {"month": month, "year": year}
         if store_id:
@@ -1922,9 +1946,7 @@ async def approve_payroll(
     # Financial control: approving payroll is a posting into the run's month.
     # Block it if that accounting period is locked (mirrors orders/returns/
     # vendors/expenses/finance-JE). Raises HTTPException(423) when locked.
-    from .finance import check_period_locked
-
-    check_period_locked(db, date(req.year, req.month, 1))
+    _refuse_if_month_locked(db, req.year, req.month)
     try:
         query: dict = {"month": req.month, "year": req.year, "status": "DRAFT"}
         if req.store_id:
@@ -1963,9 +1985,7 @@ async def lock_payroll(
     # Financial control: locking payroll as PAID is a posting into the run's
     # month. Block it if that accounting period is locked (mirrors orders/
     # returns/vendors/expenses/finance-JE). Raises HTTPException(423) when locked.
-    from .finance import check_period_locked
-
-    check_period_locked(db, date(req.year, req.month, 1))
+    _refuse_if_month_locked(db, req.year, req.month)
     try:
         query: dict = {"month": req.month, "year": req.year, "status": "APPROVED"}
         if req.store_id:
