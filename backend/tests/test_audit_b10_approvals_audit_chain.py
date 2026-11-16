@@ -1222,11 +1222,8 @@ def test_d84_reading_a_posted_journal_writes_its_missing_event_once(db, monkeypa
     assert _posted_rows(db, j["je_id"]) == []
 
     assert _read_journal(db, monkeypatch, route, j["je_id"], reader) == 200
-    assert _posted_rows(db, j["je_id"]) == []                   # within the grace: its poster's
-    _aged(db, j["je_id"])
-    assert _read_journal(db, monkeypatch, route, j["je_id"], reader) == 200
-    rows = _posted_rows(db, j["je_id"])
-    assert len(rows) == 1                                       # was 0, for good
+    rows = _posted_rows(db, j["je_id"])                         # the FIRST read (D84), no grace:
+    assert len(rows) == 1                                       # this version's Post stamped posted_by
     assert rows[0]["log_id"] == f"AUD-JE-POSTED-{j['je_id']}"
     assert rows[0]["user_id"] == "checker"                      # the poster, not the reader
     assert rows[0]["reason"] == "recorded_on_read"
@@ -1352,31 +1349,95 @@ def test_d84_a_read_during_a_reversal_leaves_the_mirror_one_posted_event(db, mon
     assert verify_chain(db.get_collection("audit_logs"))["intact"] is True
 
 
+def _previous_version_post(db, monkeypatch, je_id: str, inside):
+    """Post as the previous version does: POSTED with no posted_by, then its
+    je_posted under a RANDOM log id; ``inside`` runs between the two writes
+    (on this version's code, as a request landing on a new worker)."""
+    real_set, real_audit, fired = je_service._set, je_service._audit, []
+
+    def _old_set(d, jid, fields, **k):
+        return real_set(d, jid, {f: v for f, v in fields.items() if f != "posted_by"}, **k)
+
+    def _audit(d, act, je, **k):
+        if act == "je_posted" and not fired:
+            fired.append(act)
+            monkeypatch.setattr(je_service, "_set", real_set)
+            monkeypatch.setattr(je_service, "_audit", real_audit)
+            inside(je)
+            k["log_id"] = f"AUD-{uuid.uuid4().hex[:12]}"
+        return real_audit(d, act, je, **k)
+    monkeypatch.setattr(je_service, "_set", _old_set)
+    monkeypatch.setattr(je_service, "_audit", _audit)
+    res = _post(db, je_id)
+    monkeypatch.setattr(je_service, "_set", real_set)
+    monkeypatch.setattr(je_service, "_audit", real_audit)
+    assert fired
+    return res
+
+
 def test_d84_a_read_while_an_older_worker_posts_leaves_one_event(db, monkeypatch):
-    """Rolling deploy: a previous-version worker writes POSTED, then its
-    je_posted under a RANDOM log id. A new-version read landing in between
-    wrote the fixed-id event and the old worker's row landed too: two events.
-    A read now leaves a journal posted within the grace to its poster; a read
-    after the grace finds the old worker's event and writes nothing."""
+    """Rolling deploy: a previous-version worker writes POSTED (no posted_by),
+    then its je_posted under a RANDOM log id. A new-version read landing in
+    between wrote the fixed-id event and the old worker's row landed too: two
+    events. A read now leaves a journal with no posted_by, posted within the
+    grace, to its poster; a read after the grace finds the old worker's event
+    and writes nothing."""
     _user(db, "checker", ["ADMIN"])
     reader = _user(db, "accounts", ["ACCOUNTANT"])
     j = _submitted_journal(db, "maker")
     assert _journal_approve(db, j["je_id"]).get("ok") is True
-    fixed_id = je_service._posted_event_id
-    monkeypatch.setattr(je_service, "_posted_event_id",          # the previous version's Post
-                        lambda _je_id: f"AUD-{uuid.uuid4().hex[:12]}")
-    _read_inside_audit(monkeypatch, "je_posted", lambda je: [
+    res = _previous_version_post(db, monkeypatch, j["je_id"], lambda je: [
         _read_journal(db, monkeypatch, route, j["je_id"], reader)
         for route in ("list", "detail", "export")])
-    assert _post(db, j["je_id"]).get("ok") is True
-    monkeypatch.setattr(je_service, "_posted_event_id", fixed_id)
+    assert res.get("ok") is True
     rows = _posted_rows(db, j["je_id"])
     assert len(rows) == 1                                       # was two
-    assert rows[0]["log_id"] != fixed_id(j["je_id"])            # the old worker's own
+    assert rows[0]["log_id"] != je_service._posted_event_id(j["je_id"])   # the old worker's own
     _aged(db, j["je_id"])
     for route in ("list", "detail", "export"):
         assert _read_journal(db, monkeypatch, route, j["je_id"], reader) == 200
     assert len(_posted_rows(db, j["je_id"])) == 1
+
+
+def test_d84_a_post_retry_while_an_older_worker_posts_leaves_one_event(db, monkeypatch):
+    """The same deploy window through Post: a second checker's Post (or a
+    second tab) lands on a new worker between the old worker's POSTED write
+    and its random-id je_posted. The retry repaired at once (no grace on
+    Post) and the old row landed too: two events. A journal with no
+    posted_by, posted within the grace, is left to its poster on every path;
+    the retry still answers already_posted."""
+    _user(db, "checker", ["ADMIN"])
+    _user(db, "checker2", ["ADMIN"])
+    j = _submitted_journal(db, "maker")
+    assert _journal_approve(db, j["je_id"]).get("ok") is True
+    retries = []
+    res = _previous_version_post(db, monkeypatch, j["je_id"], lambda je: retries.append(
+        _post(db, j["je_id"], poster="checker2")))
+    assert res.get("ok") is True
+    assert retries[0]["error"] == "already_posted"
+    rows = _posted_rows(db, j["je_id"])
+    assert len(rows) == 1                                       # was two
+    assert rows[0]["log_id"] != je_service._posted_event_id(j["je_id"])
+    _aged(db, j["je_id"])
+    assert _post(db, j["je_id"], poster="checker2")["error"] == "already_posted"
+    assert len(_posted_rows(db, j["je_id"])) == 1
+    assert verify_chain(db.get_collection("audit_logs"))["intact"] is True
+
+
+def test_d84_a_post_retry_after_this_versions_lost_audit_repairs_at_once(db, monkeypatch):
+    """D68 kept: this version's Post stamps posted_by, so a retry right after
+    its lost audit insert repairs at once (no grace)."""
+    _user(db, "checker", ["ADMIN"])
+    j = _submitted_journal(db, "maker")
+    assert _journal_approve(db, j["je_id"]).get("ok") is True
+    real_audit = je_service._audit
+    monkeypatch.setattr(je_service, "_audit", lambda *a, **k: None)
+    assert _post(db, j["je_id"]).get("ok") is True
+    monkeypatch.setattr(je_service, "_audit", real_audit)
+    assert _post(db, j["je_id"], poster="checker2")["error"] == "already_posted"
+    rows = _posted_rows(db, j["je_id"])
+    assert [r["log_id"] for r in rows] == [je_service._posted_event_id(j["je_id"])]
+    assert rows[0]["user_id"] == "checker"
 
 
 def test_d84_a_reversed_journal_missing_its_posted_event_is_repaired(db, monkeypatch):
@@ -1420,33 +1481,42 @@ class _JournalsUnreadable:
         return getattr(self._coll, name)
 
 
+_JOURNALS_DOWN = {
+    "read_fails": lambda real: (lambda d: _JournalsUnreadable(real(d))),
+    "no_store": lambda real: (lambda d: None),          # no database handle (connect failed)
+}
+
+
+@pytest.mark.parametrize("down", sorted(_JOURNALS_DOWN))
 @pytest.mark.parametrize("route", ["list", "detail", "export"])
-def test_d84_a_journal_read_that_fails_is_an_error_not_an_empty_answer(db, monkeypatch, route):
-    """A journal read that failed at the database answered 200 with an empty
-    list / an empty Tally file, or 404 'not found' for a journal that exists.
-    Now it answers 503 (try again), and the same read afterwards works."""
+def test_d84_a_journal_read_that_fails_is_an_error_not_an_empty_answer(db, monkeypatch, route, down):
+    """A journal read that failed at the database, or found no database at
+    all, answered 200 with an empty list / an empty Tally file, or 404 'not
+    found' for a journal that exists. Now it answers 503 (try again), and
+    the same read afterwards works."""
     _user(db, "checker", ["ADMIN"])
     reader = _user(db, "accounts", ["ACCOUNTANT"])
     j = _submitted_journal(db, "maker")
     assert _journal_approve(db, j["je_id"]).get("ok") is True
     assert _post(db, j["je_id"]).get("ok") is True
     real_coll = je_service._je_coll
-    monkeypatch.setattr(je_service, "_je_coll", lambda d: _JournalsUnreadable(real_coll(d)))
+    monkeypatch.setattr(je_service, "_je_coll", _JOURNALS_DOWN[down](real_coll))
     assert _read_journal(db, monkeypatch, route, j["je_id"], reader) == 503   # was 200 / 404
     monkeypatch.setattr(je_service, "_je_coll", real_coll)
     assert _read_journal(db, monkeypatch, route, j["je_id"], reader) == 200
 
 
-def test_d84_post_route_read_that_fails_is_not_not_found(db, monkeypatch):
-    """The Post route's own read of the journal failing answered 404 'not
-    found'; it answers 503 and the retry posts."""
+@pytest.mark.parametrize("down", sorted(_JOURNALS_DOWN))
+def test_d84_post_route_read_that_fails_is_not_not_found(db, monkeypatch, down):
+    """The Post route's own read of the journal failing (or finding no
+    database) answered 404 'not found'; it answers 503 and the retry posts."""
     checker = _user(db, "checker", ["ADMIN"])
     j = _submitted_journal(db, "maker")
     assert _journal_approve(db, j["je_id"]).get("ok") is True
     monkeypatch.setattr(je_router, "_get_db", lambda: db)
     monkeypatch.setattr(je_router, "_je_require_enabled", lambda: None)
     real_coll = je_service._je_coll
-    monkeypatch.setattr(je_service, "_je_coll", lambda d: _JournalsUnreadable(real_coll(d)))
+    monkeypatch.setattr(je_service, "_je_coll", _JOURNALS_DOWN[down](real_coll))
     code, _body = _call(je_router.post_journal_entry(j["je_id"], current_user=checker))
     assert code == 503                                          # was 404
     monkeypatch.setattr(je_service, "_je_coll", real_coll)

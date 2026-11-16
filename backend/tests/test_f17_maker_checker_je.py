@@ -628,9 +628,13 @@ def test_tally_journal_voucher_xml_only_posted(db):
 
 
 def test_fail_soft_no_db():
-    # db=None -> empty reads, no-op writes, never raises.
+    # db=None -> no-op writes, a lenient get_je answers None. A journal LIST
+    # with no database raises (the routes answer 503): never "no journals" (D84).
     assert je_service.get_je(None, "JE-x") is None
-    assert je_service.list_jes(None) == []
+    with pytest.raises(RuntimeError):
+        je_service.list_jes(None)
+    with pytest.raises(RuntimeError):
+        je_service.get_je(None, "JE-x", strict=True)
     assert je_service.create_je(None, store_id=None, entity_id=None,
                                 entry_date=_entry_date(), description="x",
                                 lines=_two_line("5001", "2001", 100.0),

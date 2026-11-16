@@ -450,6 +450,8 @@ def get_je(db, je_id: str, *, strict: bool = False) -> Optional[Dict[str, Any]]:
     tell staff "not found" for a journal it could not read (D84)."""
     coll = _je_coll(db)
     if coll is None:
+        if strict:
+            raise RuntimeError("journal store unavailable")
         return None
     try:
         return coll.find_one({"je_id": je_id}, {"_id": 0})
@@ -462,8 +464,8 @@ def get_je(db, je_id: str, *, strict: bool = False) -> Optional[Dict[str, Any]]:
 def list_jes(db, *, store_id: Optional[str] = None, status: Optional[str] = None,
              maker_id: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
     coll = _je_coll(db)
-    if coll is None:
-        return []
+    if coll is None:                          # no database: never "no journals" (D84)
+        raise RuntimeError("journal store unavailable")
     q: Dict[str, Any] = {}
     if store_id:
         q["store_id"] = store_id
@@ -976,15 +978,15 @@ def _posted_event_id(je_id: str) -> str:
     return f"AUD-JE-POSTED-{je_id}"
 
 
-# A read leaves a journal posted this recently to its poster: during a rolling
-# deploy an older worker writes the event under a random log id moments after
-# the POSTED write, which the fixed id cannot refuse. The next read repairs it.
+# A repair leaves a journal with no posted_by, posted this recently, to its
+# poster: only a previous-version worker posts without posted_by, and it writes
+# the event under a random log id moments after the POSTED write, which the
+# fixed id cannot refuse. The next read (or retry) after the grace repairs it.
 _READ_REPAIR_GRACE = timedelta(minutes=2)
 
 
 def repair_posted_events(db, rows: List[Dict[str, Any]], *, poster_id: Optional[str] = None,
-                         reason: str = "recorded_on_read",
-                         skip_fresh: bool = True) -> List[Dict[str, Any]]:
+                         reason: str = "recorded_on_read") -> List[Dict[str, Any]]:
     """Write the je_posted event, once, for every POSTED journal of ``rows``
     that has none (D68/D84): Post answered but its audit insert failed, the
     process died between the POSTED write and the audit, or the POSTED write's
@@ -1000,14 +1002,16 @@ def repair_posted_events(db, rows: List[Dict[str, Any]], *, poster_id: Optional[
     posted_by was recorded names ``poster_id`` (a Post retry) or nobody.
 
     A REVERSED journal was POSTED first, so it is repaired too (its event
-    records the posting). A read (``skip_fresh``) leaves a journal posted
-    within _READ_REPAIR_GRACE alone: its poster may still be writing the
-    event, under a random id if it runs the previous version."""
+    records the posting). A journal with no posted_by posted within
+    _READ_REPAIR_GRACE is left alone on every path (read or Post retry): a
+    previous-version worker may still be writing its random-id event. This
+    version's Post and reversal stamp posted_by and write the fixed id, so
+    their journals are repaired at once."""
     fresh_after = _now() - _READ_REPAIR_GRACE
 
     def _fresh(r):
         at = r.get("posted_at")
-        return skip_fresh and isinstance(at, datetime) and at > fresh_after
+        return not r.get("posted_by") and isinstance(at, datetime) and at > fresh_after
 
     posted = {r.get("je_id"): r for r in rows
               if r.get("status") in (STATUS_POSTED, STATUS_REVERSED) and r.get("je_id")
@@ -1033,8 +1037,7 @@ def _already_posted(db, je: Dict[str, Any], poster_id: str) -> Dict[str, Any]:
     """A Post that finds the journal POSTED (a retry, a racing poster, or this
     Post's own write whose reply was lost) first writes its missing je_posted
     event (repair_posted_events), then answers already_posted."""
-    repair_posted_events(db, [je], poster_id=poster_id, reason="recorded_on_retry",
-                         skip_fresh=False)
+    repair_posted_events(db, [je], poster_id=poster_id, reason="recorded_on_retry")
     return {"ok": False, "http": 409, "error": "already_posted"}
 
 
