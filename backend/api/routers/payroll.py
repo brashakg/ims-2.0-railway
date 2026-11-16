@@ -1323,12 +1323,8 @@ async def get_incentive_summary(
 async def list_pt_slabs(current_user: dict = Depends(get_current_user)):
     """List Professional Tax slabs for all states (returns seed defaults if none stored)."""
     db = _get_db()
-    if db is None:
-        return {
-            "pt_slabs": list(DEFAULT_PT_SLABS.values()),
-            "total": len(DEFAULT_PT_SLABS),
-            "source": "defaults",
-        }
+    if db is None:  # D83: an unreadable slab is not "no stored slab"
+        raise HTTPException(status_code=503, detail="Database not available")
     try:
         slabs = [_strip_id(s) for s in db.get_collection("pt_slabs").find({})]
         if not slabs:
@@ -1351,8 +1347,8 @@ async def get_pt_slab(state_code: str, current_user: dict = Depends(get_current_
     state_code = state_code.upper()
     db = _get_db()
     default = DEFAULT_PT_SLABS.get(state_code)
-    if db is None:
-        return {"pt_slab": default}
+    if db is None:  # D83: an unreadable slab is not "no stored slab"
+        raise HTTPException(status_code=503, detail="Database not available")
     try:
         slab = db.get_collection("pt_slabs").find_one({"state_code": state_code})
         return {"pt_slab": _strip_id(slab) or default}

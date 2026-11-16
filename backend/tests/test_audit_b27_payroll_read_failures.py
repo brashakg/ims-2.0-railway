@@ -110,6 +110,9 @@ def test_staff_payslip_with_no_database_is_503_not_no_payslip(monkeypatch):
         "/api/v1/payroll/salary-sheet?month=9&year=2026",
         f"/api/v1/payroll/payslip/{EMP}",
         f"/api/v1/payroll/payslip/{EMP}/9/2026",
+        # D83: the screen showed the built-in slabs as if they were stored.
+        "/api/v1/payroll/pt-slabs",
+        "/api/v1/payroll/pt-slabs/MH",
     ],
 )
 def test_admin_payroll_reads_with_no_database_are_503_not_empty(monkeypatch, path):

@@ -152,3 +152,23 @@ describe('L3-17 Salary Setup: the admin fills the gender used for Professional T
     ]);
   });
 });
+
+describe('b27 hunt: Salary Setup never shows a failed read as "none configured"', () => {
+  it('salary setups unreadable: says so with Try again, not "No salary configs yet"', async () => {
+    payrollApi.listConfigs
+      .mockRejectedValueOnce(Object.assign(new Error('503'), { response: { status: 503 } }))
+      .mockResolvedValueOnce({ configs: [UNSET], total: 1 });
+    render(<SalarySetupPage />);
+    expect(await screen.findByText(/Salary setups could not be loaded/)).toBeInTheDocument();
+    expect(screen.queryByText(/No salary configs yet/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByText('EMP-UNSET')).toBeInTheDocument();
+  });
+
+  it('PT slabs unreadable: says so, never "No PT slabs configured" nor the Seed hint', async () => {
+    payrollApi.listPtSlabs.mockRejectedValue(new Error('503'));
+    render(<SalarySetupPage />);
+    expect(await screen.findByText(/Professional Tax slabs could not be loaded/)).toBeInTheDocument();
+    expect(screen.queryByText(/No PT slabs configured/)).not.toBeInTheDocument();
+  });
+});

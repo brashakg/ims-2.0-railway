@@ -74,6 +74,9 @@ export function SalarySetupPage() {
   const [entities, setEntities] = useState<Entity[]>([]);
   const [stores, setStores] = useState<StoreOption[]>([]);
   const [ptSlabs, setPtSlabs] = useState<PtSlab[]>([]);
+  // A read that failed is never shown as "none configured" (b27 hunt).
+  const [configsFailed, setConfigsFailed] = useState(false);
+  const [ptSlabsFailed, setPtSlabsFailed] = useState(false);
   const [loading, setLoading] = useState(true);
 
   const [modalOpen, setModalOpen] = useState(false);
@@ -92,16 +95,19 @@ export function SalarySetupPage() {
       const [cfg, ents, pt, st] = await Promise.all([
         payrollApi.listConfigs(),
         entitiesApi.list().catch(() => ({ entities: [] as Entity[], total: 0 })),
-        payrollApi.listPtSlabs().catch(() => ({ pt_slabs: [] as PtSlab[], total: 0, source: '' })),
+        payrollApi.listPtSlabs().catch(() => null),
         storeApi.getStores().catch(() => ({ stores: [] as StoreOption[] })),
       ]);
       setConfigs(cfg.configs || []);
       setEntities(ents.entities || []);
-      setPtSlabs(pt.pt_slabs || []);
+      setPtSlabsFailed(pt === null);
+      setPtSlabs(pt?.pt_slabs || []);
       setStores((st?.stores || st || []) as StoreOption[]);
       setNoAccess(null);
+      setConfigsFailed(false);
     } catch (e) {
       setConfigs([]);
+      setConfigsFailed(!isForbiddenError(e));
       // Owner ruling 2026-08-09: the salary-config list is ADMIN-only. Without
       // this branch the page shows "No salary configs yet", which reads as
       // "payroll was never set up" -- a lie for a manager who simply cannot see it.
@@ -231,7 +237,11 @@ export function SalarySetupPage() {
       {/* PT slabs strip */}
       <div className="card p-4">
         <div className="text-sm font-medium text-gray-700 mb-2">Professional Tax slabs</div>
-        {ptSlabs.length === 0 ? (
+        {ptSlabsFailed ? (
+          <p role="alert" className="text-sm text-red-700">
+            Professional Tax slabs could not be loaded. Reload the page to try again.
+          </p>
+        ) : ptSlabs.length === 0 ? (
           <p className="text-sm text-gray-500">
             No PT slabs configured. {canEdit && 'Click "Seed PT slabs" to load Jharkhand + Maharashtra defaults.'}
           </p>
@@ -258,6 +268,11 @@ export function SalarySetupPage() {
           <div className="p-6 text-center text-gray-500">Loading…</div>
         ) : noAccess ? (
           <PayrollAccessNotice message={noAccess} what="salary setup" />
+        ) : configsFailed ? (
+          <div role="alert" className="p-6 text-center text-red-700">
+            Salary setups could not be loaded.{' '}
+            <button type="button" className="underline" onClick={() => load()}>Try again</button>
+          </div>
         ) : configs.length === 0 ? (
           <div className="p-6 text-center text-gray-500">
             No salary configs yet. {canEdit && 'Add one or bulk-import via CSV.'}
