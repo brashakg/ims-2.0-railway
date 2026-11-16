@@ -522,3 +522,18 @@ def test_self_check_out_never_lands_before_the_recorded_check_in(real):
     r = c.post("/api/v1/hr/attendance/check-out", params=GEO, headers=_headers(["OPTOMETRIST"], user_id="u-o", store_id="S1"))
     assert r.status_code == 409, r.text
     assert coll.find_one({"_id": "L9"}).get("check_out") is None
+
+
+def test_put_lost_ack_then_identical_retry_audits_once(real, monkeypatch):
+    c, coll, audit = real
+    _seed(c)
+    rid = coll.find_one({"employee_id": "emp-a"})["attendance_id"]
+    upd = coll.update_one
+    monkeypatch.setattr(coll, "update_one", _lost_ack(upd))
+    r = c.put(f"/api/v1/hr/attendance/{rid}", headers=_admin(), json={"status": "HALF_DAY"})
+    assert r.status_code == 200, r.text
+    monkeypatch.setattr(coll, "update_one", upd)
+    r = c.put(f"/api/v1/hr/attendance/{rid}", headers=_admin(), json={"status": "HALF_DAY"})
+    assert r.status_code == 200 and r.json()["changed_fields"] == []
+    assert coll.find_one({"employee_id": "emp-a"})["status"] == "HALF_DAY"
+    assert [a["detail"]["changed_fields"] for a in audit.rows] == [["status"]]

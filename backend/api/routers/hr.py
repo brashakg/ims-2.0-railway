@@ -1575,15 +1575,17 @@ async def edit_attendance(
     if not updates:
         raise HTTPException(status_code=422, detail="No effective changes to apply")
 
-    updates["edited_by"] = current_user.get("user_id")
-    updates["edited_at"] = utc_now_iso()
-
     row_id = existing.get("attendance_id") or existing.get("_id")
-    _update_day_row(attendance_repo, row_id, updates)  # raises before any audit
-
+    changed = [k for k in updates if updates[k] != before.get(k)]
+    if changed:
+        # An identical retry (e.g. after a lost acknowledgement) changes
+        # nothing: no write and no second audit row.
+        updates["edited_by"] = current_user.get("user_id")
+        updates["edited_at"] = utc_now_iso()
+        _update_day_row(attendance_repo, row_id, updates)  # raises before any audit
     after = {**before, **updates}
-    changed = [k for k in updates if k not in ("edited_by", "edited_at")]
-    _audit_attendance_edit(current_user, row_id, before, after, changed)
+    if changed:
+        _audit_attendance_edit(current_user, row_id, before, after, changed)
 
     return {
         "message": "Attendance updated",
