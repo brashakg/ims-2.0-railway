@@ -10,7 +10,9 @@
 // - API_URL is REQUIRED (no default) and must be a loopback host
 //   (localhost / 127.0.0.1 / [::1]). Any other host is refused unless
 //   K6_ALLOW_REMOTE=yes AND the host is not a known production host;
-//   production hosts are refused always.
+//   production hosts are refused always. The URL must be plain
+//   http(s)://host[:port]/path: user@ prefixes, query, fragment and
+//   %-escapes are refused so the checked host is the host k6 calls.
 // - Login uses the current contract: POST /auth/login {username, password}
 //   -> {access_token}. Credentials come only from the environment.
 // - READ-ONLY: no order/payment/stock writes of any kind.
@@ -22,25 +24,45 @@ import { Rate } from 'k6/metrics';
 
 const errorRate = new Rate('errors');
 
+// Production names (and every subdomain of them). Compared after the host is
+// lower-cased and stripped of a trailing dot, so "APP.uniparallel.com." is refused.
 const PRODUCTION_HOSTS = [
   'ims-20-railway-production.up.railway.app',
+  'ims-2-0-railway-production.up.railway.app',
   'ims-2-0-railway.vercel.app',
-  'app.uniparallel.com',
+  'ims-20-railway.vercel.app',
+  'uniparallel.com',
   'bettervision.in',
+  'wizopt.com',
 ];
+// Vercel preview/branch deployments of the production project.
+const PRODUCTION_SUFFIXES = ['-avinashs-projects-b3cb6df8.vercel.app'];
 const LOOPBACK = ['localhost', '127.0.0.1', '[::1]'];
 
+// Strict parse of API_URL: scheme, then an authority of host[:port] only.
+// Userinfo ("a@b"), backslashes, percent-escapes, whitespace, query or
+// fragment are refused outright, so the host checked here is the host k6
+// connects to (INFRA-01: "https://localhost:443@app.uniparallel.com" used to
+// pass as localhost). Returns '' when the URL is not acceptable.
 function hostOf(url) {
-  const m = /^https?:\/\/([^/:]+|\[[^\]]+\])/i.exec(url || '');
-  return m ? m[1].toLowerCase() : '';
+  const m = /^https?:\/\/([^/?#\\@%\s]+)(\/[^?#\\%\s]*)?$/i.exec(url || '');
+  if (!m) return '';
+  const a = /^(\[[0-9a-f:.]+\]|[a-z0-9.-]+)(?::(\d{1,5}))?$/i.exec(m[1]);
+  if (!a || (a[2] !== undefined && (Number(a[2]) < 1 || Number(a[2]) > 65535))) return '';
+  return a[1].toLowerCase().replace(/\.+$/, '');
+}
+
+function isProduction(host) {
+  return PRODUCTION_HOSTS.some((h) => host === h || host.endsWith(`.${h}`))
+    || PRODUCTION_SUFFIXES.some((s) => host.endsWith(s));
 }
 
 const BASE_URL = __ENV.API_URL || '';
 const HOST = hostOf(BASE_URL);
 if (!HOST) {
-  throw new Error('API_URL is required (e.g. http://127.0.0.1:18600/api/v1); there is no default target.');
+  throw new Error('API_URL is required and must be plain http(s)://host[:port]/path (no user@, query or escapes), e.g. http://127.0.0.1:18600/api/v1; there is no default target.');
 }
-if (PRODUCTION_HOSTS.some((h) => HOST === h || HOST.endsWith(`.${h}`))) {
+if (isProduction(HOST)) {
   throw new Error(`Refusing to load-test production host ${HOST}.`);
 }
 if (!LOOPBACK.includes(HOST) && __ENV.K6_ALLOW_REMOTE !== 'yes') {
