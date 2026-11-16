@@ -305,6 +305,10 @@ def test_two_identical_discards_at_once_write_one_audit_row(audited, monkeypatch
     assert second["r"].status_code == 200, second["r"].text
     _the_one_audit_says(rig, draft)
     assert [o["state"] for o in _ops(rig)] == ["DONE"]
+    # The refused twin write leaves the hash chain intact.
+    from database.repositories.audit_chain import verify_chain
+
+    assert verify_chain(rig.db.get_collection("audit_logs"))["intact"] is True
 
 
 def test_a_rerun_between_the_failed_try_and_the_retry_logs_the_figure_removed(
