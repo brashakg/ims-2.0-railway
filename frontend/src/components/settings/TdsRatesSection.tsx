@@ -125,6 +125,7 @@ export function TdsRatesSection() {
                   <input
                     type="number" step="0.1" min="0" max="30"
                     value={draft[sec] ?? ''}
+                    aria-label={`${SECTION_LABELS[sec] || sec} rate (%)`}
                     disabled={!canEdit}
                     onChange={(e) => setDraft((p) => ({ ...p, [sec]: e.target.value }))}
                     className={`input-field w-24 text-right ${changed ? 'border-amber-400' : ''}`}
@@ -133,6 +134,7 @@ export function TdsRatesSection() {
                   {canEdit && def !== undefined && parseFloat(draft[sec] ?? '') !== def && (
                     <button
                       title="Reset to default"
+                      aria-label={`Reset ${SECTION_LABELS[sec] || sec} to default`}
                       onClick={() => setDraft((p) => ({ ...p, [sec]: String(def) }))}
                       className="text-gray-400 hover:text-gray-600"
                     >
