@@ -349,3 +349,184 @@ class TestDegradedIncidentLifecycle:
         await a._do_background_work()
         await a._do_background_work()
         assert len([x for x in a._alerts if x["domain"] == "system"]) == 1
+
+
+# ----- INFRA-05 round 2 (Codex #1432): alert store faults -------------------
+# Codex reproduced on native Mongo: (a) a failed alert_history read after a
+# recovery fell back to a stale memory row and hid a fresh outage, (b) a failed
+# recovery write did the same, (c) a failed insert re-emitted system.degraded on
+# every tick and the next healthy insert opened yet another incident. Each case
+# runs on mongomock AND on a real Mongo (CI's mongo:7.0 service via MONGODB_URL,
+# or a local loopback MONGO_HOST/MONGO_PORT/MONGO_DATABASE). Every collection
+# the agent touches is redirected to a throw-away prefixed name that is dropped
+# afterwards, so no existing row of a real database is read or written.
+
+
+def _native_db():
+    import uuid
+    from pymongo import MongoClient
+    url = os.getenv("MONGODB_URL")
+    name = f"sentinel_infra05_{uuid.uuid4().hex[:8]}"
+    if not url and os.getenv("MONGO_HOST") and os.getenv("MONGO_DATABASE"):
+        if os.environ["MONGO_HOST"] not in ("127.0.0.1", "localhost"):
+            pytest.skip("native sentinel tests run on loopback Mongo only")
+        url = f"mongodb://{os.environ['MONGO_HOST']}:{os.getenv('MONGO_PORT', '27017')}"
+        name = os.environ["MONGO_DATABASE"]
+    if not url:
+        pytest.skip("no real Mongo configured (CI sets MONGODB_URL)")
+    client = MongoClient(url, serverSelectionTimeoutMS=1500)
+    try:
+        client.admin.command("ping")
+    except Exception:  # noqa: BLE001
+        pytest.skip("real Mongo not reachable")
+    return client[name]
+
+
+class _Flaky:
+    """Collection proxy: methods named in `fail` raise AutoReconnect; with
+    `after` the write lands first and only the acknowledgement is lost."""
+
+    def __init__(self, col):
+        self._col = col
+        self.fail = set()
+        self.after = False
+
+    def __getattr__(self, name):
+        real = getattr(self._col, name)
+        if name not in self.fail:
+            return real
+        from pymongo.errors import AutoReconnect
+
+        def boom(*a, **k):
+            if self.after:
+                real(*a, **k)
+            raise AutoReconnect(f"injected {name}")
+        return boom
+
+
+@pytest.fixture(params=["mongomock", "native"])
+def alert_store(request):
+    import uuid
+    if request.param == "mongomock":
+        import mongomock
+        db = mongomock.MongoClient()["sentinel_infra05_mock"]
+    else:
+        db = _native_db()
+    prefix = f"t1432_{uuid.uuid4().hex[:8]}_"
+    flaky = _Flaky(db[prefix + "alert_history"])
+    yield db, prefix, flaky
+    for name in db.list_collection_names():
+        if name.startswith(prefix):
+            db.drop_collection(name)
+
+
+class TestAlertStoreFaults:
+    def _agent(self, store):
+        from unittest.mock import AsyncMock
+        from agents.implementations.sentinel import SentinelAgent
+        db, prefix, flaky = store
+        a = SentinelAgent(db=db)
+        a.get_collection = lambda n: flaky if n == "alert_history" else db[prefix + n]
+        a._run_count = 1
+        a._check_frontend_health = AsyncMock(return_value={"status": "healthy"})
+        a._check_agent_health = AsyncMock(return_value={"status": "healthy", "total": 1, "unhealthy": 0})
+        a._maybe_daily_stock_parity = AsyncMock()
+        a.state = "unhealthy"
+        a._check_db_health = AsyncMock(side_effect=lambda: {"status": a.state})
+        a._check_api_health = AsyncMock(side_effect=lambda: {"status": a.state})
+        a.events = []
+
+        async def emit(event, payload):
+            a.events.append(payload["incident"])
+        a.emit_event = emit
+        return a
+
+    async def _tick(self, a, healthy=False):
+        a.state = "healthy" if healthy else "unhealthy"
+        await a._do_background_work()
+
+    @staticmethod
+    def _rows(store):
+        return list(store[2]._col.find({"domain": "system"}).sort([("timestamp", 1), ("_id", 1)]))
+
+    async def test_read_failure_after_recovery_still_alerts_new_outage(self, alert_store):
+        a = self._agent(alert_store)
+        await self._tick(a)
+        await self._tick(a, healthy=True)
+        alert_store[2].fail = {"find_one", "find"}
+        await self._tick(a)
+        rows = self._rows(alert_store)
+        assert a.events == ["opened", "opened"], "fresh outage after recovery was suppressed"
+        assert len(rows) == 2 and rows[0].get("recovered_at") and not rows[1].get("recovered_at")
+
+    async def test_failed_recovery_write_still_alerts_and_is_retried(self, alert_store):
+        a = self._agent(alert_store)
+        await self._tick(a)
+        alert_store[2].fail = {"update_one"}
+        await self._tick(a, healthy=True)
+        alert_store[2].fail = set()
+        await self._tick(a)
+        rows = self._rows(alert_store)
+        assert a.events == ["opened", "opened"], "fresh outage after unsaved recovery was suppressed"
+        assert len(rows) == 2
+        assert rows[0].get("recovered_at") and rows[0]["recovered_score"] == 100, "recovery never persisted"
+        assert not rows[1].get("recovered_at")
+
+    async def test_insert_failure_one_event_and_persisted_once_later(self, alert_store):
+        a = self._agent(alert_store)
+        alert_store[2].fail = {"insert_one"}
+        await self._tick(a)
+        await self._tick(a)
+        assert a.events == ["opened"], "identical ticks re-emitted while the insert failed"
+        assert self._rows(alert_store) == []
+        alert_store[2].fail = set()
+        await self._tick(a)
+        rows = self._rows(alert_store)
+        assert a.events == ["opened"]
+        assert len(rows) == 1 and rows[0]["details"]["incident"] == "opened"
+
+    async def test_lost_insert_acknowledgement_is_not_duplicated(self, alert_store):
+        a = self._agent(alert_store)
+        alert_store[2].fail, alert_store[2].after = {"insert_one"}, True
+        await self._tick(a)
+        alert_store[2].fail, alert_store[2].after = set(), False
+        await self._tick(a)
+        await self._tick(a)
+        assert a.events == ["opened"]
+        assert len(self._rows(alert_store)) == 1
+        assert not getattr(a, "_pending_alert_writes", [])
+
+    async def test_recovery_while_insert_pending_persists_both_in_order(self, alert_store):
+        a = self._agent(alert_store)
+        alert_store[2].fail = {"insert_one", "update_one"}
+        await self._tick(a)
+        await self._tick(a, healthy=True)
+        alert_store[2].fail = set()
+        await self._tick(a, healthy=True)
+        rows = self._rows(alert_store)
+        assert a.events == ["opened"]
+        assert len(rows) == 1 and rows[0].get("recovered_at")
+
+    async def test_other_alerts_are_persisted_after_insert_recovers(self, alert_store):
+        a = self._agent(alert_store)
+        alert_store[2].fail = {"insert_one"}
+        await a.on_event("agent.error", {"agent_id": "pixel", "error": "boom"})
+        alert_store[2].fail = set()
+        await self._tick(a, healthy=True)
+        assert alert_store[2]._col.count_documents({"domain": "agent"}) == 1
+
+    async def test_restart_reads_open_incident_and_stays_quiet(self, alert_store):
+        a = self._agent(alert_store)
+        await self._tick(a)
+        b = self._agent(alert_store)
+        await self._tick(b)
+        assert b.events == [], "restart re-alerted an unchanged open incident"
+        assert len(self._rows(alert_store)) == 1
+
+    async def test_restart_with_unreadable_store_alerts_rather_than_hides(self, alert_store):
+        a = self._agent(alert_store)
+        await self._tick(a)
+        b = self._agent(alert_store)
+        alert_store[2].fail = {"find_one", "find"}
+        await self._tick(b)
+        assert b.events == ["opened"]

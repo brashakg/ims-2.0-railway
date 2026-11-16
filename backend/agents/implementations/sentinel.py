@@ -17,6 +17,7 @@ import logging
 import time
 import os
 import httpx
+from bson import ObjectId
 
 from ..base import JarvisAgent, AgentType, AgentResponse, AgentContext, HealthStatus
 
@@ -94,6 +95,15 @@ class SentinelAgent(JarvisAgent):
         # IST date (YYYY-MM-DD) the daily stock-parity job last ran, so the
         # ~03:00 IST tick fires once per day despite the 60s health cadence.
         self._last_stock_parity_date: Optional[str] = None
+        # INFRA-05: the system incident as THIS process last decided it, used
+        # when alert_history cannot be read or has not stored that decision
+        # yet, so a store fault can neither hide a fresh outage nor re-alert
+        # an unchanged one.
+        self._incident: Optional[Dict] = None
+        # alert_history writes that failed, retried in order on later ticks
+        # (each alert carries its own _id, so a retry after a lost
+        # acknowledgement is a duplicate-key no-op, never a second row).
+        self._pending_alert_writes: List[tuple] = []
 
     async def _do_background_work(self):
         """
@@ -144,34 +154,87 @@ class SentinelAgent(JarvisAgent):
     # An unchanged open incident is re-alerted at most this often.
     DEGRADED_REMINDER = timedelta(hours=1)
 
-    def _latest_system_alert(self) -> Optional[Dict]:
-        """Newest domain=system alert: alert_history first, memory tail if the store is unreadable."""
+    # Pending alert writes kept while alert_history is unwritable.
+    # ponytail: memory-only; a process restart drops them (the next process
+    # then re-reads the store and alerts afresh rather than staying silent).
+    MAX_PENDING_ALERT_WRITES = 1000
+
+    def _flush_alert_writes(self):
+        """Retry queued alert_history writes in order; stop at the first failure."""
+        if not self._pending_alert_writes:
+            return
         try:
             col = self.get_collection("alert_history")
-            if col is not None:
-                return col.find_one({"domain": "system"}, sort=[("timestamp", -1), ("_id", -1)])
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[SENTINEL] alert store unavailable: {e}")
+            return
+        if col is None:
+            self._pending_alert_writes.clear()  # no database configured: nothing to persist to
+            return
+        from pymongo.errors import DuplicateKeyError
+        done = 0
+        for op, doc_id, payload in self._pending_alert_writes:
+            try:
+                if op == "insert":
+                    try:
+                        col.insert_one(payload)
+                    except DuplicateKeyError:
+                        pass  # an earlier attempt landed; only its reply was lost
+                else:
+                    col.update_one({"_id": doc_id}, {"$set": payload})
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[SENTINEL] Failed to store alert ({op}); will retry: {e}")
+                break
+            done += 1
+        del self._pending_alert_writes[:done]
+
+    def _queue_alert_write(self, op: str, doc_id, payload: Dict):
+        self._pending_alert_writes.append((op, doc_id, payload))
+        if len(self._pending_alert_writes) > self.MAX_PENDING_ALERT_WRITES:
+            logger.error("[SENTINEL] alert store down too long; dropping oldest unsaved alert write")
+            del self._pending_alert_writes[0]
+        self._flush_alert_writes()
+
+    def _current_incident(self) -> Optional[Dict]:
+        """The newest system alert. alert_history is the truth when it can be
+        read and already holds this agent's latest decision; the in-memory
+        record covers what the store does not know yet (an insert or a
+        recovery stamp still queued) and a failed read. Never a stale row:
+        a recovery decided here is kept even if the store has not caught up."""
+        mem = self._incident
+        try:
+            col = self.get_collection("alert_history")
+            row = None if col is None else col.find_one(
+                {"domain": "system"}, sort=[("timestamp", -1), ("_id", -1)]
+            )
+        except Exception as e:  # noqa: BLE001
             logger.warning(f"[SENTINEL] Failed to read last system alert: {e}")
-        return next((a for a in reversed(self._alerts) if a.get("domain") == "system"), None)
+            return mem
+        if col is None:
+            return mem  # no database configured
+        if mem is not None and any(
+            op == "insert" and i == mem.get("_id") for op, i, _ in self._pending_alert_writes
+        ):
+            return mem  # our newest alert is not stored yet
+        if row is not None and mem is not None and row.get("_id") == mem.get("_id"):
+            for k in ("recovered_at", "recovered_score"):
+                if mem.get(k) is not None and row.get(k) is None:
+                    row[k] = mem[k]  # recovery decided here, its stamp still queued
+        self._incident = row
+        return row
 
     async def _record_health_transition(self, results: Dict[str, Any]):
-        last = self._latest_system_alert()
+        self._flush_alert_writes()
+        last = self._current_incident()
         open_incident = last is not None and not last.get("recovered_at")
         now = datetime.now(timezone.utc)
 
         if self._health_score >= 70:
             if open_incident:
-                last["recovered_at"] = now
-                last["recovered_score"] = self._health_score
-                try:
-                    col = self.get_collection("alert_history")
-                    if col is not None and last.get("_id") is not None:
-                        col.update_one(
-                            {"_id": last["_id"]},
-                            {"$set": {"recovered_at": now, "recovered_score": self._health_score}},
-                        )
-                except Exception as e:
-                    logger.warning(f"[SENTINEL] Failed to record recovery: {e}")
+                fields = {"recovered_at": now, "recovered_score": self._health_score}
+                last.update(fields)
+                if last.get("_id") is not None:
+                    self._queue_alert_write("recover", last["_id"], fields)
                 logger.info(f"[SENTINEL] System health recovered: {self._health_score}/100")
             return
 
@@ -195,7 +258,7 @@ class SentinelAgent(JarvisAgent):
                 return
             kind = "reminder" if same else "changed"
 
-        await self._create_alert(
+        self._incident = await self._create_alert(
             severity=severity,
             domain="system",
             message=(
@@ -665,16 +728,14 @@ class SentinelAgent(JarvisAgent):
             "details": details or {},
             "timestamp": datetime.now(timezone.utc),
             "acknowledged": False,
+            "_id": ObjectId(),
         }
         self._alerts.append(alert)
         # Keep last 100 alerts in memory
         if len(self._alerts) > 100:
             self._alerts = self._alerts[-100:]
 
-        # Store in MongoDB
-        try:
-            col = self.get_collection("alert_history")
-            if col is not None:
-                col.insert_one(alert)
-        except Exception as e:
-            logger.warning(f"[SENTINEL] Failed to store alert: {e}")
+        # Store in MongoDB; a failed insert is queued and retried on later
+        # ticks (the pre-assigned _id makes a retry after a lost reply a no-op).
+        self._queue_alert_write("insert", alert["_id"], alert)
+        return alert
