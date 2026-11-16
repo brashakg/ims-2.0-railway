@@ -155,6 +155,24 @@ class TestSentinelEndpoint:
         )
         assert r.status_code == 200
 
+    @pytest.mark.parametrize("broken", ["health_checks", "alert_history"])
+    def test_unreadable_store_is_503_not_empty(self, client, auth_headers, monkeypatch, broken):
+        """A failed read must not answer 200 'no checks / no alerts' (a false all-clear)."""
+        import mongomock
+        from api.routers import jarvis
+        from pymongo.errors import AutoReconnect
+
+        db = mongomock.MongoClient()["sentinel_read"]
+        good = {"health_checks": db["health_checks"], "alert_history": db["alert_history"]}
+
+        class Broken:
+            def find(self, *a, **k):
+                raise AutoReconnect("injected read failure")
+
+        monkeypatch.setattr(jarvis, "get_db_collection", lambda n: Broken() if n == broken else good.get(n))
+        r = client.get("/api/v1/jarvis/agents/sentinel/health", headers=auth_headers)
+        assert r.status_code == 503
+
     def test_alerts_limit_bounds(self, client, auth_headers):
         r = client.get(
             "/api/v1/jarvis/agents/sentinel/health?alerts_limit=500",
