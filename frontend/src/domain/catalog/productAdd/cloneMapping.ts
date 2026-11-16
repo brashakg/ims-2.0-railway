@@ -1,6 +1,6 @@
 import type { ProductFormValues } from './formModel';
 import { resolveHsnGst } from './formModel';
-import { CANONICAL_TO_PICKER } from './categoryFields';
+import { CANONICAL_TO_PICKER, CATEGORY_FIELDS } from './categoryFields';
 
 // ============================================================================
 // Clone support (Phase C): map a persisted product doc back into the Quick Add
@@ -66,16 +66,25 @@ export interface ProductDoc {
  *  canonical one the form, the registry and the save use: a twin of a filled
  *  canonical key is dropped (the canonical value is what the form shows), and
  *  a twin of a blank / absent one supplies its value under the canonical key.
- *  Any other key (a custom field, a spaced import label) passes unchanged. */
+ *  A camelCase key is only a twin when its snake_case spelling is stored
+ *  beside it or is a known form field; any other key (a camelCase custom
+ *  field such as vendorDisplayHint, a spaced import label) passes unchanged,
+ *  so a save never manufactures a second stored spelling of it (D51). */
+const KNOWN_FIELDS: ReadonlySet<string> = new Set(
+  Object.values(CATEGORY_FIELDS).flatMap((fs) => fs.map((f) => f.name)),
+);
+const toSnake = (k: string) => k.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
+
 export function canonicalAttributes(src: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
-  const isCamel = (k: string) => /^[a-z][a-z0-9]*[A-Z][a-zA-Z0-9]*$/.test(k);
+  const isTwin = (k: string) => /^[a-z][a-z0-9]*[A-Z][a-zA-Z0-9]*$/.test(k)
+    && (toSnake(k) in src || KNOWN_FIELDS.has(toSnake(k)));
   Object.entries(src).forEach(([k, v]) => {
-    if (!isCamel(k)) out[k] = v;
+    if (!isTwin(k)) out[k] = v;
   });
   Object.entries(src).forEach(([k, v]) => {
-    if (!isCamel(k)) return;
-    const snake = k.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
+    if (!isTwin(k)) return;
+    const snake = toSnake(k);
     if (str(out[snake]).trim()) return;
     if (str(v).trim() || !(snake in out)) out[snake] = v;
   });
