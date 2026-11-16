@@ -7507,11 +7507,13 @@ def _return_slot_index_ok() -> bool:
     runs in one process and has no index to check."""
     from pymongo.collection import Collection
 
-    stock_repo = get_stock_repository()
-    coll = getattr(stock_repo, "collection", None)
-    if not isinstance(coll, Collection):
-        return True
     try:
+        # No stock repository (no database): nothing can be written, nothing
+        # can double. One that cannot even be built is unknown: refused below.
+        stock_repo = get_stock_repository()
+        coll = getattr(stock_repo, "collection", None)
+        if stock_repo is None or not isinstance(coll, Collection):
+            return True
         names = coll.index_information() or {}
         ok = all(n in names for n in _RETURN_SLOT_INDEXES)
     except Exception:  # noqa: BLE001
