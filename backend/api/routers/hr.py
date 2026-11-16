@@ -1383,17 +1383,20 @@ async def mark_attendance(
                     status_code=422, detail="check_out must be after check_in"
                 )
         row_id = existing.get("attendance_id") or existing.get("_id")
-        before = {k: v for k, v in existing.items() if k != "_id"}
+        _settle_attendance_audit(attendance_repo, existing)
+        before = {k: v for k, v in existing.items() if k not in ("_id", "audit_pending")}
         changed = [
             k
             for k in ("store_id", "status", "check_in", "check_out")
             if k in data and data[k] != before.get(k)
         ]
+        if changed:
+            data["audit_pending"] = _pending_attendance_audit(
+                current_user, before, data, changed
+            )
         _update_day_row(attendance_repo, row_id, data)  # raises before any audit
         if changed:
-            _audit_attendance_edit(
-                current_user, row_id, before, {**before, **data}, changed
-            )
+            _settle_attendance_audit(attendance_repo, {**before, **data})
     else:
         data["attendance_id"] = str(uuid.uuid4())
         _create_day_row_safe(attendance_repo, data)
@@ -1433,36 +1436,77 @@ def _require_employee_at_store(employee_id: str, store_id: Optional[str]) -> Non
 _ATTENDANCE_EDIT_ROLES = ("ADMIN", "STORE_MANAGER")
 
 
-def _audit_attendance_edit(current_user, attendance_id, before, after, changed):
+def _audit_attendance_edit(current_user, attendance_id, before, after, changed, log_id=None) -> bool:
     """Write an immutable audit row for a manager attendance correction.
 
     Fail-soft (SYSTEM_INTENT 'Audit Everything', but the correction must not 500
-    because the audit write hiccuped). Records before/after states + the set of
-    changed fields, keyed entity ATTENDANCE."""
+    because the audit write hiccuped): returns False when the row was not
+    written, so the caller keeps the row's audit_pending marker. Records
+    before/after states + the set of changed fields, keyed entity ATTENDANCE."""
     try:
         audit_repo = get_audit_repository()
         if audit_repo is None:
-            return
-        audit_repo.create(
-            {
-                "action": "ATTENDANCE_EDIT",
-                "entity_type": "ATTENDANCE",
-                "entity_id": attendance_id,
-                "store_id": (after or {}).get("store_id")
-                or (before or {}).get("store_id"),
-                "user_id": current_user.get("user_id"),
-                "user_name": current_user.get("full_name")
-                or current_user.get("username"),
-                "timestamp": datetime.utcnow(),
-                "severity": "INFO",
-                "source": "domain",
-                "detail": {"changed_fields": changed},
-                "before_state": before,
-                "after_state": after,
-            }
-        )
+            return True
+        doc = {
+            "action": "ATTENDANCE_EDIT",
+            "entity_type": "ATTENDANCE",
+            "entity_id": attendance_id,
+            "store_id": (after or {}).get("store_id")
+            or (before or {}).get("store_id"),
+            "user_id": current_user.get("user_id"),
+            "user_name": current_user.get("full_name")
+            or current_user.get("username"),
+            "timestamp": datetime.utcnow(),
+            "severity": "INFO",
+            "source": "domain",
+            "detail": {"changed_fields": changed},
+            "before_state": before,
+            "after_state": after,
+        }
+        if log_id:
+            doc["log_id"] = log_id
+        return audit_repo.create(doc) is not None
     except Exception:  # noqa: BLE001 - audit must never break the correction
-        pass
+        return False
+
+
+def _pending_attendance_audit(current_user, before: dict, data: dict, changed: list) -> dict:
+    """The ATTENDANCE_EDIT a correction owes, stored ON the row in the same
+    write as the correction. If the acknowledgement and the read-back are both
+    lost (503), the next touch of the row still writes the audit; see
+    _settle_attendance_audit."""
+    return {
+        "log_id": f"ATTEDIT-{uuid.uuid4()}",
+        "changed": changed,
+        "before": {k: before.get(k) for k in data},
+        "user_id": current_user.get("user_id"),
+        "full_name": current_user.get("full_name") or current_user.get("username"),
+    }
+
+
+def _settle_attendance_audit(attendance_repo, row: Optional[dict]) -> None:
+    """Write the audit row a landed correction still owes, then clear the marker.
+
+    Idempotent: the audit row's id is fixed by the marker, so a marker whose
+    audit landed but whose clearing failed is never audited twice. A failed
+    audit keeps the marker for the next touch."""
+    pending = (row or {}).get("audit_pending")
+    if not pending:
+        return
+    row_id = row.get("attendance_id") or row.get("_id")
+    after = {k: v for k, v in row.items() if k not in ("_id", "audit_pending")}
+    before = {**after, **(pending.get("before") or {})}
+    audit_repo = get_audit_repository()
+    already = audit_repo is not None and audit_repo.find_by_id(pending["log_id"]) is not None
+    if not already and not _audit_attendance_edit(
+        {"user_id": pending.get("user_id"), "full_name": pending.get("full_name")},
+        row_id, before, after, pending.get("changed") or [], log_id=pending["log_id"],
+    ):
+        return
+    try:
+        attendance_repo.update(row_id, {"audit_pending": None})
+    except AttendanceUnavailable:
+        pass  # the marker stays; the audit id stops a second audit row
 
 
 @router.put("/attendance/{attendance_id}")
@@ -1515,7 +1559,8 @@ async def edit_attendance(
         _require_employee_at_store(existing.get("employee_id"), assign)
         updates["store_id"] = assign
 
-    before = {k: v for k, v in existing.items() if k != "_id"}
+    _settle_attendance_audit(attendance_repo, existing)
+    before = {k: v for k, v in existing.items() if k not in ("_id", "audit_pending")}
 
     if "status" in sent:
         updates["status"] = request.status
@@ -1579,13 +1624,18 @@ async def edit_attendance(
     changed = [k for k in updates if updates[k] != before.get(k)]
     if changed:
         # An identical retry (e.g. after a lost acknowledgement) changes
-        # nothing: no write and no second audit row.
+        # nothing: no write and no second audit row. The audit a landed but
+        # unacknowledged correction owes was settled above from its marker.
         updates["edited_by"] = current_user.get("user_id")
         updates["edited_at"] = utc_now_iso()
+        updates["audit_pending"] = _pending_attendance_audit(
+            current_user, before, updates, changed
+        )
         _update_day_row(attendance_repo, row_id, updates)  # raises before any audit
     after = {**before, **updates}
     if changed:
-        _audit_attendance_edit(current_user, row_id, before, after, changed)
+        _settle_attendance_audit(attendance_repo, after)
+    after.pop("audit_pending", None)
 
     return {
         "message": "Attendance updated",

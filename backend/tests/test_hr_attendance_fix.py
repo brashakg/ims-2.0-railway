@@ -143,6 +143,9 @@ class _FakeAuditRepo:
         self.rows.append(dict(row))
         return row
 
+    def find_by_id(self, log_id):
+        return next((r for r in self.rows if r.get("log_id") == log_id), None)
+
 
 def _make_app(
     monkeypatch,

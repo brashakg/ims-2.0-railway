@@ -537,3 +537,79 @@ def test_put_lost_ack_then_identical_retry_audits_once(real, monkeypatch):
     assert r.status_code == 200 and r.json()["changed_fields"] == []
     assert coll.find_one({"employee_id": "emp-a"})["status"] == "HALF_DAY"
     assert [a["detail"]["changed_fields"] for a in audit.rows] == [["status"]]
+
+
+def _lost_ack_and_read(coll, monkeypatch):
+    """The write lands, its acknowledgement is lost AND the reconcile read-back
+    fails too (primary still down): the request is a 503."""
+    upd, find = coll.update_one, coll.find_one
+    state = {"reads": 0}
+
+    def update_one(*a, **kw):
+        upd(*a, **kw)
+        state["reads"] = 1
+        raise AutoReconnect("write landed, acknowledgement lost")
+
+    def find_one(*a, **kw):
+        if state["reads"]:
+            state["reads"] -= 1
+            raise AutoReconnect("read-back failed too")
+        return find(*a, **kw)
+
+    monkeypatch.setattr(coll, "update_one", update_one)
+    monkeypatch.setattr(coll, "find_one", find_one)
+    return lambda: (monkeypatch.setattr(coll, "update_one", upd), monkeypatch.setattr(coll, "find_one", find))
+
+
+@pytest.mark.parametrize("door", ["put", "mark"])
+def test_landed_correction_with_lost_ack_and_failed_readback_is_audited_on_retry(real, monkeypatch, door):
+    """Reviewers 2026-11-16: the correction landed but the reply was 503, so the
+    manager retries the identical correction. The retry changes nothing, yet the
+    ATTENDANCE_EDIT the landed correction owes must be written -- exactly once,
+    with the true before-state."""
+    c, coll, audit = real
+    _seed(c)
+    rid = coll.find_one({"employee_id": "emp-a"})["attendance_id"]
+
+    def send():
+        if door == "put":
+            return c.put(f"/api/v1/hr/attendance/{rid}", headers=_admin(), json={"status": "HALF_DAY"})
+        return c.post("/api/v1/hr/attendance/mark", headers=_admin(), json={"employee_id": "emp-a", "store_id": "S1", "date": DAY, "status": "HALF_DAY"})
+
+    restore = _lost_ack_and_read(coll, monkeypatch)
+    assert send().status_code == 503
+    restore()
+    assert coll.find_one({"_id": rid})["status"] == "HALF_DAY"  # it landed
+    assert audit.rows == []
+    for _ in range(2):  # identical retry, then once more
+        assert send().status_code == 200
+    rows = [a for a in audit.rows if a["action"] == "ATTENDANCE_EDIT"]
+    assert [a["detail"]["changed_fields"] for a in rows] == [["status"]]
+    assert rows[0]["before_state"]["status"] == "PRESENT"
+    assert rows[0]["after_state"]["status"] == "HALF_DAY"
+    assert rows[0]["user_id"] == "adm"
+    assert not coll.find_one({"_id": rid}).get("audit_pending")
+
+
+def test_pending_audit_is_not_duplicated_when_marker_clear_fails(real, monkeypatch):
+    """The owed audit landed but clearing the row's marker failed: the next
+    touch must not write a second audit row (the audit id is fixed)."""
+    c, coll, audit = real
+    _seed(c)
+    rid = coll.find_one({"employee_id": "emp-a"})["attendance_id"]
+    upd = coll.update_one
+    calls = {"n": 0}
+
+    def update_one(*a, **kw):
+        calls["n"] += 1
+        if calls["n"] == 2:  # 1 = the correction, 2 = clearing the marker
+            raise AutoReconnect("marker clear failed")
+        return upd(*a, **kw)
+
+    monkeypatch.setattr(coll, "update_one", update_one)
+    assert c.put(f"/api/v1/hr/attendance/{rid}", headers=_admin(), json={"status": "HALF_DAY"}).status_code == 200
+    monkeypatch.setattr(coll, "update_one", upd)
+    assert coll.find_one({"_id": rid}).get("audit_pending")
+    assert c.put(f"/api/v1/hr/attendance/{rid}", headers=_admin(), json={"status": "HALF_DAY"}).status_code == 200
+    assert [a["detail"]["changed_fields"] for a in audit.rows] == [["status"]]
+    assert not coll.find_one({"_id": rid}).get("audit_pending")
