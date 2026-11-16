@@ -817,7 +817,7 @@ def test_hq_je_not_readable_by_store_roles():
 
     hq_je = {"je_id": "JE-HQ1", "store_id": None, "status": "POSTED", "lines": []}
     with _m.patch.object(fin, "_get_db", lambda: object()), \
-         _m.patch.object(fin.je_service, "get_je", lambda _db, _id: dict(hq_je)):
+         _m.patch.object(fin.je_service, "get_je", lambda _db, _id, **_k: dict(hq_je)):
         acct = {"roles": ["ACCOUNTANT"], "user_id": "a1",
                 "active_store_id": "S1", "store_ids": ["S1"]}
         try:
