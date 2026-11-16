@@ -8,6 +8,9 @@
 // ============================================================================
 
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+// Loaded before the router below mounts: its Back / Forward listener must run
+// before the router's own, or a dirty page is left before it can ask (D51).
+import './hooks/useUnsavedGuard';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Suspense, lazy } from 'react';
 import { AuthProvider } from './context/AuthContext';

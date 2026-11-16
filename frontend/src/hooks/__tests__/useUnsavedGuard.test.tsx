@@ -111,3 +111,13 @@ describe('useUnsavedGuard (D51)', () => {
     expect(where()).toBe('/catalog');
   });
 });
+
+describe('Back / Forward listener order (real Chrome calls window listeners in the order added)', () => {
+  it('App.tsx loads the guard module before <BrowserRouter> mounts', async () => {
+    const { readFileSync } = await import('node:fs');
+    const app = readFileSync(`${process.cwd()}/src/App.tsx`, 'utf8');
+    const guard = app.indexOf("import './hooks/useUnsavedGuard';");
+    expect(guard).toBeGreaterThan(-1);
+    expect(guard).toBeLessThan(app.indexOf('<BrowserRouter>'));
+  });
+});
