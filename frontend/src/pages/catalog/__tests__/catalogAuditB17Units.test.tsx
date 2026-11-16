@@ -175,10 +175,11 @@ describe('CAT-05/06: Share Catalogue search', () => {
   });
 });
 
-describe('UI-02 / F-1435-B (D74): filter pills on a touch screen', () => {
-  it('index.css makes every .ims-chip a 44px tap target under a coarse pointer', async () => {
+describe('UI-02 / F-1435-B (D74): filter pills on a touch screen or tablet width', () => {
+  it('index.css makes every .ims-chip a 44px tap target on touch AND at tablet width (any pointer)', async () => {
     const { readFileSync } = await import('node:fs');
     const css = readFileSync(`${process.cwd()}/src/index.css`, 'utf8');
-    expect(css).toMatch(/@media \(pointer: coarse\) \{\s*\.ims-chip \{ min-height: 44px; \}/);
+    // A 1024x768 tablet viewport measured with a mouse pointer must get 44px too.
+    expect(css).toMatch(/@media \(pointer: coarse\), \(max-width: 1024px\) \{\s*\.ims-chip \{ min-height: 44px; \}/);
   });
 });

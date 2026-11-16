@@ -3762,9 +3762,10 @@ main input[type="date"] { background-color: #fff; border-color: #d1d5db; color: 
   background: #f9fafb;                 /* gray-50 */
   border-color: #d1d5db;               /* gray-300 */
 }
-/* UI-02 (D74, F-1435-B): on a touch screen every filter pill is a 44px tap
-   target; a mouse keeps the compact 27px pill. */
-@media (pointer: coarse) {
+/* UI-02 (D74, F-1435-B): on a touch screen, and at tablet width or narrower
+   whatever the pointer, every filter pill is a 44px tap target; a desktop-width
+   mouse screen keeps the compact 27px pill. */
+@media (pointer: coarse), (max-width: 1024px) {
   .ims-chip { min-height: 44px; }
 }
 /* Selected: BV red text on a faint red tint. Hover state pinned so a selected
