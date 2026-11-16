@@ -83,11 +83,17 @@ export interface ReconRow {
   closed_by_name?: string | null;
   closed_at?: string | null;
   zread_number?: string | null;
+  // D88: a Cash Register close that did not land on one till drawer of its
+  // own, on a store-day that also has a Z-Read row: shown, but left out of
+  // the totals (the till's rows already hold that cash).
+  also_counted_on_till?: boolean;
   signoff?: ReconSignoff;
 }
 
 export interface ReconTotals {
   sessions: number;
+  // D88: rows shown but not added to the totals.
+  also_counted_on_till?: number;
   balanced: number;
   overage: number;
   shortage: number;

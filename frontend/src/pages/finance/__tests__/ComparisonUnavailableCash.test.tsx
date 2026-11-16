@@ -116,3 +116,31 @@ describe('Cash reconciliation - D86(3)', () => {
     expect(screen.queryByText('Not available')).toBeNull();
   });
 });
+
+describe('Cash reconciliation - D88(1)', () => {
+  it('a close also counted on the till is marked and the footer says it is not added', async () => {
+    recon.summary.mockResolvedValue({
+      rows: [
+        row({ session_id: 'TILL-B', counted_cash: 3000, expected_cash: 3000, variance: 0 }),
+        row({ session_id: 'CR-1', source: 'CASH_REGISTER', blind: false, counted_cash: 3000,
+              cash_sales: null, expected_cash: null, variance_status: 'COMPARISON_UNAVAILABLE',
+              also_counted_on_till: true }),
+      ],
+      totals: { sessions: 1, also_counted_on_till: 1, cash_sales: 3000, counted_cash: 3000 },
+    });
+    render(<CashReconciliationPage />);
+    expect(await screen.findByText('Also counted on the till')).toBeTruthy();
+    expect(screen.getByText('1 also counted on the till, not added')).toBeTruthy();
+  });
+
+  it('CONTROL: an ordinary close carries no marker', async () => {
+    recon.summary.mockResolvedValue({
+      rows: [row({ session_id: 'CR-2', source: 'CASH_REGISTER', blind: false })],
+      totals: { sessions: 1, also_counted_on_till: 0, cash_sales: 3000 },
+    });
+    render(<CashReconciliationPage />);
+    await screen.findAllByText('BV-1');
+    expect(screen.queryByText('Also counted on the till')).toBeNull();
+    expect(screen.queryByText(/not added/)).toBeNull();
+  });
+});

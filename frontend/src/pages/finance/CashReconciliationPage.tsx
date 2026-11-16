@@ -415,6 +415,11 @@ export default function CashReconciliationPage() {
                   <td className="px-2 py-2" />
                   <td className="px-3 py-2" colSpan={3}>
                     Totals · {totals.sessions} session{totals.sessions === 1 ? '' : 's'}
+                    {(totals.also_counted_on_till ?? 0) > 0 && (
+                      <span className="block text-xs font-normal text-gray-500">
+                        {totals.also_counted_on_till} also counted on the till, not added
+                      </span>
+                    )}
                   </td>
                   <td className="px-3 py-2 text-right tabular-nums">{inr(totals.opening_float)}</td>
                   <td className="px-3 py-2 text-right tabular-nums">{inr(totals.cash_sales)}</td>
@@ -471,6 +476,11 @@ function RowGroup({
         <td className="px-3 py-2 text-gray-700">{row.store_name}</td>
         <td className="px-3 py-2">
           <SourceChip source={row.source} blind={row.blind} />
+          {row.also_counted_on_till && (
+            <span className="ml-1 inline-flex items-center rounded px-2 py-0.5 text-xs font-medium bg-amber-50 text-amber-700">
+              Also counted on the till
+            </span>
+          )}
         </td>
         <td className="px-3 py-2 text-right text-gray-600">{inr(row.opening_float)}</td>
         <td className="px-3 py-2 text-right text-gray-600">{row.cash_sales == null ? 'Not available' : inr(row.cash_sales)}</td>

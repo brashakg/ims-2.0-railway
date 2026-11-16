@@ -2887,3 +2887,196 @@ def test_r10_uncompared_count_task_on_real_mongo(monkeypatch):
     finally:
         client.drop_database(name)
         client.close()
+
+
+
+# ===========================================================================
+# D88(1)  The cash reconciliation totals never count one drawer twice
+# ===========================================================================
+
+
+def _recon_summary(db, monkeypatch, from_date=DATE):
+    monkeypatch.setattr(finance_router.cash_recon, "_get_db", lambda: db)
+    return asyncio.run(finance_router.cash_recon.cash_reconciliation_summary(
+        from_date=from_date, to_date=DATE, store_id=STORE, current_user=MANAGER))
+
+
+def _count_and_lock(db, sid, pieces):
+    assert till.blind_submit(
+        db, sid, blind_denominations=[{"face": 500, "kind": "note", "pieces": pieces}],
+        actor=CASHIER)["ok"]
+    assert till.lock_session(db, sid, actor=MANAGER)["ok"]
+
+
+def _money_totals(res):
+    t = res["totals"]
+    return {k: t[k] for k in (
+        "opening_float", "cash_sales", "cash_refunds", "cash_expenses",
+        "expected_cash", "counted_cash", "variance")}
+
+
+class TestD88OneDrawerNeverTwiceInTheTotals:
+    """D88(1): a Cash Register close whose count did not reach the till is
+    later counted on the Z-Read. Both rows used to add their cash: the
+    builder probe read counted Rs 7,000 for a Rs 4,000 day (A 1,000 + the
+    close 3,000 + B own 3,000)."""
+
+    def test_uncompared_close_then_zread_counts_the_day_once(self, db, monkeypatch):
+        a, b = _drawer_a_then_b(db, a_sales=[1000], b_sales=[3000])
+        restore = _fail_till_reads(db.get_collection("till_sessions"), counted_only=False)
+        try:
+            out = _cr_close_b(db, monkeypatch, 6)
+        finally:
+            restore()
+        assert out["variance_status"] == "COMPARISON_UNAVAILABLE"
+        _count_and_lock(db, b, 6)
+        res = _recon_summary(db, monkeypatch)
+        assert _money_totals(res) == {
+            "opening_float": 0.0, "cash_sales": 4000.0, "cash_refunds": 0.0,
+            "cash_expenses": 0.0, "expected_cash": 4000.0, "counted_cash": 4000.0,
+            "variance": 0.0,
+        }
+        cr = [r for r in res["rows"] if r["source"] == "CASH_REGISTER"]
+        # The row still shows, with its own count, marked.
+        assert len(cr) == 1 and cr[0]["counted_cash"] == 3000.0
+        assert cr[0]["also_counted_on_till"] is True
+        assert res["totals"]["sessions"] == 2
+        assert res["totals"]["also_counted_on_till"] == 1
+
+    def test_several_drawers_failed_link_gives_no_doubled_cash_sales(self, db, monkeypatch):
+        a, b = _drawer_a_then_b(db, a_sales=[1000], b_sales=[3000])
+        restore = _fail_till_reads(db.get_collection("till_sessions"), counted_only=True)
+        try:
+            out = _cr_close_b(db, monkeypatch, 6)
+        finally:
+            restore()
+        assert (out["variance_status"], out["till_link_ok"]) == ("SEVERAL_DRAWERS", False)
+        _count_and_lock(db, b, 6)
+        res = _recon_summary(db, monkeypatch)
+        money = _money_totals(res)
+        assert (money["cash_sales"], money["counted_cash"], money["expected_cash"]) == (
+            4000.0, 4000.0, 4000.0)
+        cr = [r for r in res["rows"] if r["source"] == "CASH_REGISTER"]
+        assert cr[0]["also_counted_on_till"] is True
+
+    def test_one_drawer_failed_link_with_a_comparison_is_not_added_again(self, db, monkeypatch):
+        """Same class, one-drawer day: the link failed after the drawers were
+        read, so the close kept its comparison (BALANCED) and its count never
+        reached the till; the drawer is then counted on the Z-Read."""
+        sid = till.open_session(
+            db, store_id=STORE, session_date=DATE, opening_float_paisa=0, actor=CASHIER,
+        )["session"]["session_id"]
+        _cash_sale(db, 3000)
+        restore = _fail_till_reads(db.get_collection("till_sessions"), counted_only=True)
+        try:
+            out = _cr_close_b(db, monkeypatch, 6)
+        finally:
+            restore()
+        assert out["till_link_ok"] is False and out["variance_status"] == "BALANCED"
+        _count_and_lock(db, sid, 6)
+        res = _recon_summary(db, monkeypatch)
+        money = _money_totals(res)
+        assert (money["counted_cash"], money["cash_sales"]) == (3000.0, 3000.0)
+        assert res["totals"]["balanced"] == 1
+
+    def test_control_a_lone_unlinked_close_still_counts(self, db, monkeypatch):
+        """No till count that day: the close's counted cash is the only record
+        of the drawer and keeps adding to the totals."""
+        till.open_session(db, store_id=STORE, session_date=DATE, opening_float_paisa=0, actor=CASHIER)
+        _cash_sale(db, 3000)
+        restore = _fail_till_reads(db.get_collection("till_sessions"), counted_only=False)
+        try:
+            out = _cr_close_b(db, monkeypatch, 6)
+        finally:
+            restore()
+        assert out["variance_status"] == "COMPARISON_UNAVAILABLE"
+        res = _recon_summary(db, monkeypatch)
+        assert res["totals"]["counted_cash"] == 3000.0
+        cr = [r for r in res["rows"] if r["source"] == "CASH_REGISTER"]
+        assert cr[0]["also_counted_on_till"] is False
+        assert res["totals"]["also_counted_on_till"] == 0
+
+    def test_control_another_day_does_not_hide_the_close(self, db, monkeypatch):
+        """Only a till count of the SAME store and IST day takes the close out."""
+        till.open_session(db, store_id=STORE, session_date=DATE, opening_float_paisa=0, actor=CASHIER)
+        _cash_sale(db, 3000)
+        restore = _fail_till_reads(db.get_collection("till_sessions"), counted_only=False)
+        try:
+            _cr_close_b(db, monkeypatch, 6)
+        finally:
+            restore()
+        db.get_collection("till_sessions").insert_one({
+            "_id": "TILL-OTHER-DAY", "session_id": "TILL-OTHER-DAY", "store_id": STORE,
+            "session_date": "2026-11-03", "status": "LOCKED", "blind_count_paisa": 50000,
+            "expected_cash_paisa": 50000, "variance_paisa": 0, "variance_status": "BALANCED",
+        })
+        res = _recon_summary(db, monkeypatch, from_date="2026-11-03")
+        assert res["totals"]["counted_cash"] == 3500.0
+        assert res["totals"]["also_counted_on_till"] == 0
+
+    def test_linked_close_before_the_drawer_locks_is_not_added_beside_a(self, db, monkeypatch):
+        """Same failure class, linked close: B counted through Cash Register
+        (BLIND_SUBMITTED on the till, not yet a Z-Read row) beside locked A.
+        The close's window cash is the whole day (Rs 4,000) on top of A's own
+        Rs 1,000 row. Out of the totals until B locks, then folded into B."""
+        a, b = _drawer_a_then_b(db, a_sales=[1000], b_sales=[3000])
+        out = _cr_close_b(db, monkeypatch, 6)
+        assert (out["variance_status"], out["till_link_ok"]) == ("SEVERAL_DRAWERS", True)
+        res = _recon_summary(db, monkeypatch)
+        money = _money_totals(res)
+        assert (money["cash_sales"], money["expected_cash"]) == (1000.0, 1000.0)
+        assert till.lock_session(db, b, actor=MANAGER)["ok"]
+        res = _recon_summary(db, monkeypatch)
+        assert [r["source"] for r in res["rows"]] == ["BLIND_EOD", "BLIND_EOD"]
+        money = _money_totals(res)
+        assert (money["cash_sales"], money["counted_cash"]) == (4000.0, 4000.0)
+
+    def test_control_linked_one_drawer_close_folds_into_its_drawer(self, db, monkeypatch):
+        sid = till.open_session(
+            db, store_id=STORE, session_date=DATE, opening_float_paisa=0, actor=CASHIER,
+        )["session"]["session_id"]
+        _cash_sale(db, 3000)
+        out = _cr_close_b(db, monkeypatch, 6)
+        assert out["till_link_ok"] is True
+        res = _recon_summary(db, monkeypatch)
+        # Not yet locked: the close is the only row and counts.
+        assert res["totals"]["counted_cash"] == 3000.0
+        assert till.lock_session(db, sid, actor=MANAGER)["ok"]
+        res = _recon_summary(db, monkeypatch)
+        assert len(res["rows"]) == 1 and res["totals"]["counted_cash"] == 3000.0
+
+
+def test_d88_uncompared_close_counted_once_on_real_mongo(monkeypatch):
+    """D88(1) on a native PyMongo Database: the drawer-list read of the close
+    really fails (Collection.find), B is then counted on the Z-Read, and the
+    reconciliation reads the stored rows back: counted 4,000 for a 4,000 day."""
+    from pymongo.collection import Collection
+
+    client, real_db, name = _real_till_db()
+    try:
+        till.ensure_till_indexes(real_db)
+        a, b = _drawer_a_then_b(
+            real_db, a_sales=[1000], b_sales=[3000],
+            at=(datetime(2026, 11, 4, 5, 0), datetime(2026, 11, 4, 10, 0)),
+        )
+        real_find = Collection.find
+
+        def _fault(self, query=None, *a_, **k):
+            if (self.database.name == name and self.name == "till_sessions"
+                    and isinstance(query, dict) and query.get("session_date") == DATE):
+                raise AutoReconnect("native drawer-list read fault")
+            return real_find(self, query, *a_, **k)
+
+        monkeypatch.setattr(Collection, "find", _fault)
+        out = _cr_close_b(_NativeDB(real_db), monkeypatch, 6)
+        monkeypatch.setattr(Collection, "find", real_find)
+        assert out["variance_status"] == "COMPARISON_UNAVAILABLE"
+        _count_and_lock(real_db, b, 6)
+        res = _recon_summary(_NativeDB(real_db), monkeypatch)
+        assert res["totals"]["counted_cash"] == 4000.0
+        assert res["totals"]["cash_sales"] == 4000.0
+        assert res["totals"]["expected_cash"] == 4000.0
+        assert res["totals"]["also_counted_on_till"] == 1
+    finally:
+        client.drop_database(name)
+        client.close()

@@ -150,6 +150,9 @@ async def cash_reconciliation_summary(
 
     rows: List[dict] = []
     pending_user_ids: List[str] = []
+    # D88: Cash Register closes whose figures are not one till drawer's own
+    # (the link failed, or the day had several drawers). See 2c.
+    unattributed_ids = set()
 
     # --- 1) Manual close-by-denomination sessions (rupees) -----------------
     cr_match: Dict = {"status": "CLOSED"}
@@ -204,6 +207,8 @@ async def cash_reconciliation_summary(
         closed_by = s.get("closed_by")
         if closed_by and not s.get("closed_by_name"):
             pending_user_ids.append(closed_by)
+        if withheld or s.get("till_link_ok") is False:
+            unattributed_ids.add(s.get("session_id"))
         rows.append(
             {
                 "session_id": s.get("session_id"),
@@ -383,6 +388,25 @@ async def cash_reconciliation_summary(
             survivors.append(r)
         rows = survivors
 
+    # --- 2c) ONE DRAWER, NEVER TWICE IN THE TOTALS (D88) -------------------
+    # A Cash Register close that did not land on one till drawer of its own
+    # (link failed: that drawer stayed OPEN and is counted again on the
+    # Z-Read; or several drawers: its window cash is the whole day's) cannot
+    # be folded in 2b. Once any drawer of the same store and IST day has a
+    # Z-Read row, the close adds nothing to the totals -- the row still
+    # shows, marked. With no till count that day it keeps adding as before.
+    zread_days = {
+        (r.get("store_id"), r.get("session_date"))
+        for r in rows
+        if r.get("source") == "BLIND_EOD"
+    }
+    for r in rows:
+        r["also_counted_on_till"] = (
+            r.get("source") == "CASH_REGISTER"
+            and r.get("session_id") in unattributed_ids
+            and (r.get("store_id"), r.get("session_date")) in zread_days
+        )
+
     # Resolve any missing closer names in one batch, then backfill.
     if pending_user_ids:
         name_map = _user_name_map(db, pending_user_ids)
@@ -423,15 +447,18 @@ async def cash_reconciliation_summary(
         reverse=True,
     )
 
-    # Per-range totals.
-    def _sum(field: str) -> float:
-        return round(sum(float(r.get(field, 0) or 0) for r in rows), 2)
+    # Per-range totals, over the rows that count (2c).
+    counted_rows = [r for r in rows if not r["also_counted_on_till"]]
 
-    over = [r for r in rows if r.get("variance_status") == "OVERAGE"]
-    short = [r for r in rows if r.get("variance_status") == "SHORTAGE"]
-    balanced = [r for r in rows if r.get("variance_status") == "BALANCED"]
+    def _sum(field: str) -> float:
+        return round(sum(float(r.get(field, 0) or 0) for r in counted_rows), 2)
+
+    over = [r for r in counted_rows if r.get("variance_status") == "OVERAGE"]
+    short = [r for r in counted_rows if r.get("variance_status") == "SHORTAGE"]
+    balanced = [r for r in counted_rows if r.get("variance_status") == "BALANCED"]
     totals = {
-        "sessions": len(rows),
+        "sessions": len(counted_rows),
+        "also_counted_on_till": len(rows) - len(counted_rows),
         "balanced": len(balanced),
         "overage": len(over),
         "shortage": len(short),
