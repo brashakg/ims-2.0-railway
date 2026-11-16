@@ -444,13 +444,18 @@ def _audit(db, action: str, je: Dict[str, Any], *, actor: str, reason: str = "",
 # ============================================================================
 
 
-def get_je(db, je_id: str) -> Optional[Dict[str, Any]]:
+def get_je(db, je_id: str, *, strict: bool = False) -> Optional[Dict[str, Any]]:
+    """The journal, or None when there is none. ``strict``: a read that fails
+    at the database raises instead of answering None -- a route must never
+    tell staff "not found" for a journal it could not read (D84)."""
     coll = _je_coll(db)
     if coll is None:
         return None
     try:
         return coll.find_one({"je_id": je_id}, {"_id": 0})
     except Exception:  # noqa: BLE001
+        if strict:
+            raise
         return None
 
 
@@ -466,11 +471,9 @@ def list_jes(db, *, store_id: Optional[str] = None, status: Optional[str] = None
         q["status"] = status.upper()
     if maker_id:
         q["maker_id"] = maker_id
-    try:
-        rows = list(coll.find(q, {"_id": 0}).sort("created_at", -1).limit(int(limit)))
-    except Exception:  # noqa: BLE001
-        return []
-    return rows
+    # A read that fails raises: an empty list (or an empty Tally file) would
+    # tell staff there are no journals (D84). The routes answer 503.
+    return list(coll.find(q, {"_id": 0}).sort("created_at", -1).limit(int(limit)))
 
 
 def create_je(
@@ -973,24 +976,44 @@ def _posted_event_id(je_id: str) -> str:
     return f"AUD-JE-POSTED-{je_id}"
 
 
+def repair_posted_events(db, rows: List[Dict[str, Any]], *, poster_id: Optional[str] = None,
+                         reason: str = "recorded_on_read") -> List[Dict[str, Any]]:
+    """Write the je_posted event, once, for every POSTED journal of ``rows``
+    that has none (D68/D84): Post answered but its audit insert failed, the
+    process died between the POSTED write and the audit, or the POSTED write's
+    reply was lost. Run by a Post that finds the journal POSTED and by every
+    read of journals (list, detail, Tally export) -- the screen hides Post
+    once a journal is POSTED, so reading it is what repairs it.
+
+    The event's log id is fixed per journal (_posted_event_id), so racing
+    repairs write it once. A journal posted before D68 has its event under a
+    random log id, which the fixed id cannot refuse: only the existence check
+    guards it, so a check that fails writes nothing (the next read repairs).
+    The event names the journal's poster (posted_by); a journal posted before
+    posted_by was recorded names ``poster_id`` (a Post retry) or nobody."""
+    posted = {r.get("je_id"): r for r in rows
+              if r.get("status") == STATUS_POSTED and r.get("je_id")}
+    if not posted:
+        return rows
+    try:
+        have = {r.get("entity_id") for r in db.get_collection("audit_logs").find(
+            {"entity_id": {"$in": list(posted)}, "action": "je_posted"}, {"entity_id": 1})}
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[JE] could not check the posted events of %s: %s", list(posted), e)
+        return rows
+    for je_id in posted.keys() - have:
+        snapshot = {k: v for k, v in posted[je_id].items() if k != "_id"}
+        _audit(db, "je_posted", snapshot,
+               actor=snapshot.get("posted_by") or poster_id or "unrecorded",
+               reason=reason, log_id=_posted_event_id(je_id))
+    return rows
+
+
 def _already_posted(db, je: Dict[str, Any], poster_id: str) -> Dict[str, Any]:
     """A Post that finds the journal POSTED (a retry, a racing poster, or this
-    Post's own write whose reply was lost) first writes the je_posted event if
-    the journal has none (D68), then answers already_posted. The event is
-    keyed by the journal id, so racing retries write it once. A trail that
-    cannot be read is left for the next retry: never risk a second event for a
-    journal posted before D68 (random log id)."""
-    je_id = je.get("je_id")
-    try:
-        missing = db.get_collection("audit_logs").find_one(
-            {"entity_id": je_id, "action": "je_posted"}) is None
-    except Exception as e:  # noqa: BLE001
-        logger.warning("[JE] could not check the posted event of %s: %s", je_id, e)
-        missing = False
-    if missing:
-        snapshot = {k: v for k, v in je.items() if k != "_id"}
-        _audit(db, "je_posted", snapshot, actor=je.get("posted_by") or poster_id,
-               reason="recorded_on_retry", log_id=_posted_event_id(je_id))
+    Post's own write whose reply was lost) first writes its missing je_posted
+    event (repair_posted_events), then answers already_posted."""
+    repair_posted_events(db, [je], poster_id=poster_id, reason="recorded_on_retry")
     return {"ok": False, "http": 409, "error": "already_posted"}
 
 

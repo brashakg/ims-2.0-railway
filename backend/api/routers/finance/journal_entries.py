@@ -5,6 +5,7 @@ package split): no path, method, dependency, status code, response_model
 or default was changed.
 """
 
+import logging
 from datetime import datetime
 from ...utils.ist import now_ist, now_ist_naive, ist_today, fy_start_year_ist
 from typing import Optional, List
@@ -26,6 +27,8 @@ from ._shared import (
     check_period_locked,
     router,
 )
+
+logger = logging.getLogger(__name__)
 
 # ============================================================================
 # F17/#25 - Maker-checker manual journal entries (gated by E4 ApprovalEngine)
@@ -51,6 +54,29 @@ def _je_require_enabled() -> None:
     """Feature flag gate for JE WRITE endpoints (off by default)."""
     if not je_service.is_je_enabled():
         raise HTTPException(status_code=503, detail="manual_je_not_enabled")
+
+
+_JE_UNREADABLE = "Journal entries could not be read just now - please try again"
+
+
+def _read_je(db, je_id: str):
+    """The journal, None when there is none; 503 when it could not be read --
+    never 'not found' for a journal that exists (D84)."""
+    try:
+        return je_service.get_je(db, je_id, strict=True)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[JE] journal %s unreadable: %s", je_id, e)
+        raise HTTPException(status_code=503, detail=_JE_UNREADABLE) from e
+
+
+def _read_jes(db, **query):
+    """The journals; 503 when they could not be read -- never an empty list
+    or an empty Tally file (D84)."""
+    try:
+        return je_service.list_jes(db, **query)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[JE] journals unreadable: %s", e)
+        raise HTTPException(status_code=503, detail=_JE_UNREADABLE) from e
 
 
 def _require_roles_for(current_user: dict, allowed: set, msg: str) -> None:
@@ -178,9 +204,9 @@ async def list_journal_entries(
     _require_roles_for(current_user, _JE_READER_ROLES, _JE_READ_REFUSED)
     db = _get_db()
     store_id = resolve_store_scope(store_id, current_user)
-    rows = je_service.with_reapproval_flags(db, je_service.list_jes(
-        db, store_id=store_id, status=status, maker_id=maker_id, limit=200
-    ))
+    rows = _read_jes(db, store_id=store_id, status=status, maker_id=maker_id, limit=200)
+    je_service.repair_posted_events(db, rows)
+    rows = je_service.with_reapproval_flags(db, rows)
     return {"journal_entries": rows, "total": len(rows)}
 
 
@@ -195,10 +221,9 @@ async def get_journal_entry(
     # Another shop's voucher -- or a store-LESS (HQ/entity-level) one, which
     # only admins read (adversarial P3) -- is the same 404 as a missing one,
     # so a guessed id never confirms a voucher exists (audit 2026-10-18).
-    je = in_reach_or_404(
-        je_service.get_je(db, je_id), current_user, "Journal entry not found"
-    )
+    je = in_reach_or_404(_read_je(db, je_id), current_user, "Journal entry not found")
     je.pop("_id", None)
+    je_service.repair_posted_events(db, [je])
     return je_service._jsonable(je_service.with_reapproval_flags(db, [je])[0])
 
 
@@ -291,7 +316,7 @@ async def post_journal_entry(
         "Only ADMIN / SUPERADMIN may post a journal entry",
     )
     db = _get_db()
-    je = je_service.get_je(db, je_id)
+    je = _read_je(db, je_id)
     if not je:
         raise HTTPException(status_code=404, detail="Journal entry not found")
     # Gate 2 (double period-lock): a period locked after approval blocks posting.
@@ -385,9 +410,8 @@ async def get_tally_journal_jv(
     # it by calendar day, never by the IST-shifted created_at bounds.
     from_dt = _je_cal_day(from_date)
     to_dt = _je_cal_day(to_date, end=True)
-    rows = je_service.list_jes(
-        db, store_id=store_id, status=je_service.STATUS_POSTED, limit=1000
-    )
+    rows = _read_jes(db, store_id=store_id, status=je_service.STATUS_POSTED, limit=1000)
+    je_service.repair_posted_events(db, rows)
     # Date-filter in Python (entry_date is a datetime); keeps the service query simple.
     filtered = []
     for je in rows:

@@ -1084,12 +1084,12 @@ def test_d68_racing_posts_and_repairs_write_one_event(mongo_db):
     j = _submitted_journal(db, "maker")
     assert _journal_approve(db, j["je_id"]).get("ok") is True
 
-    def _together(n):
+    def _together(n, act=lambda: _post(db, j["je_id"])):
         gate, got = threading.Barrier(n), []
 
         def _go():
             gate.wait(timeout=20)
-            got.append(_post(db, j["je_id"]))
+            got.append(act())
         threads = [threading.Thread(target=_go) for _ in range(n)]
         for t in threads:
             t.start()
@@ -1104,6 +1104,14 @@ def test_d68_racing_posts_and_repairs_write_one_event(mongo_db):
     assert all(r["error"] == "already_posted" for r in _together(4))
     assert len(_posted_rows(db, j["je_id"])) == 1
     assert db.get_collection("journal_entries").count_documents({"je_id": j["je_id"]}) == 1
+    # D84: four reads of the journal at once (the screen's list/detail),
+    # mixed with two Post retries, each finding the event missing.
+    db.get_collection("audit_logs").delete_many({"action": "je_posted"})
+    turn = iter(range(6))
+    got = _together(6, lambda: (je_service.repair_posted_events(db, [_je(db, j["je_id"])])
+                                if next(turn) >= 2 else _post(db, j["je_id"])))
+    assert len(got) == 6
+    assert len(_posted_rows(db, j["je_id"])) == 1
 
 
 def test_d68_a_period_locked_after_posting_does_not_block_the_repair(db, monkeypatch):
@@ -1142,21 +1150,200 @@ def test_d68_an_unreadable_trail_never_writes_a_second_event(db, monkeypatch):
     assert _journal_approve(db, j["je_id"]).get("ok") is True
     assert _post(db, j["je_id"]).get("ok") is True
     real_get = db.get_collection
-
-    class _NoReads:
-        def __init__(self, coll):
-            self._coll = coll
-
-        def find_one(self, *a, **k):
-            raise RuntimeError("audit read lost")
-
-        def __getattr__(self, name):
-            return getattr(self._coll, name)
-
     monkeypatch.setattr(db, "get_collection",
-                        lambda n: _NoReads(real_get(n)) if n == "audit_logs" else real_get(n))
+                        lambda n: _PostedEventReadFails(real_get(n)) if n == "audit_logs" else real_get(n))
     assert _post(db, j["je_id"])["error"] == "already_posted"
     monkeypatch.setattr(db, "get_collection", real_get)
+    assert len(_posted_rows(db, j["je_id"])) == 1
+
+
+# ---------------------------------------------------------------------------
+# D84 -- reading a POSTED journal repairs its missing je_posted event
+# ---------------------------------------------------------------------------
+
+
+def _read_journal(db, monkeypatch, route: str, je_id: str, user: Dict[str, Any]):
+    """One read of the journal through the route the screen (or the Tally
+    export) uses; returns the status code."""
+    monkeypatch.setattr(je_router, "_get_db", lambda: db)
+    if route == "list":
+        code, body = _call(je_router.list_journal_entries(
+            store_id=None, status=None, maker_id=None, current_user=user))
+        assert code != 200 or any(r["je_id"] == je_id for r in body["journal_entries"])
+    elif route == "detail":
+        code, _body = _call(je_router.get_journal_entry(je_id, current_user=user))
+    else:
+        code, _body = _call(je_router.get_tally_journal_jv(
+            from_date=None, to_date=None, store_id=None, current_user=user))
+    return code
+
+
+class _AuditInsertsFail:
+    """audit_logs whose inserts fail at the database (the Post's own audit
+    write lost; the posting stands, fail-soft)."""
+
+    def __init__(self, coll):
+        self._coll = coll
+
+    def insert_one(self, *a, **k):
+        from pymongo.errors import AutoReconnect
+
+        raise AutoReconnect("audit insert lost")
+
+    def __getattr__(self, name):
+        return getattr(self._coll, name)
+
+
+@pytest.mark.parametrize("route", ["list", "detail", "export"])
+@pytest.mark.parametrize("lost", ["audit_insert_failed", "died_before_audit"])
+def test_d84_reading_a_posted_journal_writes_its_missing_event_once(db, monkeypatch, route, lost):
+    """D84: Post answered 200 but its audit insert failed, or the process died
+    between the POSTED write and the audit. The screen hides Post once the
+    journal is POSTED, so no retry ever came and the journal stayed POSTED
+    without je_posted for good. Reading it (list, detail, Tally export) now
+    writes the event once, under the fixed id, naming the poster."""
+    _user(db, "checker", ["ADMIN"])
+    reader = _user(db, "accounts", ["ACCOUNTANT"])
+    j = _submitted_journal(db, "maker")
+    assert _journal_approve(db, j["je_id"]).get("ok") is True
+    if lost == "audit_insert_failed":
+        real_get = db.get_collection
+        monkeypatch.setattr(db, "get_collection",
+                            lambda n: _AuditInsertsFail(real_get(n)) if n == "audit_logs" else real_get(n))
+        assert _post(db, j["je_id"]).get("ok") is True          # 200 to the screen
+        monkeypatch.setattr(db, "get_collection", real_get)
+    else:
+        real_audit = je_service._audit
+        monkeypatch.setattr(je_service, "_audit", lambda *a, **k: None)
+        assert _post(db, j["je_id"]).get("ok") is True
+        monkeypatch.setattr(je_service, "_audit", real_audit)
+    assert _je(db, j["je_id"])["status"] == "POSTED"
+    assert _posted_rows(db, j["je_id"]) == []
+
+    assert _read_journal(db, monkeypatch, route, j["je_id"], reader) == 200
+    rows = _posted_rows(db, j["je_id"])
+    assert len(rows) == 1                                       # was 0, for good
+    assert rows[0]["log_id"] == f"AUD-JE-POSTED-{j['je_id']}"
+    assert rows[0]["user_id"] == "checker"                      # the poster, not the reader
+    assert rows[0]["reason"] == "recorded_on_read"
+    assert rows[0]["after_state"]["status"] == "POSTED"
+    for again in ("list", "detail", "export"):                  # later reads: nothing more
+        assert _read_journal(db, monkeypatch, again, j["je_id"], reader) == 200
+    assert _post(db, j["je_id"])["error"] == "already_posted"
+    assert len(_posted_rows(db, j["je_id"])) == 1
+    assert verify_chain(db.get_collection("audit_logs"))["intact"] is True
+
+
+class _PostedEventReadFails:
+    """audit_logs whose je_posted existence read fails; the chain's own reads
+    and every insert still go through."""
+
+    def __init__(self, coll):
+        self._coll = coll
+
+    @staticmethod
+    def _check(flt):
+        if (flt or {}).get("action") == "je_posted":
+            raise RuntimeError("audit read lost")
+
+    def find_one(self, flt=None, *a, **k):
+        self._check(flt)
+        return self._coll.find_one(flt, *a, **k)
+
+    def find(self, flt=None, *a, **k):
+        self._check(flt)
+        return self._coll.find(flt, *a, **k)
+
+    def __getattr__(self, name):
+        return getattr(self._coll, name)
+
+
+def test_d84_a_journal_posted_before_d68_never_gets_a_second_event(db, monkeypatch):
+    """The legacy guard: a journal posted before D68 has its je_posted event
+    under a RANDOM log id, so the fixed id cannot refuse a second one -- only
+    the existence check does. Reads and Post retries leave it at one event,
+    and so does a read whose existence check fails (skipped, never assumed
+    missing). Deleting the check, or treating a failed check as 'missing',
+    writes a second event here."""
+    _user(db, "checker", ["ADMIN"])
+    reader = _user(db, "accounts", ["ACCOUNTANT"])
+    j = _submitted_journal(db, "maker")
+    assert _journal_approve(db, j["je_id"]).get("ok") is True
+    fixed_id = je_service._posted_event_id
+    monkeypatch.setattr(je_service, "_posted_event_id",          # as the pre-D68 Post wrote it
+                        lambda _je_id: f"AUD-{uuid.uuid4().hex[:12]}")
+    assert _post(db, j["je_id"]).get("ok") is True
+    monkeypatch.setattr(je_service, "_posted_event_id", fixed_id)
+    coll = db.get_collection("audit_logs")
+    legacy = _posted_rows(db, j["je_id"])[0]
+    assert legacy["log_id"] != fixed_id(j["je_id"])
+
+    def _one_legacy_event():
+        rows = _posted_rows(db, j["je_id"])
+        assert [r["log_id"] for r in rows] == [legacy["log_id"]]
+
+    for route in ("list", "detail", "export"):
+        assert _read_journal(db, monkeypatch, route, j["je_id"], reader) == 200
+    assert _post(db, j["je_id"])["error"] == "already_posted"
+    _one_legacy_event()
+
+    real_get = db.get_collection
+    monkeypatch.setattr(db, "get_collection",
+                        lambda n: _PostedEventReadFails(real_get(n)) if n == "audit_logs" else real_get(n))
+    for route in ("list", "detail", "export"):
+        assert _read_journal(db, monkeypatch, route, j["je_id"], reader) == 200
+    assert _post(db, j["je_id"])["error"] == "already_posted"
+    monkeypatch.setattr(db, "get_collection", real_get)
+    _one_legacy_event()
+    assert verify_chain(coll)["intact"] is True
+
+
+class _JournalsUnreadable:
+    def __init__(self, coll):
+        self._coll = coll
+
+    def find(self, *a, **k):
+        raise RuntimeError("journal read lost")
+
+    def find_one(self, *a, **k):
+        raise RuntimeError("journal read lost")
+
+    def __getattr__(self, name):
+        return getattr(self._coll, name)
+
+
+@pytest.mark.parametrize("route", ["list", "detail", "export"])
+def test_d84_a_journal_read_that_fails_is_an_error_not_an_empty_answer(db, monkeypatch, route):
+    """A journal read that failed at the database answered 200 with an empty
+    list / an empty Tally file, or 404 'not found' for a journal that exists.
+    Now it answers 503 (try again), and the same read afterwards works."""
+    _user(db, "checker", ["ADMIN"])
+    reader = _user(db, "accounts", ["ACCOUNTANT"])
+    j = _submitted_journal(db, "maker")
+    assert _journal_approve(db, j["je_id"]).get("ok") is True
+    assert _post(db, j["je_id"]).get("ok") is True
+    real_coll = je_service._je_coll
+    monkeypatch.setattr(je_service, "_je_coll", lambda d: _JournalsUnreadable(real_coll(d)))
+    assert _read_journal(db, monkeypatch, route, j["je_id"], reader) == 503   # was 200 / 404
+    monkeypatch.setattr(je_service, "_je_coll", real_coll)
+    assert _read_journal(db, monkeypatch, route, j["je_id"], reader) == 200
+
+
+def test_d84_post_route_read_that_fails_is_not_not_found(db, monkeypatch):
+    """The Post route's own read of the journal failing answered 404 'not
+    found'; it answers 503 and the retry posts."""
+    checker = _user(db, "checker", ["ADMIN"])
+    j = _submitted_journal(db, "maker")
+    assert _journal_approve(db, j["je_id"]).get("ok") is True
+    monkeypatch.setattr(je_router, "_get_db", lambda: db)
+    monkeypatch.setattr(je_router, "_je_require_enabled", lambda: None)
+    real_coll = je_service._je_coll
+    monkeypatch.setattr(je_service, "_je_coll", lambda d: _JournalsUnreadable(real_coll(d)))
+    code, _body = _call(je_router.post_journal_entry(j["je_id"], current_user=checker))
+    assert code == 503                                          # was 404
+    monkeypatch.setattr(je_service, "_je_coll", real_coll)
+    code, _body = _call(je_router.post_journal_entry(j["je_id"], current_user=checker))
+    assert code == 200
     assert len(_posted_rows(db, j["je_id"])) == 1
 
 
