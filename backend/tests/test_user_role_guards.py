@@ -102,10 +102,12 @@ class _FakeUserRepo:
         self._docs[doc["user_id"]] = doc
         return dict(doc)
 
-    def update(self, user_id, update_data):
+    def update(self, user_id, update_data, expected=None):
         d = self._docs.get(user_id)
         if d is None:
             return False
+        if any(d.get(k) != v for k, v in (expected or {}).items()):
+            return False  # compare-and-set miss, as BaseRepository.update
         d.update(update_data)
         self.last_update = dict(update_data)
         return True

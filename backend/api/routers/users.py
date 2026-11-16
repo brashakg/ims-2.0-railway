@@ -1089,6 +1089,40 @@ async def get_user(user_id: str, current_user: dict = Depends(require_manager)):
     return {"user_id": user_id}
 
 
+def _commit_user_write(repo, user_id, update_data, expected, actor, audit):
+    """Write ``update_data`` (compare-and-set on ``expected`` when given).
+
+    ``repo.update`` returns False both for "nothing matched" and for a driver
+    error that may come AFTER the server committed (lost reply). So on False
+    re-read the row: if it already holds the intended values, the write
+    landed. Only a write that truly did not land gets the ABORTED row for its
+    logged ``audit`` (history marks it not applied, Revert refuses it). If the
+    re-read itself fails the outcome is unknown: returns None, no abort row."""
+    if (
+        repo.update(user_id, update_data, expected=expected)
+        if expected is not None
+        else repo.update(user_id, update_data)
+    ):
+        return True
+    stored = repo.find_by_id(user_id)
+    if stored is None:
+        return None
+    if all(
+        stored.get(k) == v
+        for k, v in update_data.items()
+        if k not in ("updated_at", "updated_by")
+    ):
+        return True
+    if audit is not None:
+        _perm_audit.write_permission_abort(
+            get_audit_repository(),
+            actor=actor,
+            aborted=audit,
+            reason="changed meanwhile" if expected is not None else "write failed",
+        )
+    return False
+
+
 @router.put("/{user_id}", response_model=dict)
 async def update_user(
     user_id: str, user: UserUpdate, current_user: dict = Depends(require_admin)
@@ -1195,12 +1229,17 @@ async def update_user(
                 update_data["discount_cap"] = _base
                 update_data["discount_cap_is_role_default"] = True
                 _cap_touched = True
-                _expect = {
-                    "discount_cap": existing.get("discount_cap"),
-                    "discount_cap_is_role_default": existing.get(
-                        "discount_cap_is_role_default"
-                    ),
-                }
+        # A role change or a cap move to the role standard lands only while
+        # roles AND cap are still what was read here: two edits from the same
+        # read can never mix one's roles with the other's cap (loser gets 409).
+        if "roles" in update_data or update_data.get("discount_cap_is_role_default") is True:
+            _expect = {
+                "roles": existing.get("roles"),
+                "discount_cap": existing.get("discount_cap"),
+                "discount_cap_is_role_default": existing.get(
+                    "discount_cap_is_role_default"
+                ),
+            }
 
         update_data["updated_by"] = current_user.get("user_id")
 
@@ -1227,24 +1266,19 @@ async def update_user(
                     detail="Could not record the permission change; update aborted.",
                 )
 
-        _updated = (
-            repo.update(user_id, update_data, expected=_expect)
-            if _expect is not None
-            else repo.update(user_id, update_data)
+        _updated = _commit_user_write(
+            repo, user_id, update_data, _expect, current_user,
+            audit if _audit_needed else None,
         )
-        if not _updated and _audit_needed:
-            # The change logged above never landed: say so in the trail so the
-            # timeline and Revert never offer it as a real state.
-            _perm_audit.write_permission_abort(
-                get_audit_repository(),
-                actor=current_user,
-                aborted=audit,
-                reason="changed meanwhile" if _expect is not None else "write failed",
+        if _updated is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Could not confirm the change was saved. Reload before trying again.",
             )
         if not _updated and _expect is not None:
             raise HTTPException(
                 status_code=409,
-                detail="This person's discount cap was changed meanwhile. Reload and try again.",
+                detail="This person's roles or discount cap were changed meanwhile. Reload and try again.",
             )
         if _updated:
             # F18: an edit that flips is_active must take effect immediately for
@@ -1320,8 +1354,8 @@ async def _add_role_via_update(user_id: str, existing: dict, role: str, current_
     """One door for every role change (D70): the PUT path moves a marked
     role-default discount cap with its audit row and compare-and-set, and runs
     the hierarchy / escalation / last-admin guards."""
-    # ponytail: read-modify-write of roles (was an atomic $addToSet), same as
-    # PUT; add a roles compare-and-set if concurrent role edits ever matter.
+    # Read-modify-write of roles; update_user's compare-and-set on the roles
+    # read here turns a concurrent role edit into a 409, never a lost role.
     roles = list(existing.get("roles", []) or [])
     if role not in roles:
         roles.append(role)
@@ -1949,6 +1983,12 @@ async def revert_user_permissions(
             status_code=500,
             detail="Could not record the revert; nothing changed.",
         )
-    if repo.update(user_id, update_data):
+    _done = _commit_user_write(repo, user_id, update_data, None, current_user, audit)
+    if _done:
         return {"user_id": user_id, "message": "Permissions reverted"}
+    if _done is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Could not confirm the revert was saved. Reload before trying again.",
+        )
     raise HTTPException(status_code=500, detail="Failed to revert permissions")

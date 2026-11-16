@@ -232,3 +232,109 @@ def test_list_pages_are_complete_and_disjoint(monkeypatch):
 
 def test_projection_carries_the_marker():
     assert "discount_cap_is_role_default" in users._SANITIZED_USER_FIELDS
+
+
+# --- Round 3 (independent reviewers, 2026-11-16) ---------------------------
+
+
+def _stale_reads(monkeypatch, repo, uid, stale):
+    real_find = repo.find_by_id
+    monkeypatch.setattr(repo, "find_by_id", lambda i: dict(stale) if i == uid else real_find(i))
+    return real_find
+
+
+def test_two_stale_role_changes_cannot_mix_roles_and_cap(monkeypatch):
+    """A adds STORE_MANAGER (moves the marked cap 10 -> 20); B, from the same
+    stale read, adds WORKSHOP_STAFF (no cap move). B must not write its roles
+    over A's: otherwise a Sales Staff keeps the Store Manager's 20, marked as
+    the role standard."""
+    repo = _repo()
+    c, _ = _client_with_audit(repo, _SUPER, monkeypatch)
+    uid = _create(c, "auto", ["SALES_STAFF"])
+    stale = repo.find_by_id(uid)
+    real_find = _stale_reads(monkeypatch, repo, uid, stale)
+    assert c.post(f"/api/v1/users/{uid}/roles/STORE_MANAGER").status_code == 200  # A
+    r = c.post(f"/api/v1/users/{uid}/roles/WORKSHOP_STAFF")  # B, stale
+    assert r.status_code == 409, r.text
+    d = real_find(uid)
+    assert (d["roles"], d["discount_cap"], d["discount_cap_is_role_default"]) == (
+        ["SALES_STAFF", "STORE_MANAGER"], 20.0, True)
+    # Same race through the PUT door.
+    r = c.put(f"/api/v1/users/{uid}", json={"roles": ["SALES_STAFF", "WORKSHOP_STAFF"]})
+    assert r.status_code == 409, r.text
+    assert real_find(uid)["roles"] == ["SALES_STAFF", "STORE_MANAGER"]
+
+
+def _ack_lost_after_commit(monkeypatch, repo):
+    """update_one commits, then the reply is lost (driver raises)."""
+    from pymongo.errors import AutoReconnect
+
+    real = repo.collection.update_one
+
+    def lossy(*a, **k):
+        real(*a, **k)
+        raise AutoReconnect("reply lost after commit")
+
+    monkeypatch.setattr(repo.collection, "update_one", lossy)
+    return real
+
+
+def _history(c, uid):
+    return c.get(f"/api/v1/users/{uid}/permissions").json()["history"]
+
+
+def test_lost_ack_on_a_landed_role_change_is_not_marked_not_applied(monkeypatch):
+    repo = _repo()
+    audit = AuditRepository(mongomock.MongoClient().db.audit_logs)
+    c, _ = _client_with_audit(repo, _SUPER, monkeypatch, audit_repo=audit)
+    uid = _create(c, "auto", ["SALES_STAFF"])
+    real = _ack_lost_after_commit(monkeypatch, repo)
+    r = c.put(f"/api/v1/users/{uid}", json={"roles": ["ACCOUNTANT"]})
+    assert r.status_code == 200, r.text
+    monkeypatch.setattr(repo.collection, "update_one", real)
+    assert _stored(repo, uid) == (0.0, True)
+    hist = _history(c, uid)
+    moved = [h for h in hist if h["action"] == "PERMISSIONS_UPDATE"
+             and h["permissions_after"]["discount_cap"] == 0.0]
+    assert len(moved) == 1 and not moved[0].get("not_applied")
+    assert not [h for h in hist if h["action"] == "PERMISSIONS_UPDATE_ABORTED"]
+
+
+def _two_cap_edits(c, uid):
+    """Cap 12 then 15; returns the log id of the 12 row (the revert target)."""
+    for cap in (12, 15):
+        assert c.put(f"/api/v1/users/{uid}", json={"discount_cap": cap}).status_code == 200
+    return [h for h in _history(c, uid)
+            if h["permissions_after"].get("discount_cap") == 12.0][0]["log_id"]
+
+
+def test_a_failed_revert_is_marked_not_applied(monkeypatch):
+    """The revert row is written before the write; a write that never lands
+    must not leave it standing as a real, revertible state."""
+    repo = _repo()
+    audit = AuditRepository(mongomock.MongoClient().db.audit_logs)
+    c, _ = _client_with_audit(repo, _SUPER, monkeypatch, audit_repo=audit)
+    uid = _create(c, "auto", ["SALES_STAFF"])
+    target = _two_cap_edits(c, uid)
+    monkeypatch.setattr(repo, "update", lambda *a, **k: False)  # nothing lands
+    r = c.post(f"/api/v1/users/{uid}/permissions/revert", json={"audit_log_id": target})
+    assert r.status_code == 500, r.text
+    assert _stored(repo, uid) == (15.0, False)
+    hist = _history(c, uid)
+    rev = [h for h in hist if h["action"] == "PERMISSIONS_REVERT"]
+    assert len(rev) == 1 and rev[0].get("not_applied") is True
+
+
+def test_lost_ack_on_a_landed_revert_is_success(monkeypatch):
+    repo = _repo()
+    audit = AuditRepository(mongomock.MongoClient().db.audit_logs)
+    c, _ = _client_with_audit(repo, _SUPER, monkeypatch, audit_repo=audit)
+    uid = _create(c, "auto", ["SALES_STAFF"])
+    target = _two_cap_edits(c, uid)
+    real = _ack_lost_after_commit(monkeypatch, repo)
+    r = c.post(f"/api/v1/users/{uid}/permissions/revert", json={"audit_log_id": target})
+    assert r.status_code == 200, r.text
+    monkeypatch.setattr(repo.collection, "update_one", real)
+    assert _stored(repo, uid) == (12.0, False)
+    hist = _history(c, uid)
+    assert not [h for h in hist if h.get("not_applied")]
