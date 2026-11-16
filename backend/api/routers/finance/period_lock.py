@@ -75,7 +75,8 @@ async def lock_period(
     # its wages would never reach the P&L, Tally or the PF file (they count
     # APPROVED and PAID rows only). The lock is chain-wide, so any shop's
     # draft stops it. A draft discard whose answer was lost is finished first,
-    # so the audit log says who discarded what before the books close.
+    # so the audit log says who discarded what before the books close; while
+    # one cannot be logged the lock waits (503).
     from ..payroll import settle_month_discards
 
     settle_month_discards(db, year, month)

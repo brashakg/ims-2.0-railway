@@ -2115,7 +2115,9 @@ async def discard_payroll_draft(
                     status_code=500,
                     detail=f"The discard of {who} could not be finished. {before}"
                     "Press Discard again to finish it: who asked and the "
-                    "draft's figures are kept until then.",
+                    "draft's figures are kept until then. If the row has gone "
+                    "from the list, the month cannot be locked until it is "
+                    "finished, and locking it finishes it.",
                 )
             if one:
                 done.append(one)
@@ -2169,11 +2171,15 @@ def _open_discard(db, row: dict, current_user: dict, audit_repo) -> dict:
     except DuplicateKeyError:
         pass
     old = ops.find_one({"_id": op_id})
+    same = old and old.get("version") == op["version"] and (
+        old.get("snapshot") or {}
+    ).get("payroll_id") == row.get("payroll_id")
+    if same and old.get("state") in ("PENDING", "DONE"):
+        # The same draft, asked again: still being discarded, or already
+        # discarded and logged by a request that finished after this one read
+        # it. Never replaced, so it is logged once, naming who asked first.
+        return old
     if old and old.get("state") == "PENDING":
-        if old.get("version") == op["version"] and (old.get("snapshot") or {}).get(
-            "payroll_id"
-        ) == row.get("payroll_id"):
-            return old  # the same discard, asked again
         _settle_discard(db, old, audit_repo)
         old = ops.find_one({"_id": op_id})
     if old and old.get("state") != "PENDING" and ops.find_one_and_update(
@@ -2267,7 +2273,7 @@ def _settle_discard(db, op: dict, audit_repo, delete: bool = False) -> Optional[
             }
         )
     ops.update_one(
-        {"_id": op["_id"], "audit_id": op["audit_id"]},
+        {"_id": op["_id"], "audit_id": op["audit_id"], "state": "PENDING"},
         {"$set": {"state": "DONE", "settled_at": datetime.utcnow()}},
     )
     return {"employee_id": op.get("employee_id"), "employee_name": op.get("employee_name")}
@@ -2293,13 +2299,24 @@ def _settle_pending_discards(db, scope: dict, audit_repo) -> List[dict]:
 
 def settle_month_discards(db, year: int, month: int) -> None:
     """For the period lock: finish the month's unfinished discards so the
-    audit log is complete when the books close. Never raises."""
+    audit log is complete when the books close. Raises 503 while one cannot
+    be finished: once the month is locked its removed draft has no Discard
+    button left, so nothing would ever write its audit row."""
+    scope = {"month": month, "year": year}
     try:
-        audit_repo = get_audit_repository()
-        if audit_repo is not None:
-            _settle_pending_discards(db, {"month": month, "year": year}, audit_repo)
-    except Exception:  # noqa: BLE001 - the next discard request retries
-        logger.exception("payroll discard settle failed for %s/%s", month, year)
+        if list(db.get_collection(DISCARDS).find({**scope, "state": "PENDING"})):
+            audit_repo = get_audit_repository()
+            if audit_repo is None:
+                raise RuntimeError("the audit log is not available")
+            _settle_pending_discards(db, scope, audit_repo)
+    except Exception as exc:  # noqa: BLE001 - said in plain words below
+        logger.error("payroll discard settle failed for %s/%s: %s", month, year, exc)
+        raise HTTPException(
+            status_code=503,
+            detail=f"A payroll draft discarded for {month}/{year} could not be "
+            "written to the audit log yet, so the month was not locked. Try "
+            "again in a few minutes.",
+        )
 
 
 # ============================================================================

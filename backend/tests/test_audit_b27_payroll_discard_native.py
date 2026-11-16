@@ -168,18 +168,22 @@ def test_p1_expired_discard_whose_audit_fails_after_a_lock_leaves_no_draft_behin
     _fail_audit_once(monkeypatch, then=stall_then_lock)
     first = _discard(rig)
 
-    assert seen["lock"].status_code == 200, seen["lock"].text
+    # The audit log is down at that moment, so the lock cannot log the removed
+    # draft either: it waits (review round 2) instead of closing the month
+    # over an unlogged discard.
+    assert seen["lock"].status_code == 503, seen["lock"].text
     assert first.status_code == 500 and "Press Discard again" in first.json()["detail"]
-    assert len(rig.lock_rows()) == 1
+    assert rig.lock_rows() == []
     assert _row(rig) is None and not rig.stranded()
     assert [o["state"] for o in _ops(rig)] == ["PENDING"] and _audits(rig) == []
 
-    # The retry finishes the log entry, even though the month is locked now.
+    # The retry finishes the log entry; then the month locks.
     again = _discard(rig)
     assert again.status_code == 200, again.text
     assert again.json()["employees"] == [{"employee_id": EMP, "employee_name": "ZZ Native One"}]
     _the_one_audit_says(rig, draft)
     assert [o["state"] for o in _ops(rig)] == ["DONE"]
+    assert rig.lock(without_payroll=True).status_code == 200
     assert _discard(rig).status_code == 423  # the locked month refuses anything new
     assert len(_audits(rig)) == 1 and not rig.stranded()
 
@@ -390,3 +394,73 @@ def test_a_shop_discard_failing_halfway_is_finished_by_the_retry(audited, monkey
         logged[emp] = a["detail"]["net_salary"]
     assert logged == nets
     assert _discard(rig, SHOP).status_code == 404
+
+
+# ===========================================================================
+# Review round 2 (internal, 2026-11-16)
+# ===========================================================================
+
+
+def test_a_discard_that_read_the_draft_before_a_finished_twin_does_not_log_it_again(
+    audited, monkeypatch
+):
+    """B reads the draft, then A discards it to the end (DONE, one audit row),
+    then B opens its own discard of that same draft. Before: B replaced A's
+    finished record and wrote a SECOND audit row naming B's admin, whose
+    request removed nothing."""
+    rig = audited
+    draft = _row(rig)
+    original = rig.coll_cls.find
+    first = {}
+
+    def find(self, *a, **k):
+        if self.name != "payroll" or first:
+            return original(self, *a, **k)
+        rows = list(original(self, *a, **k))  # B has read the draft ...
+        first["a"] = None
+        t, box = _in_thread(lambda: _discard(rig))  # ... A discards it to the end
+        t.join(30)
+        first["a"] = box["reply"]
+        return rows
+
+    monkeypatch.setattr(rig.coll_cls, "find", find)
+    b = _discard(rig, user=OTHER_ADMIN)
+
+    assert first["a"].status_code == 200, first["a"].text
+    assert b.status_code == 200, b.text
+    assert _row(rig) is None
+    _the_one_audit_says(rig, draft, user=ADMIN)
+    [op] = _ops(rig)
+    assert op["state"] == "DONE" and op["by"]["user_id"] == ADMIN["user_id"]
+    assert op["audit_id"] == _audits(rig)[0]["log_id"]
+
+
+def test_a_lock_is_refused_while_a_removed_draft_cannot_be_logged(audited, monkeypatch):
+    """The audit log is down at the discard AND at the lock. Before: the lock
+    swallowed the failure and committed, leaving the removed draft unlogged in
+    a closed month with no Discard button left to finish it."""
+    rig = audited
+    rig.db.get_collection("payroll").delete_one({"employee_id": EMP2})
+    draft = _row(rig)
+    real = AuditRepository.create
+
+    def down(self, doc):
+        if doc.get("action") == "PAYROLL_DRAFT_DISCARDED":
+            return None
+        return real(self, doc)
+
+    monkeypatch.setattr(AuditRepository, "create", down)
+    assert _discard(rig).status_code == 500
+    assert _row(rig) is None and [o["state"] for o in _ops(rig)] == ["PENDING"]
+
+    refused = rig.lock(without_payroll=True)
+    assert refused.status_code == 503, refused.text
+    assert "audit log" in refused.json()["detail"]
+    assert rig.lock_rows() == [] and not (rig.guard() or {}).get("locked")
+    assert _audits(rig) == [] and [o["state"] for o in _ops(rig)] == ["PENDING"]
+
+    monkeypatch.setattr(AuditRepository, "create", real)  # the log is back
+    assert rig.lock(without_payroll=True).status_code == 200
+    assert len(rig.lock_rows()) == 1
+    _the_one_audit_says(rig, draft)
+    assert [o["state"] for o in _ops(rig)] == ["DONE"]
