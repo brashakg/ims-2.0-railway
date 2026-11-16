@@ -198,6 +198,7 @@ export function PolicySchemaForm({ storeId }: { storeId?: string }) {
                         <input
                           type="checkbox"
                           checked={!!edits[spec.key]}
+                          aria-label={spec.label}
                           disabled={!writable || scopeNotAllowed}
                           onChange={(e) => setEdits((p) => ({ ...p, [spec.key]: e.target.checked }))}
                           className="rounded border-gray-300"
@@ -217,6 +218,7 @@ export function PolicySchemaForm({ storeId }: { storeId?: string }) {
                     ) : (
                       <input
                         type={['int', 'float', 'percent', 'money_paisa'].includes(spec.type) ? 'number' : (spec.secret ? 'password' : 'text')}
+                        aria-label={spec.label}
                         value={edits[spec.key] ?? ''}
                         disabled={!writable || scopeNotAllowed}
                         placeholder={spec.secret ? '•••• (re-enter to change)' : (spec.type === 'money_paisa' ? 'rupees' : spec.type === 'csv_int' ? '30,60,90' : '')}
@@ -229,6 +231,7 @@ export function PolicySchemaForm({ storeId }: { storeId?: string }) {
                     <button
                       type="button"
                       onClick={() => save(spec)}
+                      aria-label={`Save ${spec.label}`}
                       disabled={!writable || scopeNotAllowed || savingKey === spec.key}
                       className="btn-primary px-2.5 py-1.5"
                       title={scopeNotAllowed ? 'Not settable at this scope' : !writable ? 'Your role cannot write this key' : 'Save'}
@@ -239,6 +242,7 @@ export function PolicySchemaForm({ storeId }: { storeId?: string }) {
                       <button
                         type="button"
                         onClick={() => clear(spec)}
+                        aria-label={`Clear the store override for ${spec.label}`}
                         disabled={!writable || savingKey === spec.key}
                         className="btn-outline px-2.5 py-1.5"
                         title="Clear this store override (fall back to parent scope)"
