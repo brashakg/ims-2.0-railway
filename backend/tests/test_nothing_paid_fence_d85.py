@@ -1,0 +1,433 @@
+"""
+IMS 2.0 - the counter press and "Nothing was paid" can never both land (#1397, D85).
+====================================================================================
+D85(1), from Claude's review of head 58ceb90f: the counter's credit write
+(_issue_store_credit -> post_ledger_credit '<return id>:credit') ran after its
+last fence as a separate step, while Returns > Needs completing "Nothing was
+paid" took the hold over by its age alone. A press stalled between its fence
+and its ledger write, taken over meanwhile, still posted its credit: native
+Mongo (claude_d85_takeover.py, BEFORE) booked a NOTHING_PAID record AND a
+Rs 900 credit, gave the unit claim back, wrote the used credit-note number
+off, and the identical retry then issued a second Rs 900 (Rs 1,800). A cash
+return's money-out fence landing between the takeover's record and its hold
+release paid Rs 900 cash beside a NOTHING_PAID record.
+
+Now the takeover first takes the press's own keys (returns._take_from_the_press):
+a FENCED row at the credit line's id (the posting door refuses it) and a
+compare-and-set mark on the hold that every later fence of the press refuses.
+Whichever lands first wins, in every order; a lost acknowledgement is read back.
+
+D85(2): a door's kept hold ('credit-note:<id>', 'advance:<id>') whose release
+failed counts as finished once the door's own record is complete -- no bill
+waits on a developer for it.
+
+Real code over the strict fakes of test_pos_money_doors (till). No emoji (cp1252).
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import threading
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests")
+os.environ.setdefault("ENVIRONMENT", "test")
+os.environ.setdefault("MONGODB_URI", "")
+
+from fastapi import HTTPException  # noqa: E402
+
+from api.routers import customers as cust_router  # noqa: E402
+from api.services import store_credit_ledger as scl  # noqa: E402
+from tests.test_bill_money_doors_r7 import _admin_note, _invoiced  # noqa: E402
+from tests.test_pos_money_doors import _advance_client, _hdr, _ledger, _order, _stored, returns_router, till  # noqa: E402,F401
+from tests.test_pos_money_doors_r8 import _two_unit_bill  # noqa: E402
+from tests.test_pos_money_doors_r9 import _balance, _customer  # noqa: E402
+from tests.test_pos_money_doors_r12 import tasks  # noqa: E402,F401
+from tests.test_pos_money_doors_r13 import _bill_with_hold, _complete  # noqa: E402
+
+pytestmark = pytest.mark.usefixtures("gst_numbers")
+
+
+def _aged_past_the_timeout(till):
+    """Age ONLY the press's own hold past the Needs-completing timeout (it is
+    kept "writing" from its first fence, so Nothing was paid may act on it)."""
+    old = (datetime.now(timezone.utc) - timedelta(seconds=cust_router.PENDING_TIMEOUT_SECONDS + 5)).isoformat()
+    orders = till["db"].get_collection("orders")
+    holds = orders.find_one({"order_id": "ORD-1"})["refund_holds"]
+    rid = [k for k in holds if k.startswith("RET-")][0]
+    orders.update_one({"order_id": "ORD-1"}, {"$set": {f"refund_holds.{rid}.at": old}})
+    return rid
+
+
+def _takeover_now(till, out):
+    """Nothing was paid, pressed by a person while the press is stalled (its
+    own thread: the endpoint runs its own event loop)."""
+    rid = _aged_past_the_timeout(till)
+    out["rid"] = rid
+
+    def run():
+        try:
+            out["takeover"] = _complete(rid, nothing_paid=True)
+        except HTTPException as exc:
+            out["takeover"] = exc.status_code
+    t = threading.Thread(target=run)
+    t.start()
+    t.join(60)
+
+
+def _counted(monkeypatch):
+    released, written_off = [], []
+    monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: released.append(a) or True)
+    monkeypatch.setattr(returns_router, "_record_unused_credit_note",
+                        lambda n, *a, **k: written_off.append(n) or True)
+    return released, written_off
+
+
+def _credit_note_return(till, monkeypatch):
+    payload = _two_unit_bill(till, monkeypatch)
+    payload["return_type"] = "CREDIT_NOTE"
+    _customer(till)
+    return payload
+
+
+def _docs(till):
+    return sorted(d.get("status") for d in till["db"].get_collection("returns").docs)
+
+
+def _issued(till):
+    return [r for r in _ledger(till).docs if r.get("type") in (scl.ISSUED, "ISSUING")]
+
+
+# --- D85(1): the four orderings ---------------------------------------------------
+
+
+def test_nothing_paid_during_the_press_wins_and_the_press_issues_nothing(till, monkeypatch, tasks):
+    """The reviewer's must-fix: the press passed its credit fence and stalled
+    before its ledger write; Nothing was paid answered meanwhile. Before D85
+    the press then posted its credit beside the NOTHING_PAID record."""
+    payload = _credit_note_return(till, monkeypatch)
+    released, written_off = _counted(monkeypatch)
+    real, out = returns_router._issue_store_credit, {}
+
+    def stalled(*a, **k):
+        if "takeover" not in out:
+            _takeover_now(till, out)
+        return real(*a, **k)
+
+    monkeypatch.setattr(returns_router, "_issue_store_credit", stalled)
+    r = _advance_client().post("/api/v1/returns", json=payload, headers=_hdr("STORE_MANAGER"))
+    assert isinstance(out["takeover"], dict) and out["takeover"]["status"] == "NOTHING_PAID", out
+    assert r.status_code == 409 and "NOTHING was issued" in r.text, r.text
+    assert _issued(till) == [] and _balance(till) == 0.0
+    assert _docs(till) == ["NOTHING_PAID"]
+    assert len(released) == 1 and written_off == ["TST01/C2627/0001"]  # each give-back once
+    assert _ledger(till).find_one({"entry_id": f"{out['rid']}:credit"})["type"] == scl.FENCED
+    assert not (_stored(till).get("refund_holds") or {})
+    # Pressed again: nothing changes.
+    again = _complete(out["rid"], nothing_paid=True)
+    assert again.get("replayed") is True and len(released) == 1 and written_off == ["TST01/C2627/0001"]
+
+
+def test_a_press_whose_credit_landed_first_keeps_it_and_nothing_paid_is_refused(till, monkeypatch, tasks):
+    payload = _credit_note_return(till, monkeypatch)
+    real, out = returns_router._issue_store_credit, {}
+
+    def landed_then_stalled(*a, **k):
+        res = real(*a, **k)
+        if "takeover" not in out:
+            _takeover_now(till, out)
+        return res
+
+    monkeypatch.setattr(returns_router, "_issue_store_credit", landed_then_stalled)
+    r = _advance_client().post("/api/v1/returns", json=payload, headers=_hdr("STORE_MANAGER"))
+    assert out["takeover"] == 409, out
+    assert r.status_code == 201, r.text
+    assert [x["type"] for x in _issued(till)] == [scl.ISSUED] and _docs(till) == ["COMPLETED"]
+    hold = _stored(till)["refund_holds"][out["rid"]]
+    assert not hold.get(returns_router.NOTHING_PAID_MARK)
+
+
+def test_nothing_paid_whose_fence_acknowledgement_is_lost_still_wins(till, monkeypatch, tasks):
+    from pymongo.errors import AutoReconnect
+
+    payload = _credit_note_return(till, monkeypatch)
+    _counted(monkeypatch)
+    ledger = _ledger(till)
+    real_insert, lost = ledger.insert_one, []
+
+    def insert(doc):
+        if doc.get("type") == scl.FENCED and not lost:
+            real_insert(doc)
+            lost.append(doc["_id"])
+            raise AutoReconnect("landed, acknowledgement lost")
+        return real_insert(doc)
+
+    monkeypatch.setattr(ledger, "insert_one", insert)
+    real, out = returns_router._issue_store_credit, {}
+
+    def stalled(*a, **k):
+        if "takeover" not in out:
+            _takeover_now(till, out)
+        return real(*a, **k)
+
+    monkeypatch.setattr(returns_router, "_issue_store_credit", stalled)
+    r = _advance_client().post("/api/v1/returns", json=payload, headers=_hdr("STORE_MANAGER"))
+    assert lost and isinstance(out["takeover"], dict) and out["takeover"]["status"] == "NOTHING_PAID", out
+    assert r.status_code == 409 and _issued(till) == [] and _balance(till) == 0.0
+    assert _docs(till) == ["NOTHING_PAID"]
+
+
+def test_a_cash_press_fenced_between_the_takeover_record_and_its_release_pays_nothing(till, monkeypatch, tasks):
+    """No credit leg: the press's money-out fence is the only gate. It ran
+    after Nothing was paid wrote its record but before it released the hold:
+    before D85 the hold was still there and unmarked -- the fence passed and
+    Rs cash went out beside the NOTHING_PAID record."""
+    payload = _two_unit_bill(till, monkeypatch)
+    payload.update(refund_method="CASH", refund_tenders=[{"method": "CASH", "amount": 1800.0}])
+    released, written_off = _counted(monkeypatch)
+    real_keep, real_release = returns_router._keep_order_refund_hold, returns_router._release_order_refund
+    state = {"go": threading.Event(), "at_release": threading.Event()}
+
+    def release(order_id, rid, *a, **k):
+        if threading.current_thread() is state.get("thread"):
+            state["at_release"].set()
+            assert state["go"].wait(60)
+        return real_release(order_id, rid, *a, **k)
+
+    def keep(order_id, rid, *a, fence=False, extra=None, **k):
+        if fence and "money_out" in (extra or {}) and "thread" not in state:
+            rid0 = _aged_past_the_timeout(till)
+
+            def run():
+                try:
+                    state["takeover"] = _complete(rid0, nothing_paid=True)
+                except HTTPException as exc:
+                    state["takeover"] = exc.status_code
+            state["thread"] = threading.Thread(target=run)
+            state["thread"].start()
+            assert state["at_release"].wait(60), "the takeover never reached its release"
+        return real_keep(order_id, rid, *a, fence=fence, extra=extra, **k)
+
+    monkeypatch.setattr(returns_router, "_keep_order_refund_hold", keep)
+    monkeypatch.setattr(returns_router, "_release_order_refund", release)
+    r = _advance_client().post("/api/v1/returns", json=payload, headers=_hdr("STORE_MANAGER"))
+    state["go"].set()
+    state["thread"].join(60)
+    assert r.status_code == 409 and "NOTHING was issued" in r.text, r.text
+    assert isinstance(state["takeover"], dict) and state["takeover"]["status"] == "NOTHING_PAID", state
+    assert _docs(till) == ["NOTHING_PAID"]
+    assert len(released) == 1 and written_off == ["TST01/C2627/0001"]
+    assert not (_stored(till).get("refund_holds") or {})
+
+
+def test_nothing_paid_before_the_press_numbers_its_note_leaves_the_press_nothing(till, monkeypatch, tasks):
+    payload = _credit_note_return(till, monkeypatch)
+    released, written_off = _counted(monkeypatch)
+    out = {}
+
+    def number(*a, **k):
+        if "takeover" not in out:
+            _takeover_now(till, out)
+        return "TST01/C2627/0002"
+
+    monkeypatch.setattr(returns_router, "next_document_number", number)
+    r = _advance_client().post("/api/v1/returns", json=payload, headers=_hdr("STORE_MANAGER"))
+    assert isinstance(out["takeover"], dict) and out["takeover"]["status"] == "NOTHING_PAID", out
+    assert r.status_code == 409 and _issued(till) == [] and _docs(till) == ["NOTHING_PAID"]
+    # The press's own number is written off once (by its own refusal).
+    assert len(released) == 1 and written_off == ["TST01/C2627/0002"]
+
+
+# --- D85(1): the takeover's own writes ----------------------------------------------
+
+
+def test_the_posting_door_refuses_a_fenced_line():
+    class Ledger:
+        def __init__(self):
+            self.row = {"_id": "RET-F:credit", "entry_id": "RET-F:credit", "type": scl.FENCED, "applied": False}
+
+        def find_one(self, q, *a, **k):
+            return dict(self.row) if q.get("entry_id") == "RET-F:credit" else None
+
+        def find(self, *a, **k):
+            return []
+
+    entry = {"entry_id": "RET-F:credit", "customer_id": "CUST-1", "type": scl.ISSUED, "delta": 900.0}
+    assert cust_router._post_ledger_credit(None, entry, ledger=Ledger()) == cust_router.REFUSED
+    assert entry.get(cust_router.NOT_WRITTEN) is True
+
+
+def test_a_takeover_that_cannot_confirm_its_fence_changes_nothing(till, monkeypatch, tasks):
+    _bill_with_hold(till, "RET-U", at=(datetime.now(timezone.utc) - timedelta(hours=1)).isoformat())
+    ledger = _ledger(till)
+
+    def insert(doc):
+        raise RuntimeError("no answer")
+
+    monkeypatch.setattr(ledger, "insert_one", insert)
+    with pytest.raises(HTTPException) as exc:
+        _complete("RET-U", nothing_paid=True)
+    assert exc.value.status_code == 503
+    assert not _stored(till)["refund_holds"]["RET-U"].get(returns_router.NOTHING_PAID_MARK)
+    assert _docs(till) == []
+
+
+def test_a_takeover_that_meets_a_settling_credit_line_changes_nothing(till, monkeypatch, tasks):
+    """The press's line landed between Needs completing's read and the fence:
+    the insert meets it -- 409, the hold unmarked, no record."""
+    _bill_with_hold(till, "RET-S", at=(datetime.now(timezone.utc) - timedelta(hours=1)).isoformat())
+    real_unfinished = returns_router._unfinished_return
+
+    def read_then_line_lands(rid):
+        state = real_unfinished(rid)
+        _ledger(till).insert_one({"_id": f"{rid}:credit", "entry_id": f"{rid}:credit", "type": "ISSUING",
+                                  "customer_id": "CUST-1", "delta": 900.0, "applied": False})
+        return state
+
+    monkeypatch.setattr(returns_router, "_unfinished_return", read_then_line_lands)
+    with pytest.raises(HTTPException) as exc:
+        _complete("RET-S", nothing_paid=True)
+    assert exc.value.status_code == 409 and "being confirmed" in exc.value.detail
+    assert not _stored(till)["refund_holds"]["RET-S"].get(returns_router.NOTHING_PAID_MARK)
+    assert _docs(till) == []
+
+
+def test_a_cash_press_whose_money_out_landed_first_keeps_the_return(till, monkeypatch, tasks):
+    """The press's money-out mark landed after Needs completing read the hold:
+    the takeover's mark loses, its fence row is taken back, nothing recorded."""
+    _bill_with_hold(till, "RET-M", at=(datetime.now(timezone.utc) - timedelta(hours=1)).isoformat())
+    real_unfinished = returns_router._unfinished_return
+
+    def read_then_money_out(rid):
+        state = real_unfinished(rid)
+        till["db"].get_collection("orders").update_one(
+            {"order_id": "ORD-1"}, {"$set": {f"refund_holds.{rid}.money_out": True}, "$inc": {"refund_holds_v": 1}})
+        return state
+
+    monkeypatch.setattr(returns_router, "_unfinished_return", read_then_money_out)
+    with pytest.raises(HTTPException) as exc:
+        _complete("RET-M", nothing_paid=True)
+    assert exc.value.status_code == 409 and "Money moved" in exc.value.detail
+    assert _ledger(till).find_one({"entry_id": "RET-M:credit"}) is None
+    assert _docs(till) == []
+
+
+def test_a_press_that_gave_everything_back_first_is_not_given_back_twice(till, monkeypatch, tasks):
+    """The press refused on its own and released its hold (after its
+    give-backs) between Needs completing's read and the takeover: the record
+    is written, nothing is released or written off a second time."""
+    released, written_off = _counted(monkeypatch)
+    _bill_with_hold(till, "RET-G", at=(datetime.now(timezone.utc) - timedelta(hours=1)).isoformat())
+    real_unfinished = returns_router._unfinished_return
+
+    def read_then_released(rid):
+        state = real_unfinished(rid)
+        till["db"].get_collection("orders").update_one(
+            {"order_id": "ORD-1"}, {"$unset": {f"refund_holds.{rid}": ""}, "$inc": {"refund_holds_v": 1}})
+        return state
+
+    monkeypatch.setattr(returns_router, "_unfinished_return", read_then_released)
+    out = _complete("RET-G", nothing_paid=True)
+    assert out["status"] == "NOTHING_PAID" and released == [] and written_off == []
+    again = _complete("RET-G", nothing_paid=True)
+    assert again.get("replayed") is True and released == [] and written_off == []
+
+
+def test_the_fence_refuses_a_hold_nothing_was_paid_took():
+    class Orders:
+        doc = {"order_id": "O1", "refund_holds_v": 3, "refund_holds": {
+            "RET-1": {"amount": 900.0, "at": "2026-11-16T00:00:00+00:00", "kept": True, "writing": True,
+                      returns_router.NOTHING_PAID_MARK: True}}}
+
+        def find_one(self, q):
+            return dict(self.doc)
+
+        def update_one(self, *a, **k):
+            raise AssertionError("a refused fence writes nothing")
+
+    assert returns_router.fence_bill_hold(Orders(), "O1", "RET-1") is False
+
+
+# --- D85(2): a finished door's hold whose release failed --------------------------------
+
+
+def _door_bill(till, key, **hold):
+    h = {"amount": 100.0, "at": (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(), "kept": True,
+         "door": "credit_note" if key.startswith("credit-note:") else "advance", "ttl": 900}
+    h.update(hold)
+    till["db"].get_collection("orders").insert_one(_order(status="DELIVERED", refund_holds={key: h},
+                                                          refund_holds_v=1))
+
+
+@pytest.mark.parametrize("row, live", [
+    ({"type": scl.ISSUED}, False),
+    ({"type": scl.ADJUSTED}, False),
+    ({"type": "VOID", "void_settled": True}, False),
+    ({"type": "VOID"}, False),
+    ({"type": "VOID", "void_settled": False}, True),
+    ({"type": "ISSUING"}, True),
+    (None, True),
+])
+def test_a_credit_note_doors_hold_counts_as_finished_by_its_ledger_line(till, row, live):
+    key = "credit-note:ORD-1:sacn:10000:90000"
+    _door_bill(till, key)
+    if row is not None:
+        _ledger(till).insert_one({"_id": key.split(":", 1)[1], "entry_id": key.split(":", 1)[1], **row})
+    got, _ = returns_router._live_refund_holds("ORD-1", _stored(till)["refund_holds"])
+    assert (key in got) is live
+
+
+@pytest.mark.parametrize("status, live", [("COMPLETED", False), ("VOIDED", False), ("PENDING", True), (None, True)])
+def test_an_advance_doors_hold_counts_as_finished_by_its_record(till, status, live):
+    _door_bill(till, "advance:RET-ADV", amount=1000.0)
+    if status:
+        till["db"].get_collection("returns").insert_one({"return_id": "RET-ADV", "order_id": "ORD-1",
+                                                          "advance_refund": True, "status": status,
+                                                          "net_refund": 1000.0})
+    got, _ = returns_router._live_refund_holds("ORD-1", _stored(till)["refund_holds"])
+    assert ("advance:RET-ADV" in got) is live
+
+
+def test_an_unreadable_credit_note_line_fails_closed(till, monkeypatch):
+    _door_bill(till, "credit-note:X1")
+
+    def boom(*a, **k):
+        raise RuntimeError("ledger down")
+
+    monkeypatch.setattr(_ledger(till), "find", boom)
+    with pytest.raises(HTTPException) as exc:
+        returns_router._live_refund_holds("ORD-1", _stored(till)["refund_holds"])
+    assert exc.value.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_an_admin_note_whose_release_failed_never_locks_the_bill(till, monkeypatch, tasks):
+    """End to end: the note is ISSUED, its hold release fails (kept). Before
+    D85 every counter return and online refund of the bill was refused for
+    good and the sweep told a person to ask the IMS team."""
+    from api.services import shopify_refund as S
+
+    _invoiced(till)
+    monkeypatch.setattr(returns_router, "drop_bill_hold", lambda *a, **k: None)
+    out = await _admin_note(till, monkeypatch)
+    assert out["note_type"] == "CREDIT_NOTE"
+    assert [k for k in _stored(till)["refund_holds"] if k.startswith("credit-note:")]  # left kept
+    old = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    key = [k for k in _stored(till)["refund_holds"]][0]
+    till["db"].get_collection("orders").update_one({"order_id": "ORD-1"},
+                                                   {"$set": {f"refund_holds.{key}.at": old}})
+    assert returns_router.sweep_stuck_return_holds() == 0 and tasks == []
+    prior, reserved, _ = returns_router._reserve_order_refund("ORD-1", 100.0, "RET-C", _stored(till))
+    assert reserved and key not in _stored(till)["refund_holds"]  # the finished door's hold is dropped
+    assert returns_router._release_order_refund("ORD-1", "RET-C")
+    assert S._hold_order_for_online(till["db"], "ORD-1", "R1", 100.0) is True
+
+
+def test_a_credit_note_door_that_stopped_before_its_record_tells_a_superadmin_to_press_again(till, tasks):
+    _door_bill(till, "credit-note:ORD-1:sacn:10000:90000")
+    assert returns_router.sweep_stuck_return_holds() == 1
+    assert "SAME correction again" in tasks[0]["description"] and "IMS team" not in tasks[0]["description"]
