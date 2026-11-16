@@ -64,7 +64,8 @@ def test_marketing_send_denied_for_sales_staff():
 
 def test_marketing_send_allowed_for_manager(monkeypatch):
     async def _fake_send(**_kwargs):
-        return {"status": "queued"}
+        # The real writer's verdict: the row reached storage.
+        return {"status": "PENDING", "persisted": True}
 
     monkeypatch.setattr(marketing, "send_notification", _fake_send)
     monkeypatch.setattr(marketing, "_check_notification_rate", lambda *_a, **_k: None)
