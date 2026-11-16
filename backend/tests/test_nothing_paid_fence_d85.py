@@ -631,3 +631,114 @@ def test_the_counter_claim_needs_its_own_live_hold_on_the_bill(till, monkeypatch
     orders.update_one({"order_id": "ORD-1"}, {"$set": {"refund_holds": {"RET-X": {"kept": True}}}})
     assert returns_router._claim_returnable_qty("ORD-1", orig, 1.0, token="T:0", hold_key="RET-X") is True
     assert float(lines.lines[0].get("returned_qty") or 0) == 1.0
+
+
+# --- D85(1), round 8: "Cash paid" and a press still running after its money-out mark ---
+
+
+def _cash_press(till, monkeypatch):
+    """A cash RETURN whose returns collection refuses a second record of one
+    return id (prod: uniq_returns_return_id), and whose restock is counted."""
+    from pymongo.errors import DuplicateKeyError
+
+    payload = _two_unit_bill(till, monkeypatch)
+    payload.update(refund_method="CASH", refund_tenders=[{"method": "CASH", "amount": 1800.0}])
+    rcoll = till["db"].get_collection("returns")
+    real_insert = rcoll.insert_one
+
+    def unique_return_id(doc, *a, **k):
+        if doc.get("return_id") and rcoll.find_one({"return_id": doc["return_id"]}):
+            raise DuplicateKeyError(f"E11000 duplicate key return_id {doc['return_id']!r}")
+        return real_insert(doc, *a, **k)
+
+    monkeypatch.setattr(rcoll, "insert_one", unique_return_id)
+    restocks = []
+
+    def restock(items, store_id, return_id, **k):
+        restocks.append(return_id)
+        return {"restocked": [{"product_id": "P1", "reactivated": 1}], "restock_stock_ids": ["S1"],
+                "applied": True, "skipped": [], "restock_store_id": store_id, "restock_store_ids": [store_id],
+                "restock_store_redirected_from": None, "restock_store_reason": None}
+
+    monkeypatch.setattr(returns_router, "_restock_good_items", restock)
+    return payload, rcoll, restocks
+
+
+def _cash_paid_now(till, out):
+    rid = _aged_past_the_timeout(till)
+    out["rid"] = rid
+
+    def run():
+        try:
+            out["record"] = _complete(rid, cash_leg_paid=True)
+        except HTTPException as exc:
+            out["record"] = exc.status_code
+    t = threading.Thread(target=run)
+    t.start()
+    t.join(60)
+
+
+def _retry_restock(rid):
+    import asyncio
+
+    from tests.test_pos_money_doors_r13 import _user
+    return asyncio.run(returns_router.retry_restock(rid, current_user=_user("STORE_MANAGER")))
+
+
+def test_cash_paid_before_the_press_restocks_leaves_the_units_to_the_record(till, monkeypatch, tasks):
+    """Reviewers' flag (D85(1): every completing writer is fenced): Cash paid
+    wrote the record (restock_applied False) while the press stalled after its
+    money-out mark; the press then woke and restocked, and the record's
+    Restock put the units back a SECOND time (a phantom unit)."""
+    payload, rcoll, restocks = _cash_press(till, monkeypatch)
+    real_keep, out = returns_router._keep_order_refund_hold, {}
+
+    def money_out_then_stalled(order_id, rid, *a, extra=None, **k):
+        res = real_keep(order_id, rid, *a, extra=extra, **k)
+        if "money_out" in (extra or {}) and "record" not in out:
+            _cash_paid_now(till, out)
+        return res
+
+    monkeypatch.setattr(returns_router, "_keep_order_refund_hold", money_out_then_stalled)
+    _advance_client().post("/api/v1/returns", json=payload, headers=_hdr("STORE_MANAGER"))
+    assert isinstance(out["record"], dict) and out["record"]["status"] == "COMPLETED", out
+    assert restocks == []  # the press put nothing back
+    rec = rcoll.find_one({"_id": f"recovered:{out['rid']}"})
+    assert rec["restock_applied"] is False and not rec.get("restock_left_to_counter")
+    assert len(list(rcoll.find({"return_id": out["rid"]}))) == 1
+    # The record's Restock puts the units back -- once.
+    first = _retry_restock(out["rid"])
+    second = _retry_restock(out["rid"])
+    assert restocks == [out["rid"]] and first["restock_applied"] is True, first
+    assert second["message"] == "Already restocked" and restocks == [out["rid"]]
+
+
+def test_cash_paid_after_the_press_began_restocking_leaves_the_units_to_the_press(till, monkeypatch, tasks):
+    """The other order: the press passed its restock fence, then Cash paid
+    answered. The units are the press's: the record says so and its Restock
+    adds nothing."""
+    payload, rcoll, restocks = _cash_press(till, monkeypatch)
+    real_restock, out = returns_router._restock_good_items, {}
+
+    def stalled(*a, **k):
+        if "record" not in out:
+            _cash_paid_now(till, out)
+        return real_restock(*a, **k)
+
+    monkeypatch.setattr(returns_router, "_restock_good_items", stalled)
+    _advance_client().post("/api/v1/returns", json=payload, headers=_hdr("STORE_MANAGER"))
+    assert isinstance(out["record"], dict) and out["record"]["status"] == "COMPLETED", out
+    assert restocks == [out["rid"]]  # the press's own restock, once
+    rec = rcoll.find_one({"_id": f"recovered:{out['rid']}"})
+    assert rec["restock_left_to_counter"] is True
+    again = _retry_restock(out["rid"])
+    assert again["restock_applied"] is False and "adds nothing" in again["message"], again
+    assert restocks == [out["rid"]]
+
+
+def test_the_press_puts_its_units_back_when_nobody_took_its_record(till, monkeypatch, tasks):
+    payload, rcoll, restocks = _cash_press(till, monkeypatch)
+    r = _advance_client().post("/api/v1/returns", json=payload, headers=_hdr("STORE_MANAGER"))
+    assert r.status_code == 201 and r.json()["restock_applied"] is True and len(restocks) == 1, r.text
+    hold = next(iter(_stored(till)["refund_holds"].values()))
+    assert hold.get("restocking") is True and not hold.get(returns_router.RECORD_TAKEN_MARK)

@@ -4468,6 +4468,76 @@ def _hold_aged_out(h: Optional[Dict[str, Any]]) -> bool:
 # return's hold (D85): every fence of its press refuses from here.
 NOTHING_PAID_MARK = "nothing_paid"
 
+# "Cash paid" (Returns > Needs completing) wrote this return's record from its
+# hold (D85): a press still running puts no unit back -- the record's Restock
+# does, once.
+RECORD_TAKEN_MARK = "record_taken"
+
+
+def _hold_cas(order_id: Optional[str], return_id: Optional[str], decide) -> Any:
+    """One compare-and-set on a counter return's own hold (refund_holds_v):
+    ``decide(hold)`` answers ``(result, new_hold_or_None)`` -- None writes
+    nothing. No bill repository or no hold: ``decide(None)``'s result.
+    Raises when the bill cannot be read or stays busy."""
+    repo = get_order_repository()
+    if not order_id or not return_id or repo is None or not callable(getattr(repo, "update_if", None)):
+        return decide(None)[0]
+    for _ in range(8):
+        order = repo.read_or_raise(order_id) or {}
+        holds = dict(order.get("refund_holds") or {})
+        result, new = decide(holds.get(return_id))
+        if new is None:
+            return result
+        holds[return_id] = new
+        if repo.update_if(order_id, {"refund_holds_v": order.get("refund_holds_v")},
+                          {"refund_holds": holds, "refund_holds_v": int(order.get("refund_holds_v") or 0) + 1}):
+            return result
+    raise RuntimeError("bill busy")
+
+
+def _fence_restock(order_id: Optional[str], return_id: Optional[str]) -> bool:
+    """D85: the press's stock writes (restock, quarantine) and "Cash paid"
+    never both put the units back. True: the press may write them -- its hold
+    is stamped "restocking" first, so Cash paid leaves the units to it. False:
+    Cash paid took the record (RECORD_TAKEN_MARK), or the bill could not be
+    read -- nothing goes back here; the record's Restock puts the units back,
+    once (retry_restock). No hold (nothing can take it over): True."""
+    def decide(h):
+        if h is None or h.get("restocking"):
+            return True, None
+        if h.get(RECORD_TAKEN_MARK):
+            return False, None
+        return True, {**h, "restocking": True}
+    try:
+        return _hold_cas(order_id, return_id, decide)
+    except Exception as exc:  # noqa: BLE001 -- unknown: put nothing back here
+        logger.error("[RETURNS] restock of %s not fenced (%s): left to the record's Restock", return_id, exc)
+        return False
+
+
+def _take_record(order_id: Optional[str], return_id: str) -> bool:
+    """D85: "Cash paid" takes the record from a press that may still run.
+    False: the hold is marked taken (RECORD_TAKEN_MARK) -- the press puts no
+    unit back from here (_fence_restock), the record's Restock does. True:
+    the press had already started putting the units back -- they are left to
+    it (the record says so, and its Restock refuses). A press that saved its
+    own doc on the hold meanwhile: 409 (the next answer reads that doc)."""
+    def decide(h):
+        if h is None or h.get(RECORD_TAKEN_MARK):
+            return False, None
+        if h.get("doc"):
+            raise HTTPException(status_code=409, detail=HOLD_STILL_RUNNING)
+        if h.get("restocking"):
+            return True, None
+        return False, {**h, RECORD_TAKEN_MARK: True}
+    try:
+        return _hold_cas(order_id, return_id, decide)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail="Could not read this bill - nothing was changed. Try again.") from exc
+
+
 _HOLD_LOST = ("This took too long and another refund or return of this bill may have been "
               "booked meanwhile, so NOTHING was issued. Check the bill and try again.")
 
@@ -4713,6 +4783,18 @@ def _nothing_paid_ids(order_id: Optional[str]) -> set:
         return {d.get("return_id") for d in coll.find({"order_id": order_id, "status": "NOTHING_PAID"})}
     except Exception:  # noqa: BLE001 -- unreadable: keep every kept hold (never drop a trace)
         return {"*"}
+
+
+def _claimed_line(rl: Dict[str, Any]) -> Dict[str, Any]:
+    """A claimed return line as the hold and the credit line keep it: what
+    Needs completing gives back (item, qty, token) and what a record
+    completed there restocks (retry_restock: the unit's condition and the
+    press's restock choice)."""
+    ret = rl["ret_line"]
+    return {"item_id": rl["orig_line"].get("item_id") or rl["orig_line"].get("id"),
+            "product_id": rl["orig_line"].get("product_id"), "qty": float(ret.return_qty),
+            "token": rl["token"], "sku": ret.sku, "product_name": ret.product_name,
+            "condition": ret.condition, "restock": ret.restock}
 
 
 def _hold_taken(order_id: Optional[str], return_id: Optional[str]) -> bool:
@@ -5331,9 +5413,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
     # for Needs completing. A refusal below gives it back (create_return).
     _keep_order_refund_hold(resolved_order_id, held.get("return_id"), fence=True, extra={
         "writing": True, "store_id": store_id,
-        "lines": [{"item_id": rl["orig_line"].get("item_id") or rl["orig_line"].get("id"),
-                   "product_id": rl["orig_line"].get("product_id"),
-                   "qty": float(rl["ret_line"].return_qty), "token": rl["token"]} for rl in resolved_lines]})
+        "lines": [_claimed_line(rl) for rl in resolved_lines]})
     claimed: List[Dict[str, Any]] = []
     for rl in resolved_lines:
         ok = _claim_returnable_qty(
@@ -5422,9 +5502,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         """What the kept hold records for Needs completing: the claimed lines,
         the tenders, the credit-note number, the store."""
         return {
-            "lines": [{"item_id": d["orig_line"].get("item_id") or d["orig_line"].get("id"),
-                       "product_id": d["orig_line"].get("product_id"),
-                       "qty": float(d["ret_line"].return_qty), "token": d["token"]} for d in claimed],
+            "lines": [_claimed_line(d) for d in claimed],
             "tenders": refund_tenders,
             "note_number": credit_note_number,
             "store_id": store_id,
@@ -5525,10 +5603,8 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
                 undo_on_void={
                     "order_id": resolved_order_id,
                     "return_id": held.get("return_id"),
-                    "lines": [{"item_id": d["orig_line"].get("item_id") or d["orig_line"].get("id"),
-                               "product_id": d["orig_line"].get("product_id"),
-                               "purchased": _line_purchased_qty(d["orig_line"]),
-                               "qty": float(d["ret_line"].return_qty), "token": d["token"]} for d in claimed],
+                    "lines": [{**_claimed_line(d), "purchased": _line_purchased_qty(d["orig_line"])}
+                              for d in claimed],
                     "refund_tenders": refund_tenders,
                     "net_amount": round(float(net_amount), 2),
                     "points_paid_share": points_share,
@@ -5728,19 +5804,22 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         "restock_store_redirected_from": None,
         "restock_store_reason": None,
     }
+    # D85: Cash paid may have taken this return's record while it stalled.
+    stock_ok = _fence_restock(resolved_order_id, held.get("return_id"))
     try:
-        restock_result = _restock_good_items(
-            active_lines,
-            store_id,
-            return_id,
-            order_id=resolved_order_id,
-            user_id=current_user.get("user_id"),
-            # F9: the counter the goods were handed back at -- the fallback
-            # physical store when the online order carries no fulfilment stamp.
-            processing_store_id=current_user.get("active_store_id"),
-            # Already resolved above; saves the online branch a second fetch.
-            order=order,
-        )
+        if stock_ok:
+            restock_result = _restock_good_items(
+                active_lines,
+                store_id,
+                return_id,
+                order_id=resolved_order_id,
+                user_id=current_user.get("user_id"),
+                # F9: the counter the goods were handed back at -- the fallback
+                # physical store when the online order carries no fulfilment stamp.
+                processing_store_id=current_user.get("active_store_id"),
+                # Already resolved above; saves the online branch a second fetch.
+                order=order,
+            )
     except Exception as exc:  # noqa: BLE001
         # A stock-write failure must never break the return record - leave
         # applied=False so it can be retried later.
@@ -5748,7 +5827,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
     # F21-3: a DAMAGED piece comes back QUARANTINED (tracked, can go to the
     # supplier), and the task agent raises its 7-day follow-up.
     quarantined = _quarantine_damaged_units(
-        active_lines, resolved_order_id, order, return_id, current_user.get("user_id"))
+        active_lines, resolved_order_id, order, return_id, current_user.get("user_id")) if stock_ok else []
     for unit in quarantined:
         try:
             from agents.registry import dispatch_event
@@ -6365,7 +6444,12 @@ async def complete_return_record(
             # The return-line shape every reader counts (the over-return
             # book reads return_qty and order_item_id).
             "items": [{"order_item_id": ln.get("item_id"), "item_id": ln.get("item_id"),
-                       "product_id": ln.get("product_id"), "return_qty": float(ln.get("qty") or 0)}
+                       "product_id": ln.get("product_id"), "return_qty": float(ln.get("qty") or 0),
+                       # Its Restock (retry_restock) puts back only a unit the
+                       # press called GOOD and restockable; an unknown one, never.
+                       "sku": ln.get("sku") or "", "product_name": ln.get("product_name") or "",
+                       "condition": ln.get("condition") or "GOOD",
+                       "restock": bool(ln.get("restock")) if ln.get("condition") else False}
                       for ln in (spec.get("lines") or facts.get("lines") or [])],
             "replacement_items": [],
             "gross_refund": base.get("gross_refund") or facts.get("gross_refund") or net,
@@ -6394,6 +6478,10 @@ async def complete_return_record(
             "loyalty_reversal_failed": True,
         }
         source = "credit line" if credit_landed else "held refund"
+    left_to_counter = bool(hold) and not doc_kept and _take_record(order_id, return_id)
+    if left_to_counter:
+        # The press was putting the units back: its Restock never adds them again.
+        doc["restock_left_to_counter"] = True
     if owed:
         doc.update(owed_tenders=owed_legs, owed_amount=owed)
     doc.update(status="COMPLETED", created_at=created_at, drawer_at=moved_at,
@@ -6742,6 +6830,7 @@ async def retry_restock(
                 "return_id": return_id,
                 "restock_applied": {"$ne": True},
                 "restock_in_progress": {"$ne": True},
+                "restock_left_to_counter": {"$ne": True},
             },
             {
                 "$set": {
@@ -6771,6 +6860,14 @@ async def retry_restock(
                 "restock_stock_ids": doc.get("restock_stock_ids", []),
                 "message": "Already restocked",
             }
+        if doc.get("restock_left_to_counter"):
+            return {
+                "return_id": return_id,
+                "restock_applied": False,
+                "restock_stock_ids": doc.get("restock_stock_ids", []),
+                "message": ("The counter was putting this return's units back when its record was completed, "
+                            "so IMS adds nothing here. Check each unit: add one by hand only if it is not in stock."),
+            }
         # Someone else is mid-restock; tell the caller to retry shortly.
         return {
             "return_id": return_id,
@@ -6782,7 +6879,8 @@ async def retry_restock(
     # We hold the claim. Already-restocked units are tracked in restock_stock_ids
     # on the doc; we re-run plan_restock fresh, then mark sold+commit.
     existing_ids = list(claim.get("restock_stock_ids") or [])
-    lines = [ReturnLine(**it) for it in (claim.get("items") or [])]
+    # A record completed in Needs completing keeps no price (restock needs none).
+    lines = [ReturnLine(**{"unit_price": 0.0, **it}) for it in (claim.get("items") or [])]
 
     # F9: the order is the ONLY record of which physical shop shipped each unit.
     # Load it ONCE here and hand it to the router, so this door runs on VERIFIED
