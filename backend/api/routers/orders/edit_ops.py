@@ -466,13 +466,17 @@ async def settle(op: dict, after: dict, repo) -> bool:
 def _points_task(order: dict, regated: dict) -> None:
     """Points a bill no longer earns, already spent by the customer, are on the
     Tasks board while they stand (not only in a log), and IMS closes the task
-    once the edit's claw has landed. Fail-soft: never stops a settle."""
+    once the edit's claw has landed. Closing it by hand waives points, so it is a
+    head-office item (D81): an ADMIN holds it (a SUPERADMIN if there is none) and
+    only ADMIN/SUPERADMIN may close it (tasks._ensure_may_close). Fail-soft:
+    never stops a settle."""
     from ...dependencies import get_task_repository
-    from ...services.task_triggers import create_system_task
+    from ...services.task_triggers import _person_holding, create_system_task
+    from ..loyalty import POINTS_UNCLAWED_REF
     from ..returns import _close_task as close
 
     order_id, reason = order.get("order_id"), regated.get("reason")
-    ref = f"order_points_unclawed:{order_id}"
+    ref = f"{POINTS_UNCLAWED_REF}{order_id}"
     with suppress(Exception):
         if regated.get("ok"):
             close(ref, {"user_id": "system"}, "IMS took back the points this bill no longer earns.")
@@ -489,13 +493,15 @@ def _points_task(order: dict, regated: dict) -> None:
                 f"{order.get('customer_id')} had already spent them. "
                 + ("IMS has recorded taking them back and takes them as soon as the customer's "
                    "balance covers them, then closes this task." if owed else
-                   "IMS has not taken them back. Head office decides what to do; IMS closes this "
-                   "task if a later edit takes them back.")
+                   "IMS has not taken them back. Head office decides what to do; only an admin "
+                   "can close this task, and IMS closes it if a later edit takes them back.")
             ),
             priority="P2",
             category="Accounts",
             store_id=order.get("store_id"),
             dedupe_ref=ref,
+            assigned_to=(_person_holding("ADMIN", None, any_store=True)
+                         or _person_holding("SUPERADMIN", None, any_store=True)),
             extra={"payload": {"order_id": order_id, "customer_id": order.get("customer_id"),
                                "points": points, "owed": owed}},
         )

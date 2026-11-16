@@ -1995,6 +1995,18 @@ def _claw_owed(customer_id, order_id, txn_id, status, points) -> Dict[str, Any]:
     return {"ok": False, "reason": f"claw_move_{status}", "txn_id": txn_id, "delta": points}
 
 
+# A points task closed by hand waives points: only an admin may close one
+# (owner ruling 15 of 11-09; D81 for the edit's 'not yet taken back' task).
+POINTS_UNCLAWED_REF = "order_points_unclawed:"
+_EXCEPTION_REFS = (POINTS_UNCLAWED_REF,)
+
+
+def is_loyalty_exception(task: Dict[str, Any]) -> bool:
+    """A loyalty points exception task: closing it waives points, so only an
+    admin may (tasks._ensure_may_close)."""
+    return str(task.get("source_ref") or "").startswith(_EXCEPTION_REFS)
+
+
 def regate_earn_after_edit(
     order_doc: Dict[str, Any],
     user_id: Optional[str] = None,
