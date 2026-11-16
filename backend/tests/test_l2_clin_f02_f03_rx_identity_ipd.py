@@ -344,3 +344,20 @@ def test_canonical_print_without_db_is_503_not_a_false_not_found(monkeypatch):
     c = _client(monkeypatch, _exam_rx())
     monkeypatch.setattr(prescriptions, "get_prescription_repository", lambda: None)
     assert c.get("/prescriptions/rx-1/print").status_code == 503
+
+
+# PR-1430 review: a customer-read failure printed 'Patient: Not recorded' with
+# a 200 for a dependent whose name IS on file. Both doors must answer 503.
+class _BrokenCustRepo:
+    def find_by_id(self, _id):
+        raise RuntimeError("transient mongo error")
+
+
+@pytest.mark.parametrize("cust_repo", [_BrokenCustRepo(), None], ids=["raises", "no-repo"])
+@pytest.mark.parametrize("path", ["/clinical/prescriptions/rx-1/print", "/prescriptions/rx-1/print"])
+def test_print_customer_read_failure_is_503_never_an_unnamed_card(monkeypatch, cust_repo, path):
+    client = _client(monkeypatch, _exam_rx())
+    monkeypatch.setattr(deps, "get_customer_repository", lambda: cust_repo)
+    r = client.get(path)
+    assert r.status_code == 503, r.text
+    assert "Not recorded" not in r.text

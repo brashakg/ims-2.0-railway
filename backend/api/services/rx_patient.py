@@ -67,16 +67,29 @@ def rx_patient_identity(rx: Dict[str, Any], customer: Optional[Dict[str, Any]]) 
 
 
 def load_rx_patient(rx: Dict[str, Any]) -> Dict[str, Any]:
-    """rx_patient_identity with the account loaded. Fail-soft: a lookup error
-    never blocks a print -- the embedded fields still apply."""
+    """rx_patient_identity with the account loaded.
+
+    PR-1430 review: an account that cannot be READ (store missing or the read
+    raises) is 503 "try again" -- never a 200 card printing "Not recorded" for
+    a dependent whose name IS on file. An account that simply does not exist
+    still prints with the embedded fields (a data fact, not an outage)."""
+    from fastapi import HTTPException
+
     customer = None
     cid = _norm((rx or {}).get("customer_id"))
     if cid:
-        try:
-            from ..dependencies import get_customer_repository
+        from ..dependencies import get_customer_repository
 
+        unavailable = HTTPException(
+            status_code=503, detail="Prescription is temporarily unavailable"
+        )
+        try:
             repo = get_customer_repository()
-            customer = repo.find_by_id(cid) if repo is not None else None
-        except Exception:  # noqa: BLE001 - identity is additive; never break a print
-            customer = None
+            if repo is None:
+                raise unavailable
+            customer = repo.find_by_id(cid)
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001 - any read failure = try again
+            raise unavailable from exc
     return rx_patient_identity(rx, customer)
