@@ -8,6 +8,7 @@
 
 import { Printer, Clock } from 'lucide-react';
 import clsx from 'clsx';
+import { isJobOverdueIst } from '../../pages/workshop/shared';
 
 export interface BoardJob {
   id: string;
@@ -68,11 +69,6 @@ const PRIORITY_DOT: Record<string, string> = {
   NORMAL: 'bg-gray-300',
 };
 
-function isOverdue(promisedDate?: string): boolean {
-  if (!promisedDate) return false;
-  const d = new Date(promisedDate);
-  return !isNaN(d.getTime()) && d < new Date();
-}
 
 export function StageMonitorBoard({ jobs, onPrintStage, onSelectJob }: StageMonitorBoardProps) {
   const byColumn: Record<string, BoardJob[]> = {};
@@ -110,7 +106,7 @@ export function StageMonitorBoard({ jobs, onPrintStage, onSelectJob }: StageMoni
                       key={job.id}
                       className={clsx(
                         'bg-white rounded-md border p-2 text-xs',
-                        isOverdue(job.promisedDate) ? 'border-red-300' : 'border-gray-200',
+                        isJobOverdueIst(job.promisedDate, job.status) ? 'border-red-300' : 'border-gray-200',
                       )}
                     >
                       <div className="flex items-center justify-between gap-1">
@@ -140,7 +136,7 @@ export function StageMonitorBoard({ jobs, onPrintStage, onSelectJob }: StageMoni
                         </div>
                       )}
                       <div className="flex items-center justify-between mt-1">
-                        {isOverdue(job.promisedDate) ? (
+                        {isJobOverdueIst(job.promisedDate, job.status) ? (
                           <span className="inline-flex items-center gap-1 text-red-600 font-medium">
                             <Clock className="w-3 h-3" /> Overdue
                           </span>

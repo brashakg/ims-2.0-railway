@@ -5,7 +5,7 @@
 
 import { Wrench, AlertTriangle, Eye, Phone, User, Loader2 } from 'lucide-react';
 import clsx from 'clsx';
-import { resolveLensConfig, resolveStatusConfig, resolvePriorityConfig, NOT_ON_FILE } from './shared';
+import { resolveLensConfig, resolveStatusConfig, resolvePriorityConfig, NOT_ON_FILE, FINISHED_JOB_STATUSES } from './shared';
 import type { WorkshopPageState } from './useWorkshopPage';
 
 export function WorkshopJobList({ page }: { page: WorkshopPageState }) {
@@ -28,7 +28,7 @@ export function WorkshopJobList({ page }: { page: WorkshopPageState }) {
             const statusConfig = resolveStatusConfig(job.status);
             const priorityConfig = resolvePriorityConfig(job.priority);
             const PriorityIcon = priorityConfig.icon;
-            const overdue = isOverdue(job.promisedDate) && !['READY', 'DELIVERED', 'CANCELLED'].includes(job.status);
+            const overdue = isOverdue(job.promisedDate) && !FINISHED_JOB_STATUSES.includes(job.status);
 
             return (
               <div

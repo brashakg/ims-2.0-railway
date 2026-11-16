@@ -13,7 +13,7 @@ import {
   handoverBlockerMessage,
   QC_ACTIONABLE_STATUSES,
 } from './qcHandover';
-import { resolveLensConfig, resolveStatusConfig, resolvePriorityConfig, NOT_ON_FILE } from './shared';
+import { resolveLensConfig, resolveStatusConfig, resolvePriorityConfig, NOT_ON_FILE, FINISHED_JOB_STATUSES } from './shared';
 import type { LensStatus } from './shared';
 import { VendorCaptureBlock } from './VendorCaptureBlock';
 import type { WorkshopPageState } from './useWorkshopPage';
@@ -48,7 +48,7 @@ export function WorkshopJobDetail({ page }: { page: WorkshopPageState }) {
                   <span className={clsx('text-sm font-medium', resolvePriorityConfig(selectedJob.priority).class)}>
                     {selectedJob.priority}
                   </span>
-                  {isOverdue(selectedJob.promisedDate) && !['READY', 'DELIVERED', 'CANCELLED'].includes(selectedJob.status) && (
+                  {isOverdue(selectedJob.promisedDate) && !FINISHED_JOB_STATUSES.includes(selectedJob.status) && (
                     <span className="px-2 py-1 bg-red-50 text-red-700 text-xs rounded-full font-medium">Overdue</span>
                   )}
                 </div>

@@ -23,6 +23,19 @@ export function isPastDueIst(promisedDate: string | null | undefined, now: Date 
   return !!due && !!today && due < today;
 }
 
+/** A finished job is never shown as overdue, whatever its promise date. */
+export const FINISHED_JOB_STATUSES = ['READY', 'DELIVERED', 'CANCELLED'];
+
+/** One overdue rule for every Workshop view (job list, drawer, stage board):
+ *  past its IST promise day and not finished. */
+export function isJobOverdueIst(
+  promisedDate: string | null | undefined,
+  status: string | null | undefined,
+  now: Date = new Date(),
+): boolean {
+  return isPastDueIst(promisedDate, now) && !FINISHED_JOB_STATUSES.includes((status || '').toUpperCase());
+}
+
 /** The board's / drawer's short date ("14 Nov"), always the IST calendar day
  *  whatever the browser's zone: a date-only promise date is that day, a naive
  *  backend timestamp is UTC (utils/datetime.toDate). Missing -> Not on file. */
