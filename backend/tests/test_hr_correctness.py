@@ -380,6 +380,7 @@ class TestCheckOutBlocking:
         rec = {
             "attendance_id": "att-2",
             "employee_id": "u-test",
+            "store_id": "S1",  # D48: a no-shop day is read-only on this door
             "date": ist_today().isoformat(),
             "check_in": "2026-01-01T09:00:00",
             "check_out": None,

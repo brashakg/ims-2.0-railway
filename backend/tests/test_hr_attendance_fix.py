@@ -442,16 +442,16 @@ class TestSummary:
         r2 = c.get(f"/hr/attendance/summary?month={month}", headers=_headers(roles=["ACCOUNTANT"]))
         assert r2.status_code == 200, r2.text
 
-    def test_summary_failsoft_no_db(self, monkeypatch):
+    def test_summary_no_db_is_unavailable_not_an_empty_summary(self, monkeypatch):
+        # #1433 Codex round 2: an empty summary read as "no attendance".
         app = FastAPI()
         app.include_router(hr.router, prefix="/hr")
         monkeypatch.setattr(hr, "get_attendance_repository", lambda: None)
         monkeypatch.setattr(hr, "get_user_repository", lambda: None)
         c = TestClient(app)
         month = ist_today().strftime("%Y-%m")
-        r = c.get(f"/hr/attendance/summary?month={month}", headers=_headers(roles=["ADMIN"]))
-        assert r.status_code == 200, r.text
-        assert r.json()["employees"] == []
+        with pytest.raises(hr.AttendanceUnavailable):
+            c.get(f"/hr/attendance/summary?month={month}", headers=_headers(roles=["ADMIN"]))
 
 
 # ---------------------------------------------------------------------------

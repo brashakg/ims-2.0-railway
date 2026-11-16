@@ -27,7 +27,7 @@ from ..dependencies import (
     user_store_scope,
 )
 from ..services import attendance_engine
-from database.repositories.hr_repository import AttendanceUnavailable
+from database.repositories.hr_repository import AttendanceUnavailable, _strict
 from ..services.file_store import (
     ANY_KIND,
     get_file_store,
@@ -298,6 +298,9 @@ class AttendanceEditRequest(BaseModel):
     is_late: Optional[bool] = None
     late_minutes: Optional[int] = None
     notes: Optional[str] = None
+    # D48: only for a row saved WITHOUT a shop -- the shop the correction
+    # records it at, named explicitly. Never inferred from the store filter.
+    assign_store_id: Optional[str] = None
     # Sentinels so a caller can explicitly CLEAR a stamp (send null) vs. leave it
     # untouched (omit the key). Pydantic can't distinguish those for Optional
     # fields alone, so the endpoint uses model_fields_set.
@@ -664,11 +667,8 @@ async def get_attendance(
     reach (org-wide only for the cross-store roles). See _store_scope_filter for
     why the previous ``or active_store_id`` + truthiness test fell open.
     """
-    attendance_repo = get_attendance_repository()
     scope = _scope_for_request(store_id, current_user)
-
-    if attendance_repo is None:
-        return {"records": [], "total": 0}
+    attendance_repo = _attendance_repo_or_503()
 
     filter_dict = {}
     if scope is not None:
@@ -719,8 +719,8 @@ async def get_attendance_grid(
     (HQ roles may pass any; lower roles only their own). An OMITTED store_id
     falls back to the caller's whole store reach via _store_scope_filter -- an
     AREA_MANAGER sees all their stores rather than just the active one, and a
-    store-less manager sees NOTHING rather than the whole org. Fail-soft: no DB
-    / no records => empty-but-valid grid (never 500).
+    store-less manager sees NOTHING rather than the whole org. No records =>
+    empty-but-valid grid; no store or a failed read => 503 (#1433 r2).
     """
     year, mon = _parse_month(month)
 
@@ -730,50 +730,42 @@ async def get_attendance_grid(
     # Per-employee label bound for an $in scope (see _scope_store_set).
     reachable_stores = _scope_store_set(scope)
 
-    user_repo = get_user_repository()
-    attendance_repo = get_attendance_repository()
-
-    # Build the roster (store-scoped). No DB -> empty roster, still valid grid.
-    employees = []
-    if user_repo is not None:
-        roster_filter = {"is_active": True}
-        if scope is not None:
-            # users.store_ids is an ARRAY; both a scalar and an $in clause match
-            # by containment in Mongo.
-            roster_filter["store_ids"] = scope
-        try:
-            users = user_repo.find_many(roster_filter, limit=1000)
-        except Exception:
-            users = []
-        employees = _roster_from_users(users, pinned_store, reachable_stores)
+    # No attendance store, or a failed roster / record read, is a 503 -- never
+    # an empty month (#1433 review round 2).
+    attendance_repo = _attendance_repo_or_503()
+    roster_filter = {"is_active": True}
+    if scope is not None:
+        # users.store_ids is an ARRAY; both a scalar and an $in clause match
+        # by containment in Mongo.
+        roster_filter["store_ids"] = scope
+    users = _report_rows(get_user_repository(), roster_filter, 1000)
+    employees = _roster_from_users(users, pinned_store, reachable_stores)
 
     # Pull the month's attendance records (string date range mirrors the actual
     # write path in POST /attendance/mark).
-    records = []
+    n_days = _days_in_month(year, mon)
+    start = f"{year:04d}-{mon:02d}-01"
+    end = f"{year:04d}-{mon:02d}-{n_days:02d}"
+    rec_filter = {"date": {"$gte": start, "$lte": end}}
+    if scope is not None:
+        rec_filter["store_id"] = scope
+    records = attendance_repo.find_many(rec_filter, limit=5000)
     no_shop_records: list = []
-    if attendance_repo is not None:
-        n_days = _days_in_month(year, mon)
-        start = f"{year:04d}-{mon:02d}-01"
-        end = f"{year:04d}-{mon:02d}-{n_days:02d}"
-        rec_filter = {"date": {"$gte": start, "$lte": end}}
-        if scope is not None:
-            rec_filter["store_id"] = scope
-        records = attendance_repo.find_many(rec_filter, limit=5000)
-        if scope is not None and employees:
-            # D48: legacy days saved without a shop, for this roster only. Shown
-            # read-only ("Shop not recorded"), never counted in this store.
-            ids = [e["employee_id"] for e in employees]
-            no_shop = attendance_repo.find_many(
-                {
-                    "date": {"$gte": start, "$lte": end},
-                    "employee_id": {"$in": ids},
-                    "store_id": {"$in": [None, ""]},
-                },
-                limit=5000,
-            )
-            no_shop_records = [
-                r for r in no_shop if not r.get("store_id") and r.get("employee_id") in ids
-            ]
+    if scope is not None and employees:
+        # D48: legacy days saved without a shop, for this roster only. Shown
+        # read-only ("Shop not recorded"), never counted in this store.
+        ids = [e["employee_id"] for e in employees]
+        no_shop = attendance_repo.find_many(
+            {
+                "date": {"$gte": start, "$lte": end},
+                "employee_id": {"$in": ids},
+                "store_id": {"$in": [None, ""]},
+            },
+            limit=5000,
+        )
+        no_shop_records = [
+            r for r in no_shop if not r.get("store_id") and r.get("employee_id") in ids
+        ]
 
     return _build_grid(year, mon, employees, records, no_shop_records)
 
@@ -790,8 +782,8 @@ async def get_attendance_summary(
     leave / holiday / late), days_present, and % present, plus company-wide
     totals. Built from the SAME roster + records as /attendance/grid (so the two
     can never disagree), then aggregated. Store-scoped the same way (see
-    _scope_for_request) + fail-soft: no DB / no records => a valid empty
-    summary, never a 500.
+    _scope_for_request) ; no records => a valid empty summary, no store
+    or a failed read => 503 (#1433 r2).
     """
     year, mon = _parse_month(month)
     scope = _scope_for_request(store_id, current_user)
@@ -799,29 +791,21 @@ async def get_attendance_summary(
     # Per-employee label bound for an $in scope (see _scope_store_set).
     reachable_stores = _scope_store_set(scope)
 
-    user_repo = get_user_repository()
-    attendance_repo = get_attendance_repository()
+    # Same 503 rule as the grid (#1433 review round 2).
+    attendance_repo = _attendance_repo_or_503()
+    roster_filter = {"is_active": True}
+    if scope is not None:
+        roster_filter["store_ids"] = scope
+    users = _report_rows(get_user_repository(), roster_filter, 1000)
+    employees = _roster_from_users(users, pinned_store, reachable_stores)
 
-    employees = []
-    if user_repo is not None:
-        roster_filter = {"is_active": True}
-        if scope is not None:
-            roster_filter["store_ids"] = scope
-        try:
-            users = user_repo.find_many(roster_filter, limit=1000)
-        except Exception:
-            users = []
-        employees = _roster_from_users(users, pinned_store, reachable_stores)
-
-    records = []
-    if attendance_repo is not None:
-        n_days = _days_in_month(year, mon)
-        start = f"{year:04d}-{mon:02d}-01"
-        end = f"{year:04d}-{mon:02d}-{n_days:02d}"
-        rec_filter = {"date": {"$gte": start, "$lte": end}}
-        if scope is not None:
-            rec_filter["store_id"] = scope
-        records = attendance_repo.find_many(rec_filter, limit=5000)
+    n_days = _days_in_month(year, mon)
+    start = f"{year:04d}-{mon:02d}-01"
+    end = f"{year:04d}-{mon:02d}-{n_days:02d}"
+    rec_filter = {"date": {"$gte": start, "$lte": end}}
+    if scope is not None:
+        rec_filter["store_id"] = scope
+    records = attendance_repo.find_many(rec_filter, limit=5000)
 
     grid = _build_grid(year, mon, employees, records)
     return _summarise_grid(grid)
@@ -896,15 +880,31 @@ def _resolve_employee_shift(
 
 
 def _attendance_repo_or_503():
-    """The attendance repository for a WRITE door, or AttendanceUnavailable (503).
+    """The attendance repository for every attendance door, or
+    AttendanceUnavailable (503).
 
     In production an unreachable Mongo leaves the seeded connection disconnected,
     so get_attendance_repository() is None. A writer must then fail loud, never
-    skip the write and answer "recorded" (#1433 review)."""
+    skip the write and answer "recorded" (#1433 review); a reader must never
+    answer an empty list or zero totals (#1433 review round 2)."""
     repo = get_attendance_repository()
     if repo is None:
         raise AttendanceUnavailable("attendance store not connected")
     return repo
+
+
+def _report_rows(repo, flt: dict, limit: int) -> list:
+    """Rows (users / leaves) an attendance REPORT is built from.
+
+    The base repository answers [] on a database error, which turned a failed
+    roster or leave read into "No employees" / "0 LWP days" (#1433 review
+    round 2). Here a missing repository or a failed read is a 503."""
+    if repo is None:
+        raise AttendanceUnavailable("report store not connected")
+    coll = getattr(repo, "collection", None)
+    if coll is None:  # an in-memory repository double: no driver to fail
+        return repo.find_many(flt, limit=limit) or []
+    return _strict(lambda: [repo._clean_id(d) for d in coll.find(flt).limit(limit)])
 
 
 def _caller_or_401(current_user: dict) -> str:
@@ -993,6 +993,13 @@ def _create_day_row_safe(attendance_repo, data: dict):
         )
         if existing is None:
             raise
+    if (existing.get("store_id") or None) != (data.get("store_id") or None):
+        # The racing winner holds this day under another shop (or none, D48):
+        # never move it here.
+        raise HTTPException(
+            status_code=409,
+            detail="This day was just recorded under another shop. Reload and check.",
+        )
     patch = {
         k: v
         for k, v in data.items()
@@ -1047,8 +1054,7 @@ async def check_in(
         compared to shift start + grace; a late check-in is RECORDED on the
         attendance doc (is_late / late_minutes). Record-only -- no payroll effect.
 
-    Fail-soft: with no DB connected the endpoint still returns a stub response so
-    the operator UI works in demo mode.
+    No attendance store / a failed write is a 503, never a stub "recorded".
     """
     roles = current_user.get("roles", []) or []
     # Attendance is the person's own record, not a shop's list: the shop
@@ -1107,7 +1113,7 @@ async def check_in(
             late_after=hd_rule["late_after"],
         )["is_half_day"]
 
-    # --- Record (fail-soft, IDEMPOTENT) ---
+    # --- Record (IDEMPOTENT; a failed write is a 503) ---
     # Key the day-row on (employee_id, date) -- the SAME shape mark_attendance
     # and the grid use (date = a date-only ISO STRING), which is exactly the
     # collection's unique index. A second check-in the same day UPDATES the one
@@ -1139,7 +1145,8 @@ async def check_in(
         update_data = {
             "employee_name": current_user.get("full_name")
             or current_user.get("username"),
-            "store_id": existing.get("store_id") or active_store,
+            # D48: no store_id here -- the row keeps the shop it was saved with
+            # (none stays none); a self check-in never attributes or moves a day.
             "status": base_status,
             "shift_id": (shift or {}).get("shift_id") or existing.get("shift_id"),
             "geo_verified": geo["reason"] in ("WITHIN_RADIUS", "EXEMPT_ROLE"),
@@ -1224,6 +1231,14 @@ async def check_out(
             status_code=409,
             detail="Already checked out today.",
         )
+    ci_dt = attendance_engine._coerce_check_in(existing.get("check_in"))
+    if ci_dt is not None and ci_dt >= attendance_engine._coerce_check_in(now_iso):
+        # A check-out may never land before the recorded check-in (the same
+        # rule as mark / PUT); a manager-entered later time must be corrected.
+        raise HTTPException(
+            status_code=409,
+            detail="Your recorded check-in is later than now. Ask your manager to correct today's time.",
+        )
     update = {"check_out": now_iso, "checked_out_by": employee_id}
     # Half-day auto-rule (DARK by default): now that the day is checked out, the
     # hours-below-min trigger is evaluable. Only DOWNGRADE a PRESENT day -- an
@@ -1269,6 +1284,11 @@ async def check_out_by_id(
     )
     if existing is None:
         raise HTTPException(status_code=404, detail="Attendance record not found")
+    if not existing.get("store_id"):
+        # D48: a day saved without a shop is read-only here; correct it with
+        # PUT naming the shop (validate_store_access(None) would otherwise
+        # fall back to the caller's own shop).
+        raise HTTPException(status_code=409, detail=_NO_SHOP_DETAIL)
     validate_store_access(existing.get("store_id"), current_user)
 
     # Must have checked in before checking out.
@@ -1329,14 +1349,7 @@ async def mark_attendance(
         and target_store
         and request.assign_store_id != target_store
     ):
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "Shop not recorded: this day was saved without a shop, so it "
-                "is not moved into the shop you are viewing. A correction must "
-                "name the shop explicitly."
-            ),
-        )
+        raise HTTPException(status_code=409, detail=_NO_SHOP_DETAIL)
     if row_store and target_store and row_store != target_store:
         raise HTTPException(
             status_code=409,
@@ -1386,6 +1399,12 @@ async def mark_attendance(
         _create_day_row_safe(attendance_repo, data)
 
     return {"message": "Attendance marked", "date": request.date.isoformat()}
+
+
+_NO_SHOP_DETAIL = (
+    "Shop not recorded: this day was saved without a shop, so it is not moved "
+    "into the shop you are viewing. A correction must name the shop explicitly."
+)
 
 
 def _require_employee_at_store(employee_id: str, store_id: Optional[str]) -> None:
@@ -1468,15 +1487,35 @@ async def edit_attendance(
     )
     if existing is None:
         raise HTTPException(status_code=404, detail="Attendance record not found")
-    validate_store_access(existing.get("store_id"), current_user)
 
     # Only the fields the caller actually sent (so null != absent).
     sent = request.model_fields_set
     if not sent:
         raise HTTPException(status_code=422, detail="No fields provided to update")
 
-    before = {k: v for k, v in existing.items() if k != "_id"}
     updates: dict = {}
+    row_store = existing.get("store_id")
+    if row_store:
+        validate_store_access(row_store, current_user)
+        if request.assign_store_id and request.assign_store_id != row_store:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"This day is already recorded at store {row_store}. "
+                    "Open that store to correct it."
+                ),
+            )
+    else:
+        # D48: a day saved without a shop is corrected only with the shop named
+        # explicitly -- the same rule as POST /attendance/mark. Never the
+        # caller's own shop by default.
+        if not request.assign_store_id:
+            raise HTTPException(status_code=409, detail=_NO_SHOP_DETAIL)
+        assign = validate_store_access(request.assign_store_id, current_user)
+        _require_employee_at_store(existing.get("employee_id"), assign)
+        updates["store_id"] = assign
+
+    before = {k: v for k, v in existing.items() if k != "_id"}
 
     if "status" in sent:
         updates["status"] = request.status
@@ -2170,13 +2209,7 @@ async def late_marks_report(
     """
     year, mon = _parse_month(month)
     scope = _scope_for_request(store_id, current_user)
-    attendance_repo = get_attendance_repository()
-    if attendance_repo is None:
-        return {
-            "month": f"{year:04d}-{mon:02d}",
-            "employees": [],
-            "total_late_marks": 0,
-        }
+    attendance_repo = _attendance_repo_or_503()  # never "0 late marks" (#1433 r2)
 
     n_days = _days_in_month(year, mon)
     start = f"{year:04d}-{mon:02d}-01"
@@ -2472,11 +2505,9 @@ async def lwp_report(
     fail-open class as the attendance reads.
     """
     scope = _scope_for_request(store_id, current_user)
-    attendance_repo = get_attendance_repository()
-    leave_repo = get_leave_repository()
-    user_repo = get_user_repository()
-    if attendance_repo is None:
-        return {"year": year, "month": month, "employees": [], "total_lwp_days": 0.0}
+    # No store or a failed attendance / roster / leave read is a 503, never
+    # "0 LWP days" -- the accountant copies this into payroll (#1433 r2).
+    attendance_repo = _attendance_repo_or_503()
 
     n_days = _days_in_month(year, month)
     start = f"{year:04d}-{month:02d}-01"
@@ -2484,17 +2515,13 @@ async def lwp_report(
 
     # Build the roster so an employee with ZERO records still appears (0 LWP).
     roster: dict = {}
-    if user_repo is not None:
-        try:
-            rfilter = {"is_active": True}
-            if scope is not None:
-                rfilter["store_ids"] = scope
-            for u in user_repo.find_many(rfilter, limit=1000) or []:
-                uid = u.get("user_id") or u.get("_id")
-                if uid:
-                    roster[uid] = u.get("full_name") or u.get("username") or uid
-        except Exception:
-            roster = {}
+    rfilter = {"is_active": True}
+    if scope is not None:
+        rfilter["store_ids"] = scope
+    for u in _report_rows(get_user_repository(), rfilter, 1000):
+        uid = u.get("user_id") or u.get("_id")
+        if uid:
+            roster[uid] = u.get("full_name") or u.get("username") or uid
 
     att_flt: dict = {"date": {"$gte": start, "$lte": end}}
     if scope is not None:
@@ -2503,17 +2530,12 @@ async def lwp_report(
         att_flt["employee_id"] = employee_id
     att_records = attendance_repo.find_many(att_flt, limit=10000)
 
-    leaves = []
-    if leave_repo is not None:
-        lv_flt: dict = {"status": "APPROVED"}
-        if scope is not None:
-            lv_flt["store_id"] = scope
-        if employee_id:
-            lv_flt["employee_id"] = employee_id
-        try:
-            leaves = leave_repo.find_many(lv_flt, limit=5000)
-        except Exception:
-            leaves = []
+    lv_flt: dict = {"status": "APPROVED"}
+    if scope is not None:
+        lv_flt["store_id"] = scope
+    if employee_id:
+        lv_flt["employee_id"] = employee_id
+    leaves = _report_rows(get_leave_repository(), lv_flt, 5000)
 
     # Bucket per employee.
     att_by_emp: dict = {}

@@ -415,3 +415,110 @@ def test_no_repository_writers_and_own_read_are_503_not_recorded(prod_db_down):
     ]
     assert [r.status_code for r in calls] == [503] * len(calls), [r.text for r in calls]
     assert not any("recorded" in r.text or "marked" in r.text for r in calls)
+
+
+def test_no_repository_readers_are_503_not_empty_reports(prod_db_down):
+    """#1433 Codex round 2: the manager readers of the same attendance data
+    answered 200 with an empty list / zero totals / 0 LWP days."""
+    c = prod_db_down
+    sm = _headers(["STORE_MANAGER"], user_id="sm", store_id="S1")
+    month = {"store_id": "S1", "month": DAY[:7]}
+    calls = [
+        c.get("/api/v1/hr/attendance", params={"store_id": "S1"}, headers=sm),
+        c.get("/api/v1/hr/attendance/grid", params=month, headers=sm),
+        c.get("/api/v1/hr/attendance/summary", params=month, headers=sm),
+        c.get("/api/v1/hr/attendance/late-marks", params=month, headers=sm),
+        c.get("/api/v1/hr/reports/lwp", params={"store_id": "S1", "year": 2026, "month": 11}, headers=sm),
+        c.get("/api/v1/reports/hr/attendance", params={"store_id": "S1", "year": 2026, "month": 11}, headers=_admin()),
+    ]
+    assert [r.status_code for r in calls] == [503] * len(calls), [r.text for r in calls]
+
+
+# --------------------------------------------------------------------------- D48, every writer
+# #1433 Codex round 2: the no-shop rule held on POST /mark only. A self
+# check-in wrote the selected shop onto a no-shop day; PUT and by-id check-out
+# corrected it with no shop named (validate_store_access(None) falls back to
+# the caller's own shop).
+
+
+def _noshop(coll, rid, emp, day, **extra):
+    coll.insert_one({"_id": rid, "attendance_id": rid, "employee_id": emp, "date": day, "status": "PRESENT", **extra})
+
+
+def test_d48_self_check_in_never_attributes_a_no_shop_day(real):
+    from api.utils.ist import now_ist
+
+    c, coll, audit = real
+    today = now_ist().date().isoformat()
+    _noshop(coll, "F1", "u-s", today, check_in=today + "T08:30:00+05:30")
+    _noshop(coll, "F2", "u-c", today, status="ABSENT")
+    r = c.post("/api/v1/hr/attendance/check-in", params=GEO, headers=_headers(["SALES_STAFF"], user_id="u-s", store_id="S1"))
+    assert r.status_code == 200 and r.json()["already_checked_in"] is True
+    row = coll.find_one({"_id": "F1"})
+    assert row.get("store_id") is None and row["check_in"] == today + "T08:30:00+05:30"
+    r = c.post("/api/v1/hr/attendance/check-in", params=GEO, headers=_headers(["CASHIER"], user_id="u-c", store_id="S1"))
+    assert r.status_code == 200, r.text
+    row = coll.find_one({"_id": "F2"})
+    assert row.get("store_id") is None and row["check_in"]
+    assert coll.count_documents({}) == 2  # no second row for either day
+
+
+def test_d48_put_and_by_id_checkout_need_the_shop_named(real):
+    c, coll, audit = real
+    _noshop(coll, "N2", "emp-a", DAY, check_in=DAY + "T10:00:00+05:30")
+    sm = _headers(["STORE_MANAGER"], user_id="sm", store_id="S1")
+    before = coll.find_one({"_id": "N2"})
+    r = c.put("/api/v1/hr/attendance/N2", headers=sm, json={"status": "ABSENT"})
+    assert r.status_code == 409 and "Shop not recorded" in r.json()["detail"]
+    r = c.post("/api/v1/hr/attendance/N2/check-out", headers=sm)
+    assert r.status_code == 409 and "Shop not recorded" in r.json()["detail"]
+    assert coll.find_one({"_id": "N2"}) == before and audit.rows == []
+    # a shop the manager does not run, or the employee does not work at, is refused
+    assert c.put("/api/v1/hr/attendance/N2", headers=sm, json={"status": "ABSENT", "assign_store_id": "S2"}).status_code == 403
+    assert coll.find_one({"_id": "N2"}) == before
+    # explicit attribution: corrected and audited with the shop it was given
+    r = c.put("/api/v1/hr/attendance/N2", headers=sm, json={"status": "ABSENT", "assign_store_id": "S1"})
+    assert r.status_code == 200, r.text
+    row = coll.find_one({"_id": "N2"})
+    assert row["store_id"] == "S1" and row["status"] == "ABSENT"
+    assert sorted(audit.rows[-1]["detail"]["changed_fields"]) == ["status", "store_id"]
+    # once it has a shop, PUT cannot move it to another
+    adm = _admin()
+    assert c.put("/api/v1/hr/attendance/N2", headers=adm, json={"status": "PRESENT", "assign_store_id": "S2"}).status_code == 409
+    assert coll.find_one({"_id": "N2"})["store_id"] == "S1"
+
+
+def test_report_roster_and_leave_read_failures_are_503(real, monkeypatch):
+    """A failed users / leaves read used to become "No employees" / 0 LWP."""
+    from database.repositories.user_repository import UserRepository
+
+    c, coll, _ = real
+    users = mongomock.MongoClient().db.users
+    users.insert_one({"user_id": "emp-a", "store_ids": ["S1"], "is_active": True})
+    leaves = mongomock.MongoClient().db.leaves
+    monkeypatch.setattr(hr, "get_user_repository", lambda: UserRepository(users))
+    monkeypatch.setattr(hr, "get_leave_repository", lambda: UserRepository(leaves))
+    sm = _headers(["STORE_MANAGER"], user_id="sm", store_id="S1")
+    month = {"store_id": "S1", "month": DAY[:7]}
+    lwp = {"store_id": "S1", "year": 2026, "month": 11}
+    ok = c.get("/api/v1/hr/attendance/grid", params=month, headers=sm)
+    assert ok.status_code == 200 and [e["employee_id"] for e in ok.json()["employees"]] == ["emp-a"]
+    assert c.get("/api/v1/hr/reports/lwp", params=lwp, headers=sm).status_code == 200
+    monkeypatch.setattr(leaves, "find", _boom)
+    assert c.get("/api/v1/hr/reports/lwp", params=lwp, headers=sm).status_code == 503
+    monkeypatch.setattr(users, "find", _boom)
+    for path, params in [("grid", month), ("summary", month)]:
+        assert c.get(f"/api/v1/hr/attendance/{path}", params=params, headers=sm).status_code == 503
+    assert c.get("/api/v1/hr/reports/lwp", params=lwp, headers=sm).status_code == 503
+
+
+def test_self_check_out_never_lands_before_the_recorded_check_in(real):
+    from api.utils.ist import now_ist
+
+    c, coll, _ = real
+    today = now_ist().date().isoformat()
+    later = today + "T23:59:59+05:30"  # a manager-entered time later than now
+    coll.insert_one({"_id": "L9", "attendance_id": "L9", "employee_id": "u-o", "store_id": "S1", "date": today, "status": "PRESENT", "check_in": later})
+    r = c.post("/api/v1/hr/attendance/check-out", params=GEO, headers=_headers(["OPTOMETRIST"], user_id="u-o", store_id="S1"))
+    assert r.status_code == 409, r.text
+    assert coll.find_one({"_id": "L9"}).get("check_out") is None
