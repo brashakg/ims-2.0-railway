@@ -2,7 +2,7 @@
 // IMS 2.0 - Settings: User Management & Auth
 // ============================================================================
 
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Plus, Edit2, Trash2, X, Search, ShieldCheck, Building2, Mail, Phone, BadgeCheck,
   KeyRound, Copy, Check, Lock, Eye, EyeOff,
@@ -135,11 +135,20 @@ export function UserManagementSection() {
     }
   };
 
+  // Audit L1-F02: saving used to raise the PAGE-wide loading flag, which
+  // unmounted the open form; a refused save (422/409/403/500/offline) then
+  // came back with every field blank. The form now stays mounted behind its
+  // own busy flag, so a refusal keeps the whole draft for a correction.
+  const [savingUser, setSavingUser] = useState(false);
+  const savingUserRef = useRef(false);
+
   const handleSaveUser = async (userData: Partial<UserData>, password?: string) => {
     const phoneErr = validatePhone(userData.phone);
     if (phoneErr) { toast.error(phoneErr); return; }
+    if (savingUserRef.current) return; // one save at a time (a second Enter/click)
+    savingUserRef.current = true;
     try {
-      setIsLoading(true);
+      setSavingUser(true);
       const apiData = {
         name: userData.fullName || '',
         email: userData.email || '',
@@ -175,7 +184,8 @@ export function UserManagementSection() {
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to save user');
     } finally {
-      setIsLoading(false);
+      savingUserRef.current = false;
+      setSavingUser(false);
     }
   };
 
@@ -302,6 +312,7 @@ export function UserManagementSection() {
             <input
               type="text"
               value={search}
+              aria-label="Search users"
               onChange={e => setSearch(e.target.value)}
               placeholder="Search name, username, email or phone"
               className="w-full pl-9 pr-3 py-2 border border-gray-300 rounded-lg text-sm focus:border-bv-red-500 focus:outline-none"
@@ -309,6 +320,7 @@ export function UserManagementSection() {
           </div>
           <select
             value={roleFilter}
+            aria-label="Filter by role"
             onChange={e => setRoleFilter(e.target.value)}
             className="px-3 py-2 bg-white border border-gray-300 text-gray-900 rounded-lg text-sm focus:border-bv-red-500 focus:outline-none"
           >
@@ -319,6 +331,7 @@ export function UserManagementSection() {
           </select>
           <select
             value={storeFilter}
+            aria-label="Filter by store"
             onChange={e => setStoreFilter(e.target.value)}
             className="px-3 py-2 bg-white border border-gray-300 text-gray-900 rounded-lg text-sm focus:border-bv-red-500 focus:outline-none"
           >
@@ -329,6 +342,7 @@ export function UserManagementSection() {
           </select>
           <select
             value={statusFilter}
+            aria-label="Filter by status"
             onChange={e => setStatusFilter(e.target.value as 'all' | 'active' | 'inactive')}
             className="px-3 py-2 bg-white border border-gray-300 text-gray-900 rounded-lg text-sm focus:border-bv-red-500 focus:outline-none"
           >
@@ -519,6 +533,7 @@ export function UserManagementSection() {
             setEditingUser(null);
           }}
           onSave={handleSaveUser}
+          saving={savingUser}
           currentUserRole={user?.activeRole || ''}
           currentUserRoles={user?.roles || []}
           currentUserStores={user?.storeIds || []}
@@ -813,6 +828,7 @@ function UserModal({
   stores,
   onClose,
   onSave,
+  saving = false,
   currentUserRole,
   currentUserRoles,
   currentUserStores,
@@ -821,6 +837,7 @@ function UserModal({
   stores: StoreData[];
   onClose: () => void;
   onSave: (data: Partial<UserData>, password?: string) => void;
+  saving?: boolean;
   currentUserRole: string;
   currentUserRoles: string[];
   currentUserStores: string[];
@@ -862,8 +879,9 @@ function UserModal({
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
           <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-gray-600 mb-1">Username *</label>
+              <label htmlFor="user-username" className="block text-sm font-medium text-gray-600 mb-1">Username *</label>
               <input
+                id="user-username"
                 type="text"
                 value={formData.username || ''}
                 onChange={e => setFormData(prev => ({ ...prev, username: e.target.value }))}
@@ -871,8 +889,9 @@ function UserModal({
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-600 mb-1">Full Name *</label>
+              <label htmlFor="user-full-name" className="block text-sm font-medium text-gray-600 mb-1">Full Name *</label>
               <input
+                id="user-full-name"
                 type="text"
                 value={formData.fullName || ''}
                 onChange={e => setFormData(prev => ({ ...prev, fullName: e.target.value }))}
@@ -883,8 +902,9 @@ function UserModal({
 
           <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-gray-600 mb-1">Email *</label>
+              <label htmlFor="user-email" className="block text-sm font-medium text-gray-600 mb-1">Email *</label>
               <input
+                id="user-email"
                 type="email"
                 value={formData.email || ''}
                 onChange={e => setFormData(prev => ({ ...prev, email: e.target.value }))}
@@ -892,8 +912,9 @@ function UserModal({
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-600 mb-1">Phone</label>
+              <label htmlFor="user-phone" className="block text-sm font-medium text-gray-600 mb-1">Phone</label>
               <input
+                id="user-phone"
                 type="tel"
                 value={formData.phone || ''}
                 onChange={e => setFormData(prev => ({ ...prev, phone: e.target.value }))}
@@ -904,8 +925,9 @@ function UserModal({
 
           {!user && (
             <div>
-              <label className="block text-sm font-medium text-gray-600 mb-1">Password *</label>
+              <label htmlFor="user-password" className="block text-sm font-medium text-gray-600 mb-1">Password *</label>
               <input
+                id="user-password"
                 type="password"
                 value={password}
                 onChange={e => setPassword(e.target.value)}
@@ -975,8 +997,9 @@ function UserModal({
 
           <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-gray-600 mb-1">Status</label>
+              <label htmlFor="user-status" className="block text-sm font-medium text-gray-600 mb-1">Status</label>
               <select
+                id="user-status"
                 value={formData.isActive ? 'active' : 'inactive'}
                 onChange={e => setFormData(prev => ({ ...prev, isActive: e.target.value === 'active' }))}
                 className="w-full px-3 py-2 bg-white border border-gray-300 text-gray-900 rounded-lg focus:border-bv-red-500 focus:outline-none"
@@ -1009,8 +1032,8 @@ function UserModal({
           <button onClick={onClose} className="btn-outline">
             Cancel
           </button>
-          <button onClick={() => onSave(formData, password)} className="btn-primary">
-            {user ? 'Update User' : 'Create User'}
+          <button onClick={() => onSave(formData, password)} disabled={saving} className="btn-primary">
+            {saving ? 'Saving…' : user ? 'Update User' : 'Create User'}
           </button>
         </div>
       </div>
