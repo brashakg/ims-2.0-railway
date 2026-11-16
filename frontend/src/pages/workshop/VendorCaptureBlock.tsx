@@ -8,6 +8,7 @@ import { workshopApi, vendorsApi } from '../../services/api';
 import { useToast } from '../../context/ToastContext';
 import type { Job } from './shared';
 import { getErrorMessage } from '../../utils/errorHandler';
+import { formatDateTimeIST } from '../../utils/datetime';
 
 // ============================================================================
 // Vendor capture block — admin stamps the lens lab + their order ID +
@@ -244,7 +245,7 @@ export function VendorCaptureBlock({ job, onSaved }: { job: Job; onSaved: () => 
               .map((h, i) => (
                 <li key={i} className="text-xs text-gray-700 flex gap-2">
                   <span className="font-mono text-gray-400">
-                    {h.at ? new Date(h.at).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—'}
+                    {formatDateTimeIST(h.at)}
                   </span>
                   <span className="font-semibold text-gray-800">{h.status}</span>
                   {h.note && <span className="text-gray-600">· {h.note}</span>}

@@ -241,6 +241,14 @@ const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', '
 
 export function formatDate(value: Date | string | null | undefined): string {
   if (!value) return '';
+  // A date-only "YYYY-MM-DD" is a calendar day, not an instant: print it as
+  // is. new Date() reads it as UTC midnight, which the local getters below
+  // turn into the previous day west of UTC (Codex PR-1425).
+  const day = typeof value === 'string' ? /^(\d{4})-(\d{2})-(\d{2})$/.exec(value.trim()) : null;
+  if (day) {
+    const m = Number(day[2]);
+    if (m >= 1 && m <= 12) return `${day[3]}-${MONTHS[m - 1]}-${day[1]}`;
+  }
   const d = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(d.getTime())) return '';
   return `${String(d.getDate()).padStart(2, '0')}-${MONTHS[d.getMonth()]}-${d.getFullYear()}`;

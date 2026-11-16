@@ -112,6 +112,14 @@ export function WorkshopJobDetail({ page }: { page: WorkshopPageState }) {
                   )}
                 </div>
 
+                {/* Fitting instructions from the sale (L2-WS-F03) */}
+                {selectedJob.fittingInstructions && (
+                  <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
+                    <p className="text-sm font-medium text-blue-800">Fitting instructions</p>
+                    <p className="text-sm text-blue-800 mt-1 whitespace-pre-line">{selectedJob.fittingInstructions}</p>
+                  </div>
+                )}
+
                 {/* Notes */}
                 {selectedJob.notes && (
                   <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">

@@ -5,7 +5,8 @@
 
 import { Clock, Timer, Zap } from 'lucide-react';
 import type { JobStatus, JobPriority } from '../../types';
-import { istDayString } from '../../utils/datetime';
+import type { JobCardPrintData } from '../../components/print/WorkshopJobCardPrint';
+import { istDayString, toDate, IST_TZ } from '../../utils/datetime';
 
 /** L2-WS-F02: what a screen or job card shows for a detail that is not on
  *  file, so a missing value reads as missing, never as a blank. */
@@ -20,6 +21,15 @@ export function isPastDueIst(promisedDate: string | null | undefined, now: Date 
   const due = promisedDate ? istDayString(promisedDate) : null;
   const today = istDayString(now);
   return !!due && !!today && due < today;
+}
+
+/** The board's / drawer's short date ("14 Nov"), always the IST calendar day
+ *  whatever the browser's zone: a date-only promise date is that day, a naive
+ *  backend timestamp is UTC (utils/datetime.toDate). Missing -> Not on file. */
+export function formatJobDate(value: string | null | undefined): string {
+  const d = toDate(value);
+  if (!d) return NOT_ON_FILE;
+  return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', timeZone: IST_TZ });
 }
 
 // Job type
@@ -44,6 +54,9 @@ export interface Job {
   createdAt: string;
   completedAt?: string;
   notes?: string;
+  /** Sale-line fitting instructions ("Frame: note; Lens: note") -- the
+   *  bench's handoff from the counter (L2-WS-F03). */
+  fittingInstructions?: string | null;
   // Lens-order lifecycle (snake_case — passes through job_to_frontend as-is).
   lens_status?: LensStatus;
   lens_ordered_at?: string;
@@ -123,4 +136,27 @@ export function resolveStatusConfig(status: unknown) {
 export function resolvePriorityConfig(priority: unknown) {
   const key = (typeof priority === 'string' ? priority : 'NORMAL') as JobPriority;
   return PRIORITY_CONFIG[key] ?? UNKNOWN_PRIORITY;
+}
+
+/** What the printed job card shows for a job: the bench's fitting
+ *  instructions and notes travel with it (L2-WS-F03), and its dates are the
+ *  IST calendar day, so the card prints the same day in every browser zone. */
+export function jobCardPrintData(job: Job): JobCardPrintData {
+  return {
+    jobNumber: job.jobNumber,
+    orderNumber: job.orderNumber,
+    customerName: job.customerName,
+    customerPhone: job.customerPhone,
+    frameBrand: (job.frameName || '').split(' ')[0],
+    frameModel: (job.frameName || '').replace(/^[^ ]+ /, ''),
+    frameColor: '',
+    lensType: job.lensType,
+    priority: job.priority,
+    dueDate: istDayString(job.promisedDate) ?? '',
+    assignedTechnician: job.assignedToName || job.assignedTo,
+    fittingInstructions: job.fittingInstructions,
+    notes: job.notes,
+    status: resolveStatusConfig(job.status).label,
+    createdDate: istDayString(job.createdAt) ?? '',
+  };
 }

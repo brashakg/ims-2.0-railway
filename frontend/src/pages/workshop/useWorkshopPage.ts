@@ -21,7 +21,7 @@ import type { LensFittingFormValue } from '../../components/pos/LensFittingFormM
 import { resolveItemPrescriptionId, dcHardlockMessage } from './qcHandover';
 import type { EntityLike } from '../../components/print/legalPrimitives';
 import type { Job, LensStatus } from './shared';
-import { NOT_ON_FILE, isPastDueIst } from './shared';
+import { isPastDueIst, formatJobDate } from './shared';
 import { getErrorMessage } from '../../utils/errorHandler';
 import { istDayString } from '../../utils/datetime';
 
@@ -195,15 +195,9 @@ const loadJobs = async () => {
   const readyJobs = jobs.filter(j => j.status === 'READY');
   const overdueJobs = activeJobs.filter(j => isPastDueIst(j.promisedDate));
 
-  // L2-WS-F02: a missing or unreadable date says so -- never "Invalid Date".
-  const formatDate = (dateStr: string | null | undefined) => {
-    const d = dateStr ? new Date(dateStr) : null;
-    if (!d || Number.isNaN(d.getTime())) return NOT_ON_FILE;
-    return d.toLocaleDateString('en-IN', {
-      day: '2-digit',
-      month: 'short',
-    });
-  };
+  // L2-WS-F02: a missing or unreadable date says so -- never "Invalid Date";
+  // a date is its IST day in every browser zone.
+  const formatDate = formatJobDate;
 
   const isOverdue = (promisedDate: string | null | undefined) => isPastDueIst(promisedDate);
 

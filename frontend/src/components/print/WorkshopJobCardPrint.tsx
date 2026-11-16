@@ -19,7 +19,7 @@ import {
   type StoreLike,
 } from './legalPrimitives';
 
-interface JobCardPrintData {
+export interface JobCardPrintData {
   jobNumber: string;
   orderNumber: string;
   customerName: string;
@@ -34,6 +34,9 @@ interface JobCardPrintData {
   priority: string;
   dueDate: string;
   assignedTechnician?: string;
+  /** Sale-line fitting instructions and the order's special notes. */
+  fittingInstructions?: string | null;
+  notes?: string | null;
   status: string;
   createdDate: string;
 }
@@ -203,6 +206,23 @@ export function WorkshopJobCardPrint({
               {job.lensTint && <div style={{ fontSize: 10, color: '#4a4a45', marginTop: 1 }}>Tint: {job.lensTint}</div>}
             </div>
           </div>
+
+          {(job.fittingInstructions || job.notes) && (
+            <div style={{ padding: '8px 14px', borderTop: '1px solid #aaa9a3', fontSize: 10.5 }}>
+              {job.fittingInstructions && (
+                <div>
+                  <div style={{ color: '#4a4a45', textTransform: 'uppercase', letterSpacing: '.08em', fontSize: 9 }}>Fitting Instructions</div>
+                  <div style={{ color: '#1a1a19', fontWeight: 600, marginTop: 2, whiteSpace: 'pre-line' }}>{job.fittingInstructions}</div>
+                </div>
+              )}
+              {job.notes && (
+                <div style={{ marginTop: job.fittingInstructions ? 6 : 0 }}>
+                  <div style={{ color: '#4a4a45', textTransform: 'uppercase', letterSpacing: '.08em', fontSize: 9 }}>Notes</div>
+                  <div style={{ color: '#1a1a19', marginTop: 2, whiteSpace: 'pre-line' }}>{job.notes}</div>
+                </div>
+              )}
+            </div>
+          )}
 
           {job.assignedTechnician && (
             <div style={{ padding: '8px 14px', borderTop: '1px solid #aaa9a3', fontSize: 10.5 }}>
