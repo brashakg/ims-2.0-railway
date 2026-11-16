@@ -152,6 +152,11 @@ class FakeDB:
 def fake_db(monkeypatch) -> FakeDB:
     db = FakeDB()
     monkeypatch.setattr(portal_module, "_get_db", lambda: db)
+    # D91: the OTP is answered "sent" only once its notification row is
+    # stored, so the queue writer writes into the same fake database.
+    from api.services import notification_service
+
+    monkeypatch.setattr(notification_service, "_get_db", lambda: db)
     return db
 
 

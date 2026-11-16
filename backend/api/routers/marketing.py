@@ -127,7 +127,7 @@ def _queued_or_raise(result: dict) -> dict:
         raise HTTPException(
             status_code=422,
             detail=(
-                "Message not queued: the template needs "
+                "Message not sent: the template needs "
                 + ", ".join(result.get("missing_variables") or [])
                 + " and it was not supplied."
             ),
@@ -135,7 +135,7 @@ def _queued_or_raise(result: dict) -> dict:
     if not (result or {}).get("persisted"):
         raise HTTPException(
             status_code=503,
-            detail="Message could not be saved to the queue. Nothing was queued - try again.",
+            detail="Message not sent: it could not be saved to the queue. Try again.",
         )
     return result
 
@@ -698,8 +698,9 @@ async def send_referral_invite(
         }
         ref_coll.insert_one(referral)
 
-    # Send invite notification
-    result = await send_notification(
+    # Send invite notification. D91: only a stored message answers "sent";
+    # the INVITED referral row above is reused by a retry (same code).
+    result = _queued_or_raise(await send_notification(
         store_id=store_id,
         customer_id=customer_id,
         customer_phone=customer.get("mobile", ""),
@@ -715,7 +716,7 @@ async def send_referral_invite(
         triggered_by=current_user.get("user_id", "unknown"),
         related_entity_type="referral",
         related_entity_id=referral_code,
-    )
+    ))
     return {
         "message": "Referral invite sent",
         "referral_code": referral_code,
@@ -992,22 +993,31 @@ async def send_nps_survey(
 
     store = db.get_collection("stores").find_one({"store_id": store_id}) or {}
 
-    await send_notification(
-        store_id=store_id,
-        customer_id=order.get("customer_id", ""),
-        customer_phone=customer.get("mobile", ""),
-        customer_name=customer.get("name", "Customer"),
-        template_id="NPS_SURVEY",
-        channel="WHATSAPP",
-        variables={
-            "store_name": store.get("name", "Better Vision"),
-            "survey_link": f"https://bettervision.in/nps/{nps_id}",
-        },
-        category="SERVICE",
-        triggered_by=current_user.get("user_id", "unknown"),
-        related_entity_type="order",
-        related_entity_id=order_id,
-    )
+    try:
+        res = await send_notification(
+            store_id=store_id,
+            customer_id=order.get("customer_id", ""),
+            customer_phone=customer.get("mobile", ""),
+            customer_name=customer.get("name", "Customer"),
+            template_id="NPS_SURVEY",
+            channel="WHATSAPP",
+            variables={
+                "store_name": store.get("name", "Better Vision"),
+                "survey_link": f"https://bettervision.in/nps/{nps_id}",
+            },
+            category="SERVICE",
+            triggered_by=current_user.get("user_id", "unknown"),
+            related_entity_type="order",
+            related_entity_id=order_id,
+        )
+    except Exception as exc:  # noqa: BLE001 - told below as "not sent"
+        logger.warning("NPS survey %s: queueing failed: %s", nps_id, exc)
+        res = {}
+    # D91: a survey whose message was not stored is NOT_SENT, never "sent".
+    from ..services.nps_trigger import mark_nps_not_sent
+
+    if mark_nps_not_sent(db, nps_id, res):
+        _queued_or_raise(res)
 
     return {"message": "NPS survey sent", "nps_id": nps_id}
 
@@ -1099,7 +1109,9 @@ async def get_nps_dashboard(
 
     coll = db.get_collection("nps_responses")
     all_surveys = list(
-        coll.find({"store_id": active_store}).sort("created_at", -1).limit(200)
+        coll.find({"store_id": active_store, "status": {"$ne": "NOT_SENT"}})
+        .sort("created_at", -1)
+        .limit(200)
     )
 
     responded = [s for s in all_surveys if s.get("score") is not None]

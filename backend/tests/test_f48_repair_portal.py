@@ -448,7 +448,7 @@ def test_router_ready_queues_dark_sms(db, monkeypatch):
         calls["n"] += 1
         calls["dispatched"] = False
         calls["category"] = kw.get("category")
-        return {"notification_id": "N1", "dispatched": False, "status": "PENDING"}
+        return {"notification_id": "N1", "dispatched": False, "status": "PENDING", "persisted": True}
 
     monkeypatch.setattr(ns, "send_notification", _cap)
 
@@ -471,6 +471,7 @@ def test_router_ready_queues_dark_sms(db, monkeypatch):
     )
     assert out["status"] == "READY"
     assert calls["n"] == 1 and calls["dispatched"] is False  # queued, never live-sent
+    assert out["ready_message"] == {"sent": True, "notification_id": "N1"}  # D91
 
 
 # ============================================================================

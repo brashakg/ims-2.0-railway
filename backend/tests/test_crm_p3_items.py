@@ -195,7 +195,8 @@ class TestNpsTrigger:
 
         async def _mock_send(**kwargs):
             sent_notifications.append(kwargs)
-            return {"notification_id": "N1"}
+            # The real writer's verdict: a stored row (D91 reads `persisted`).
+            return {"notification_id": "N1", "status": "PENDING", "persisted": True}
 
         # send_notification is imported inside the function body, so patch the
         # source module (notification_service) rather than the nps_trigger namespace.

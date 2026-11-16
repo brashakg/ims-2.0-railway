@@ -605,3 +605,226 @@ def test_walkout_followup_with_fillable_wording_is_queued_once_with_one_cap_row(
     assert _walkout_fu(db) == "queued"
     assert db.notification_logs.count_documents({"related_entity_id": "ZZ-WO-1"}) == 1
     assert db.comms_ledger.count_documents({"customer_id": CID}) == 1
+
+
+# --------------------------------------------------------------------------
+# D91(1): referral invite, NPS survey, repair-ready and Rx-portal OTP doors
+# say "sent" only for a STORED message. Two faults per door: the writer
+# REFUSED it (a placeholder the door cannot fill, D56) and the insert failed.
+# --------------------------------------------------------------------------
+
+UNFILLABLE = "Hi {customer_name}, {zz_value_the_door_cannot_fill}"
+
+
+def _fail_notification_inserts(monkeypatch):
+    from pymongo.collection import Collection
+
+    real = Collection.insert_one
+
+    def _insert(self, doc, *a, **k):
+        if self.name == "notification_logs":
+            raise OSError("injected: write failed")
+        return real(self, doc, *a, **k)
+
+    monkeypatch.setattr(Collection, "insert_one", _insert)
+
+
+def _fault(monkeypatch, fault, template_id):
+    if fault == "refused":
+        monkeypatch.setitem(ns.TEMPLATES, template_id, UNFILLABLE)
+    else:
+        _fail_notification_inserts(monkeypatch)
+
+
+def _referral():
+    return asyncio.run(mkt_mod.send_referral_invite(CID, current_user=dict(USER)))
+
+
+@pytest.mark.parametrize("fault,code", [("refused", 422), ("storage", 503)])
+def test_d91_referral_invite_not_stored_is_not_sent(db, monkeypatch, fault, code):
+    from fastapi import HTTPException
+
+    _fault(monkeypatch, fault, "REFERRAL_INVITE")
+    with pytest.raises(HTTPException) as exc:
+        _referral()
+    assert exc.value.status_code == code
+    assert exc.value.detail.startswith("Message not sent")
+    assert db.notification_logs.count_documents({"template_id": "REFERRAL_INVITE"}) == 0
+
+
+def test_d91_referral_invite_stored_answers_sent_and_a_retry_reuses_the_code(db, monkeypatch):
+    from fastapi import HTTPException
+
+    _fault(monkeypatch, "refused", "REFERRAL_INVITE")
+    with pytest.raises(HTTPException):
+        _referral()
+    monkeypatch.setitem(ns.TEMPLATES, "REFERRAL_INVITE", "Hi {customer_name}, code {referral_code}")
+    out = _referral()
+    assert out["message"] == "Referral invite sent" and out["notification"]["persisted"] is True
+    assert db.notification_logs.count_documents({"template_id": "REFERRAL_INVITE"}) == 1
+    assert db.referrals.count_documents({"referrer_customer_id": CID}) == 1  # same code reused
+
+
+def _nps_order(db, oid="ZZ-ORD-1"):
+    db.orders.insert_one({"order_id": oid, "store_id": "ZZ-S1", "customer_id": CID, "status": "DELIVERED"})
+    return oid
+
+
+@pytest.mark.parametrize("fault,code", [("refused", 422), ("storage", 503)])
+def test_d91_nps_survey_not_stored_is_not_sent(db, monkeypatch, fault, code):
+    from fastapi import HTTPException
+
+    oid = _nps_order(db)
+    _fault(monkeypatch, fault, "NPS_SURVEY")
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(mkt_mod.send_nps_survey(oid, current_user=dict(USER)))
+    assert exc.value.status_code == code and exc.value.detail.startswith("Message not sent")
+    assert db.notification_logs.count_documents({"template_id": "NPS_SURVEY"}) == 0
+    # The survey row is NOT_SENT and the NPS screen does not count it.
+    assert [r["status"] for r in db.nps_responses.find({"order_id": oid})] == ["NOT_SENT"]
+    stats = asyncio.run(mkt_mod.get_nps_dashboard(store_id="ZZ-S1", current_user=dict(USER)))
+    assert stats["total_surveys"] == 0
+
+
+def test_d91_nps_survey_stored_answers_sent(db):
+    oid = _nps_order(db)
+    out = asyncio.run(mkt_mod.send_nps_survey(oid, current_user=dict(USER)))
+    assert out["message"] == "NPS survey sent"
+    assert db.notification_logs.count_documents({"template_id": "NPS_SURVEY"}) == 1
+    assert [r["status"] for r in db.nps_responses.find({"order_id": oid})] == ["SENT"]
+
+
+@pytest.mark.parametrize("fault", ["refused", "storage"])
+def test_d91_auto_nps_on_delivery_not_stored_is_not_sent(db, monkeypatch, fault):
+    from api.services import nps_trigger
+
+    monkeypatch.setattr(nps_trigger, "_get_db", lambda: db)
+    with monkeypatch.context() as m:
+        _fault(m, fault, "NPS_SURVEY")
+        asyncio.run(nps_trigger.trigger_nps_on_delivery(
+            {"order_id": "ZZ-ORD-A", "customer_id": CID, "store_id": "ZZ-S1"}, dict(USER)))
+    assert [r["status"] for r in db.nps_responses.find({"order_id": "ZZ-ORD-A"})] == ["NOT_SENT"]
+    # A survey never sent does not block the customer's next one for 30 days.
+    asyncio.run(nps_trigger.trigger_nps_on_delivery(
+        {"order_id": "ZZ-ORD-B", "customer_id": CID, "store_id": "ZZ-S1"}, dict(USER)))
+    assert [r["status"] for r in db.nps_responses.find({"order_id": "ZZ-ORD-B"})] == ["SENT"]
+
+
+def test_d91_auto_nps_30_day_window_compares_utc_on_an_ist_host(db, monkeypatch):
+    """survey_sent_at is UTC; a host-clock cutoff on an IST host moved the
+    window 5.5 h. A survey sent 30 days minus 2 h ago still blocks."""
+    from datetime import timedelta, timezone
+
+    from api.services import nps_trigger
+
+    monkeypatch.setattr(nps_trigger, "_get_db", lambda: db)
+    ist = timezone(timedelta(hours=5, minutes=30))
+    real = nps_trigger.datetime
+
+    class _ISTHost(real):
+        @classmethod
+        def now(cls, tz=None):
+            return real.now(tz) if tz else real.now(ist).replace(tzinfo=None)
+
+    monkeypatch.setattr(nps_trigger, "datetime", _ISTHost)
+    sent = (real.now(timezone.utc) - timedelta(days=30) + timedelta(hours=2)).isoformat()
+    db.nps_responses.insert_one({"nps_id": "ZZ-NPS-OLD", "customer_id": CID, "order_id": "ZZ-OLD", "status": "SENT", "survey_sent_at": sent})
+    asyncio.run(nps_trigger.trigger_nps_on_delivery(
+        {"order_id": "ZZ-ORD-C", "customer_id": CID, "store_id": "ZZ-S1"}, dict(USER)))
+    assert db.nps_responses.count_documents({"order_id": "ZZ-ORD-C"}) == 0
+
+
+def _repair_ready(db, monkeypatch):
+    from api.routers import repair_portal as rp
+    from api.services import repair_portal as svc
+
+    monkeypatch.setattr(rp, "_get_db", lambda: db)
+    monkeypatch.setattr(rp, "validate_store_access", lambda *_a, **_k: True)
+    job = svc.open_job(db, "ZZ-S1", {"service_type": "Frame repair", "walkin_name": "Zz", "walkin_mobile": PHONE}, actor=USER)
+    svc.transition_job(db, job["job_id"], "ZZ-S1", "IN_PROGRESS", actor=USER)
+    out = asyncio.run(rp.transition_job(job["job_id"], rp.TransitionBody(to="READY"), current_user=dict(USER)))
+    return job["job_id"], out
+
+
+@pytest.mark.parametrize("fault", ["refused", "storage"])
+def test_d91_repair_ready_message_not_stored_is_not_sent(db, monkeypatch, fault):
+    _fault(monkeypatch, fault, "repair_ready")
+    jid, out = _repair_ready(db, monkeypatch)
+    assert out["status"] == "READY"  # the job moved; only the message failed
+    assert out["ready_message"]["sent"] is False
+    assert out["ready_message"]["error"].startswith("The ready message was not sent")
+    assert db.notification_logs.count_documents({"related_entity_id": jid}) == 0
+
+
+def test_d91_repair_ready_message_stored_answers_sent(db, monkeypatch):
+    monkeypatch.setitem(ns.TEMPLATES, "repair_ready", "Hi {customer_name}, job {job_id} is ready.")
+    jid, out = _repair_ready(db, monkeypatch)
+    assert out["ready_message"]["sent"] is True
+    assert db.notification_logs.count_documents({"related_entity_id": jid}) == 1
+
+
+def _otp(db, monkeypatch, sms_status="SIMULATED"):
+    import agents.providers as providers
+    from api import dependencies as deps
+    from api.routers import portal
+
+    sent = []
+
+    async def _sms(phone, message, **_k):
+        sent.append(message)
+        return SimpleNamespace(status=sms_status)
+
+    monkeypatch.setattr(providers, "send_sms", _sms)
+    monkeypatch.setattr(portal, "_get_db", lambda: db)
+    monkeypatch.setattr(portal, "_check_rate", lambda *_a, **_k: None)
+    monkeypatch.setattr(deps, "get_customer_repository", lambda: SimpleNamespace(
+        find_by_mobile=lambda m: db.customers.find_one({"mobile": m[-10:]}, {"_id": 0})))
+    return asyncio.run(portal.request_rx_otp(portal.RxOtpRequest(phone=PHONE), None)), sent
+
+
+def test_d91_portal_otp_not_stored_is_not_sent(db, monkeypatch):
+    from fastapi import HTTPException
+
+    _fail_notification_inserts(monkeypatch)
+    with pytest.raises(HTTPException) as exc:
+        _otp(db, monkeypatch)
+    assert exc.value.status_code == 503
+    assert exc.value.detail == "The code could not be sent. Try again or ask the shop"
+    assert db.notification_logs.count_documents({"template_id": "RX_PORTAL_OTP"}) == 0
+
+
+def test_d91_portal_otp_transport_failure_is_not_sent(db, monkeypatch):
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        _otp(db, monkeypatch, sms_status="FAILED")
+    assert exc.value.detail == "The code could not be sent. Try again or ask the shop"
+    assert [r["status"] for r in db.notification_logs.find({"template_id": "RX_PORTAL_OTP"})] == ["FAILED"]
+
+
+def test_d91_portal_otp_stored_answers_sent_and_the_drain_never_resends_it(db, monkeypatch, provider):
+    out, sent = _otp(db, monkeypatch)
+    assert out["ok"] is True and "has been sent" in out["message"] and len(sent) == 1
+    row = db.notification_logs.find_one({"template_id": "RX_PORTAL_OTP"})
+    assert row["status"] == "SIMULATED" and "code is ******." in row["message"]
+    # The stored OTP row is not PENDING: MEGAPHONE never sends it a second time.
+    sms_calls = []
+
+    async def _sms_spy(*a, **_k):
+        sms_calls.append(a)
+        return SimpleNamespace(ok=True, status="SIMULATED", provider_id="SPY", error=None)
+
+    monkeypatch.setattr(mega_mod, "send_sms", _sms_spy)
+    _drain(db)
+    assert sms_calls == [] and provider == []
+
+
+def test_d91_portal_otp_unknown_number_stays_generic(db, monkeypatch):
+    from api import dependencies as deps
+    from api.routers import portal
+
+    monkeypatch.setattr(portal, "_get_db", lambda: db)
+    monkeypatch.setattr(portal, "_check_rate", lambda *_a, **_k: None)
+    monkeypatch.setattr(deps, "get_customer_repository", lambda: SimpleNamespace(find_by_mobile=lambda m: None))
+    out = asyncio.run(portal.request_rx_otp(portal.RxOtpRequest(phone="9988776655"), None))
+    assert out["ok"] is True and db.notification_logs.count_documents({}) == 0

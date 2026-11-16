@@ -40,6 +40,28 @@ def _get_db():
         return None
 
 
+def mark_nps_not_sent(db, nps_id: str, res: Any) -> bool:
+    """D91: True when the queue writer did NOT store the survey message
+    (REFUSED, not persisted, or no verdict); the nps_responses row is then
+    marked NOT_SENT so no screen counts it as a sent survey."""
+    res = res if isinstance(res, dict) else {}
+    if res.get("status") != "REFUSED" and res.get("persisted"):
+        return False
+    try:
+        db.get_collection("nps_responses").update_one(
+            {"nps_id": nps_id},
+            {
+                "$set": {
+                    "status": "NOT_SENT",
+                    "not_sent_reason": res.get("refused_reason") or "not_saved",
+                }
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[NPS] could not mark %s NOT_SENT: %s", nps_id, exc)
+    return True
+
+
 async def trigger_nps_on_delivery(
     order: Dict[str, Any],
     actor: Dict[str, Any],
@@ -77,11 +99,17 @@ async def trigger_nps_on_delivery(
         return
 
     # Dedup: skip if a recent NPS for this customer was sent within the window.
-    from datetime import timedelta
-    cutoff = (datetime.now() - timedelta(days=_NPS_DEDUP_WINDOW_DAYS)).isoformat()
+    # survey_sent_at is stored in UTC (utc_now_iso), so the cutoff is too: a
+    # host-clock cutoff shifted the window by 5.5 h on an IST host. A survey
+    # that was never sent (NOT_SENT, D91) does not count.
+    from datetime import timedelta, timezone
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(days=_NPS_DEDUP_WINDOW_DAYS)
+    ).isoformat()
     recent = nps_coll.find_one({
         "customer_id": customer_id,
         "survey_sent_at": {"$gte": cutoff},
+        "status": {"$ne": "NOT_SENT"},
     })
     if recent:
         logger.debug(
@@ -120,7 +148,7 @@ async def trigger_nps_on_delivery(
     try:
         store = db.get_collection("stores").find_one({"store_id": store_id}) or {}
         from ..services.notification_service import send_notification
-        await send_notification(
+        res = await send_notification(
             store_id=store_id,
             customer_id=customer_id,
             customer_phone=customer.get("mobile", ""),
@@ -137,5 +165,8 @@ async def trigger_nps_on_delivery(
             related_entity_id=order_id,
         )
     except Exception as exc:
-        # Notification failure is non-fatal — the NPS record is already inserted.
+        # Notification failure is non-fatal for the delivery itself.
         logger.warning("[NPS_TRIGGER] WhatsApp send failed for NPS %s: %s", nps_id, exc)
+        res = {}
+    if mark_nps_not_sent(db, nps_id, res):
+        logger.warning("[NPS_TRIGGER] NPS %s NOT sent: the message was not stored", nps_id)
