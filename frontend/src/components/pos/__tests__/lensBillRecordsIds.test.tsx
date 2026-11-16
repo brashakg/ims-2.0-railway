@@ -63,5 +63,14 @@ describe('a till lens line records what was sold (D44)', () => {
       add_on_ids: ['LA-1', 'LA-2'],
       add_ons: ['D44 Tint', 'D44 Protect'],
     });
+
+    // Recovery: a held bill is stored as JSON and recalled through
+    // restoreHeldSale; the recalled line carries the same ids and price.
+    const snapshot = JSON.parse(JSON.stringify({ cart: usePOSStore.getState().cart }));
+    usePOSStore.setState({ cart: [] });
+    expect(usePOSStore.getState().restoreHeldSale(snapshot, null, null, 'parked')).toBe(true);
+    const [recalled] = orderLinesOf(usePOSStore.getState().cart);
+    expect(recalled.unit_price * recalled.quantity).toBe(4400);
+    expect(recalled.lens_details).toEqual(line.lens_details);
   });
 });
