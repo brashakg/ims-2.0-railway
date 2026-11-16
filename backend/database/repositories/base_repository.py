@@ -64,7 +64,7 @@ class BaseRepository(ABC, Generic[T]):
         """Add created_at/updated_at timestamps"""
         now = utc_now_naive()
         if not is_update:
-            data["created_at"] = self._supplied_instant(data.get("created_at"), now) or now
+            data["created_at"] = BaseRepository._supplied_instant(data.get("created_at"), now) or now
         data["updated_at"] = now
         return data
 
