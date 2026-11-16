@@ -9,10 +9,12 @@ from api.utils.event_time import utc_now_iso
 
 from fastapi import APIRouter, HTTPException, Depends, Query, Path, Body
 from pydantic import BaseModel, Field
+from pymongo.errors import DuplicateKeyError
 from typing import Any, Dict, List, Optional, Literal
 from datetime import datetime, date, timedelta, timezone
 import re
 import hashlib
+import json
 import uuid
 import logging
 
@@ -816,23 +818,146 @@ _OUTCOME_NOT_SAVED = (
     "retry says so and records nothing twice."
 )
 _ALREADY_RECORDED = "This call was already recorded; its outcome is kept. Reload the list."
+_CHANGED_DETAILS = (
+    "This call was already recorded with different details; the saved outcome "
+    "is kept. Reload the list."
+)
+# D69: the call is saved but the next reminder is not -- said plainly, and the
+# card stays on the list; pressing Retry (the same request) sets it once.
+_NEXT_NOT_SET = (
+    "Call saved. The next reminder was NOT set. Press Retry; the call is not "
+    "recorded twice."
+)
 
 
-def _close_linked_follow_up(db, follow_up_id: str, store_id: str, update: dict) -> str:
+def _action_key(door: str, store_id: str, day: str, customer_id: str, **intent) -> str:
+    """THE identity of one work-list action: the door, the card and what staff
+    entered. Stored on every record the action writes, so a retry of the SAME
+    action (lost answer, double press, two tabs at once) is recognised and
+    finishes what is missing, while a CHANGED retry is refused (Codex PR-1428
+    r2), never acknowledged over the outcome already saved."""
+    raw = json.dumps(
+        {"door": door, "store": store_id, "day": day, "customer": customer_id, **intent},
+        sort_keys=True,
+    )
+    return hashlib.sha256(raw.encode()).hexdigest()[:24]
+
+
+def _day_record_id(kind: str, door: str, store_id: str, day: str, customer_id: str) -> str:
+    """Fixed follow-up id for a record a work-list card writes on ``day``: the
+    same card always names the same record, so it can only ever exist once."""
+    digest = hashlib.sha256(f"{kind}|{door}|{store_id}|{day}|{customer_id}".encode())
+    return "FU-{}-{}".format(day.replace("-", ""), digest.hexdigest()[:8].upper())
+
+
+def _insert_once(coll, doc: dict, action_key: str) -> None:
+    """Write ``doc`` exactly once: its follow_up_id is also its ``_id``, the
+    unique key Mongo enforces on every collection, so two overlapping requests
+    or a retry after a lost answer cannot store it twice (no extra index is
+    needed). The record already there from THIS action is success; one from a
+    different action is a 409. Any other failure RAISES to the caller."""
+    fid = doc["follow_up_id"]
+    existing = coll.find_one({"follow_up_id": fid})
+    if existing is None:
+        try:
+            coll.insert_one({**doc, "_id": fid, "action_key": action_key})
+            return
+        except DuplicateKeyError:
+            existing = coll.find_one({"_id": fid})
+    if (existing or {}).get("action_key") != action_key:
+        raise HTTPException(status_code=409, detail=_CHANGED_DETAILS)
+
+
+def _schedule_next_once(db, door: str, store_id: str, day: str, customer_id: str,
+                        fields: dict, action_key: str, call_saved: bool) -> str:
+    """The requested next reminder, once (D69). A failed write is a 503 BEFORE
+    the card leaves the list: "Call saved. The next reminder was NOT set." when
+    the call itself is saved, so the same request pressed again sets it."""
+    next_id = _day_record_id("next", door, store_id, day, customer_id)
+    try:
+        _insert_once(
+            db.get_collection("follow_ups"),
+            {
+                "follow_up_id": next_id,
+                "customer_id": customer_id,
+                "store_id": store_id,
+                "status": "pending",
+                "outcome": None,
+                "completed_at": None,
+                "completed_by": None,
+                **fields,
+            },
+            action_key,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[CRM] next reminder %s not saved: %s", next_id, exc)
+        raise HTTPException(
+            status_code=503, detail=_NEXT_NOT_SET if call_saved else _OUTCOME_NOT_SAVED
+        )
+    return next_id
+
+
+def _close_linked_follow_up(
+    db, follow_up_id: str, store_id: str, update: dict, action_key: str
+) -> str:
     """Close the follow-up a work-list card is linked to, through THE open
     predicate the follow-ups page uses (follow_ups.close_open_follow_up):
-    "closed" / "already_closed" / "missing". A write that fails is a 503, so
-    staff never get a success for an outcome that was not saved (Codex
-    PR-1428 r1)."""
+    "closed" / "already_closed" / "own" / "missing". "own" = it was closed by
+    THIS action already (a retry after a lost answer, or the twin of two
+    overlapping requests): the caller finishes the remaining steps. A write
+    that fails is a 503, so staff never get a success for an outcome that was
+    not saved (Codex PR-1428 r1)."""
     from .follow_ups import close_open_follow_up
 
+    update = {**update, "$set": {**update["$set"], "action_key": action_key}}
+    coll = db.get_collection("follow_ups")
     try:
-        return close_open_follow_up(
-            db.get_collection("follow_ups"), follow_up_id, store_id, update
-        )
+        state = close_open_follow_up(coll, follow_up_id, store_id, update)
+        if state == "already_closed":
+            fu = coll.find_one({"follow_up_id": follow_up_id, "store_id": store_id}) or {}
+            if fu.get("action_key") == action_key:
+                return "own"
+            if fu.get("action_key"):
+                # Closed by another work-list action: that action owns the
+                # card and takes it off the list itself.
+                return "other_action"
+        return state
     except Exception as exc:  # noqa: BLE001
         logger.warning("[CRM] linked follow-up %s not saved: %s", follow_up_id, exc)
         raise HTTPException(status_code=503, detail=_OUTCOME_NOT_SAVED)
+
+
+def _refuse_closed_by_another(state, coll, store_id, day, array, customer_id) -> None:
+    """A linked follow-up already closed with ANOTHER outcome keeps it (409)
+    and the card leaves the list. (Closed by another work-list action: that
+    action's own retry is still recognised on the done card -- see
+    _replay_or_refuse -- so it can still finish its next reminder.)"""
+    if state in ("already_closed", "other_action"):
+        _mark_list_entry_done(coll, store_id, day, array, customer_id)
+        raise HTTPException(
+            status_code=409,
+            detail=_CHANGED_DETAILS if state == "other_action" else _ALREADY_RECORDED,
+        )
+
+
+def _replay_or_refuse(db, action_key: str, record_ids: list) -> None:
+    """The card is already off today's list. The SAME action pressed again
+    (a retry after a lost answer, a double press) is recognised by a record it
+    wrote and goes on -- every step after this is write-once, so it repeats
+    nothing and answers with the same ids. Anything else is a 409. A read
+    failure is a 503, never a guess."""
+    ids = [i for i in record_ids if i]
+    try:
+        mine = bool(ids) and db.get_collection("follow_ups").find_one(
+            {"follow_up_id": {"$in": ids}, "action_key": action_key}
+        ) is not None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[CRM] replay check failed: %s", exc)
+        raise HTTPException(status_code=503, detail=_OUTCOME_NOT_SAVED)
+    if not mine:
+        raise HTTPException(status_code=409, detail=_ALREADY_RECORDED)
 
 
 def _mark_list_entry_done(coll, store_id: str, day: str, array: str, customer_id: str) -> None:
@@ -960,9 +1085,11 @@ async def dismiss_nba_card(
         {"store_id": store_id, "date": target_date, "cards.customer_id": body.customer_id}
     )
     card = _nba_card_for(doc, body.customer_id) if doc else None
-    if card and card.get("dismissed"):
-        raise HTTPException(status_code=409, detail=_ALREADY_RECORDED)
     follow_up_id = (card or {}).get("follow_up_id")
+    key = _action_key("nba_dismiss", store_id, target_date, body.customer_id,
+                      reason=body.reason)
+    if card and card.get("dismissed"):
+        _replay_or_refuse(db, key, [follow_up_id])
 
     # Outcome first, through the shared open predicate: a closed follow-up
     # keeps its outcome (409), a failed write is a 503 and the card stays.
@@ -976,10 +1103,10 @@ async def dismiss_nba_card(
                 current_user.get("user_id") or current_user.get("id"),
                 utc_now_iso(),
             ),
+            key,
         )
-        if state == "already_closed":
-            _mark_list_entry_done(scores, store_id, target_date, "cards", body.customer_id)
-            raise HTTPException(status_code=409, detail=_ALREADY_RECORDED)
+        _refuse_closed_by_another(state, scores, store_id, target_date, "cards",
+                                  body.customer_id)
     if card:
         _mark_list_entry_done(scores, store_id, target_date, "cards", body.customer_id)
 
@@ -1018,12 +1145,18 @@ async def complete_nba_card(
         {"store_id": store_id, "date": target_date, "cards.customer_id": body.customer_id}
     )
     card = _nba_card_for(doc, body.customer_id) if doc else None
-    if card and card.get("dismissed"):
-        raise HTTPException(status_code=409, detail=_ALREADY_RECORDED)
     follow_up_id = (card or {}).get("follow_up_id")
+    key = _action_key("nba_complete", store_id, target_date, body.customer_id,
+                      notes=body.outcome_notes, next=body.follow_up_scheduled_date)
+    if card and card.get("dismissed"):
+        _replay_or_refuse(db, key, [
+            follow_up_id,
+            _day_record_id("next", "nba", store_id, target_date, body.customer_id),
+        ])
 
     now_iso = utc_now_iso()
     user_id = current_user.get("user_id") or current_user.get("id")
+    call_saved = False
     if follow_up_id:
         from .follow_ups import close_follow_up_update
 
@@ -1037,38 +1170,29 @@ async def complete_nba_card(
             close_follow_up_update(
                 "completed", "completed", body.outcome_notes, user_id, now_iso
             ),
+            key,
         )
-        if state == "already_closed":
-            _mark_list_entry_done(scores, store_id, target_date, "cards", body.customer_id)
-            raise HTTPException(status_code=409, detail=_ALREADY_RECORDED)
-    if card:
-        _mark_list_entry_done(scores, store_id, target_date, "cards", body.customer_id)
+        _refuse_closed_by_another(state, scores, store_id, target_date, "cards",
+                                  body.customer_id)
+        call_saved = state in ("closed", "own")
 
+    # D69: the next reminder BEFORE the card leaves the list, written once.
     next_follow_up_id = None
     if body.follow_up_scheduled_date:
-        next_follow_up_id = (
-            f"FU-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
+        next_follow_up_id = _schedule_next_once(
+            db, "nba", store_id, target_date, body.customer_id,
+            {
+                "customer_name": (card or {}).get("customer_name", ""),
+                "customer_phone": (card or {}).get("customer_mobile", ""),
+                "type": "general",
+                "scheduled_date": body.follow_up_scheduled_date,
+                "notes": "Scheduled from NBA call list",
+                "created_at": now_iso,
+            },
+            key, call_saved,
         )
-        try:
-            db.get_collection("follow_ups").insert_one(
-                {
-                    "follow_up_id": next_follow_up_id,
-                    "customer_id": body.customer_id,
-                    "customer_name": (card or {}).get("customer_name", ""),
-                    "customer_phone": (card or {}).get("customer_mobile", ""),
-                    "store_id": store_id,
-                    "type": "general",
-                    "scheduled_date": body.follow_up_scheduled_date,
-                    "status": "pending",
-                    "outcome": None,
-                    "notes": "Scheduled from NBA call list",
-                    "created_at": now_iso,
-                    "completed_at": None,
-                    "completed_by": None,
-                }
-            )
-        except Exception:  # noqa: BLE001
-            next_follow_up_id = None
+    if card:
+        _mark_list_entry_done(scores, store_id, target_date, "cards", body.customer_id)
 
     _nba_audit(
         "nba.completed",
@@ -1212,13 +1336,27 @@ async def log_reactivation_outcome(
         # Inserting a reactivation_call follow_up here would orphan-pollute the
         # analytics, so record NOTHING and fail loudly.
         raise HTTPException(status_code=404, detail="not_on_todays_list")
-    if entry.get("dismissed"):
-        raise HTTPException(status_code=409, detail=_ALREADY_RECORDED)
     follow_up_id = entry.get("follow_up_id")
     now_iso = utc_now_iso()
     user_id = current_user.get("user_id") or current_user.get("id")
     reached = body.outcome in ("reached", "scheduled_visit")
     status = "completed" if reached else "skipped"
+    key = _action_key("reactivation", store_id, target_date, body.customer_id,
+                      outcome=body.outcome, notes=body.notes,
+                      next=body.follow_up_scheduled_date)
+    # The record written when MEGAPHONE had not pre-created one: its id is
+    # fixed per store / day / customer.
+    own_record_id = "FU-{}-{}".format(
+        target_date.replace("-", ""),
+        hashlib.sha256(
+            f"reactivation|{store_id}|{target_date}|{body.customer_id}".encode()
+        ).hexdigest()[:8].upper(),
+    )
+    if entry.get("dismissed"):
+        _replay_or_refuse(db, key, [
+            follow_up_id or own_record_id,
+            _day_record_id("next", "reactivation", store_id, target_date, body.customer_id),
+        ])
 
     if follow_up_id:
         from .follow_ups import close_follow_up_update
@@ -1226,74 +1364,64 @@ async def log_reactivation_outcome(
         state = _close_linked_follow_up(
             db, follow_up_id, store_id,
             close_follow_up_update(status, body.outcome, body.notes, user_id, now_iso),
+            key,
         )
-        if state == "already_closed":
-            _mark_list_entry_done(cohorts, store_id, target_date, "entries", body.customer_id)
-            raise HTTPException(status_code=409, detail=_ALREADY_RECORDED)
+        _refuse_closed_by_another(state, cohorts, store_id, target_date, "entries",
+                                  body.customer_id)
+        call_saved = state in ("closed", "own")
     else:
+        call_saved = True
         # MEGAPHONE had not pre-created one (e.g. synchronous fallback work-list):
         # write the in-app reactivation_call follow_up RECORD now (NOT a message).
-        # Its id is fixed per store / day / customer and written with
-        # $setOnInsert, so a retry after a lost answer finds the same record
-        # instead of adding a second one; a failed write is a 503.
-        follow_up_id = "FU-{}-{}".format(
-            target_date.replace("-", ""),
-            hashlib.sha256(
-                f"reactivation|{store_id}|{target_date}|{body.customer_id}".encode()
-            ).hexdigest()[:8].upper(),
-        )
+        # Its id is fixed per store / day / customer and is also its _id, so two
+        # overlapping requests or a retry after a lost answer find the same
+        # record (a CHANGED retry is a 409); a failed write is a 503.
+        follow_up_id = own_record_id
         try:
-            db.get_collection("follow_ups").update_one(
-                {"follow_up_id": follow_up_id},
+            _insert_once(
+                db.get_collection("follow_ups"),
                 {
-                    "$setOnInsert": {
-                        "follow_up_id": follow_up_id,
-                        "customer_id": body.customer_id,
-                        "customer_name": entry.get("customer_name", ""),
-                        "customer_phone": entry.get("customer_mobile", ""),
-                        "store_id": store_id,
-                        "type": "reactivation_call",
-                        "scheduled_date": target_date,
-                        "status": status,
-                        "outcome": body.outcome,
-                        "notes": body.notes,
-                        "created_at": now_iso,
-                        "completed_at": now_iso,
-                        "completed_by": user_id,
-                    }
+                    "follow_up_id": follow_up_id,
+                    "customer_id": body.customer_id,
+                    "customer_name": entry.get("customer_name", ""),
+                    "customer_phone": entry.get("customer_mobile", ""),
+                    "store_id": store_id,
+                    "type": "reactivation_call",
+                    "scheduled_date": target_date,
+                    "status": status,
+                    "outcome": body.outcome,
+                    "notes": body.notes,
+                    "created_at": now_iso,
+                    "completed_at": now_iso,
+                    "completed_by": user_id,
                 },
-                upsert=True,
+                key,
             )
+        except HTTPException:
+            # Saved by another action: its outcome is kept and the entry
+            # leaves the list (that action's own retry is still recognised).
+            _mark_list_entry_done(cohorts, store_id, target_date, "entries", body.customer_id)
+            raise
         except Exception as exc:  # noqa: BLE001
             logger.warning("[CRM] reactivation record %s not saved: %s", follow_up_id, exc)
             raise HTTPException(status_code=503, detail=_OUTCOME_NOT_SAVED)
-    _mark_list_entry_done(cohorts, store_id, target_date, "entries", body.customer_id)
 
+    # D69: the next reminder BEFORE the entry leaves the list, written once.
     next_follow_up_id = None
     if body.follow_up_scheduled_date:
-        next_follow_up_id = (
-            f"FU-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
+        next_follow_up_id = _schedule_next_once(
+            db, "reactivation", store_id, target_date, body.customer_id,
+            {
+                "customer_name": entry.get("customer_name", ""),
+                "customer_phone": entry.get("customer_mobile", ""),
+                "type": "reactivation_call",
+                "scheduled_date": body.follow_up_scheduled_date,
+                "notes": "Scheduled from reactivation work-list",
+                "created_at": now_iso,
+            },
+            key, call_saved,
         )
-        try:
-            db.get_collection("follow_ups").insert_one(
-                {
-                    "follow_up_id": next_follow_up_id,
-                    "customer_id": body.customer_id,
-                    "customer_name": (entry or {}).get("customer_name", ""),
-                    "customer_phone": (entry or {}).get("customer_mobile", ""),
-                    "store_id": store_id,
-                    "type": "reactivation_call",
-                    "scheduled_date": body.follow_up_scheduled_date,
-                    "status": "pending",
-                    "outcome": None,
-                    "notes": "Scheduled from reactivation work-list",
-                    "created_at": now_iso,
-                    "completed_at": None,
-                    "completed_by": None,
-                }
-            )
-        except Exception:  # noqa: BLE001
-            next_follow_up_id = None
+    _mark_list_entry_done(cohorts, store_id, target_date, "entries", body.customer_id)
 
     _nba_audit(
         "reactivation.logged",
@@ -1388,11 +1516,6 @@ async def get_reactivation_analytics(
     }
 
 
-# One customer's received CL orders read for the refill clock: far above any
-# real customer's contact-lens history (frame sales are not read at all).
-CUSTOMER_CL_HISTORY_LIMIT = 500
-
-
 @router.get("/customers/{customer_id}/cl-refill-status")
 async def get_cl_refill_status(
     customer_id: str = Path(..., description="Customer ID"),
@@ -1441,8 +1564,7 @@ async def get_cl_refill_status(
         raise HTTPException(status_code=503, detail="Order history unavailable; try again")
     try:
         supplies = clr.latest_supplies(
-            db_conn.get_collection("orders"), {"customer_id": customer_id},
-            CUSTOMER_CL_HISTORY_LIMIT,
+            db_conn.get_collection("orders"), {"customer_id": customer_id}
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("[CRM] cl-refill-status failed for %s: %s", customer_id, exc)

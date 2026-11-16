@@ -207,13 +207,27 @@ def test_a_closed_follow_up_keeps_its_outcome_at_every_door(lists, door):
     assert sdb.get_collection("follow_ups").count_documents({}) == 1
 
 
+CHANGED = {
+    "nba_dismiss": {"reason": "not_interested"},
+    "nba_complete": {"outcome_notes": "A different note entirely."},
+    "reactivation": {"outcome": "reached"},
+}
+
+
 @pytest.mark.parametrize("door", list(DOORS))
 def test_a_repeat_at_the_same_door_records_nothing_twice(lists, door):
+    # Round 6 (Codex PR-1428 r2): the SAME action pressed again is recognised
+    # and answers with the same ids (D69 "safe to press twice"); a CHANGED
+    # one is refused. Either way nothing is written twice.
     client, sdb = lists
     url, body = DOORS[door]
-    assert client.post(url, headers=_hdr(), json=body).status_code == 200
+    first = client.post(url, headers=_hdr(), json=body)
+    assert first.status_code == 200
     n = sdb.get_collection("follow_ups").count_documents({})
     r = client.post(url, headers=_hdr(), json=body)
+    assert r.status_code == 200, r.text
+    assert r.json() == first.json()
+    r = client.post(url, headers=_hdr(), json={**body, **CHANGED[door]})
     assert r.status_code == 409, r.text
     fu = sdb.get_collection("follow_ups").find_one({"follow_up_id": "FU-1"})
     assert len(fu["attempts"]) == 1
@@ -226,7 +240,9 @@ def test_reactivation_record_without_a_precreated_follow_up_is_written_once(list
     r = client.post(f"/api/v1/crm/reactivation/{STORE}/log", headers=_hdr(), json=body)
     assert r.status_code == 200
     assert client.post(f"/api/v1/crm/reactivation/{STORE}/log", headers=_hdr(),
-                       json=body).status_code == 409
+                       json=body).status_code == 200
+    assert client.post(f"/api/v1/crm/reactivation/{STORE}/log", headers=_hdr(),
+                       json={**body, "outcome": "no_answer"}).status_code == 409
     assert sdb.get_collection("follow_ups").count_documents({"customer_id": "C2"}) == 1
 
 
