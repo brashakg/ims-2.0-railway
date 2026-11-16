@@ -59,7 +59,7 @@ def db(monkeypatch):
         client.admin.command("ping")
     except Exception as exc:  # noqa: BLE001
         pytest.skip(f"no mongod at {MONGO_HOST}:{MONGO_PORT} ({exc})")
-    name = f"ims_claude_t1419_{uuid.uuid4().hex[:10]}"
+    name = f"ims_claude_t1419_{uuid.uuid4().hex[:12]}"
     database = client[name]
     assert database.name == name
     database.customers.insert_one(
