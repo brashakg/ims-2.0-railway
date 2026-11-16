@@ -74,15 +74,20 @@ async def lock_period(
     # month, so a payroll run still in DRAFT would be stuck there for good and
     # its wages would never reach the P&L, Tally or the PF file (they count
     # APPROVED and PAID rows only). The lock is chain-wide, so any shop's
-    # draft stops it. A draft discard whose answer was lost is finished first,
-    # so the audit log says who discarded what before the books close; while
-    # one cannot be logged the lock waits (503).
-    from ..payroll import settle_month_discards
-
-    settle_month_discards(db, year, month)
+    # draft stops it.
     payroll_rows = list(
         db.get_collection("payroll").find({"month": month, "year": year})
     )
+    # A draft discard whose answer was lost is finished here, so the audit log
+    # says who discarded what before the books close; while one cannot be
+    # logged the lock waits (503). Only AFTER the payroll read: a discard
+    # writes its record before its delete, so a draft this read did not see
+    # has its record there now, and a draft deleted after the read was seen
+    # (the lock refuses it below). Settling first left a gap: a stalled
+    # discard deleting between the two reads closed the month unlogged.
+    from ..payroll import settle_month_discards
+
+    settle_month_discards(db, year, month)
     drafts = [r for r in payroll_rows if r.get("status") == "DRAFT"]
     if drafts:
         shops = ", ".join(sorted({str(d.get("store_id") or "no shop") for d in drafts}))

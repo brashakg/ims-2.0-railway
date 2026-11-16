@@ -464,3 +464,89 @@ def test_a_lock_is_refused_while_a_removed_draft_cannot_be_logged(audited, monke
     assert len(rig.lock_rows()) == 1
     _the_one_audit_says(rig, draft)
     assert [o["state"] for o in _ops(rig)] == ["DONE"]
+
+
+# ===========================================================================
+# Review round 3 (internal, 2026-11-16): the lock reads payroll, THEN settles
+# ===========================================================================
+
+
+@pytest.mark.parametrize("stall", ["before_delete", "before_record"])
+def test_a_stalled_discard_landing_inside_the_lock_never_closes_the_month_unlogged(
+    audited, monkeypatch, stall
+):
+    """A discard stalls past the 120-second lease (``before_delete``: its
+    record is written, its delete is not; ``before_record``: neither). A lock
+    starts meanwhile and the stalled discard's writes land between the lock's
+    look at unfinished discards and its payroll read; then the discard's own
+    audit write fails. Before: the lock settled first, saw the draft still
+    there, read payroll after the delete and committed -- a closed month whose
+    removed draft has no audit row and no Discard button left to finish it."""
+    rig = audited
+    rig.db.get_collection("payroll").delete_one({"employee_id": EMP2})
+    draft = _row(rig)
+    coll = rig.coll_cls
+    real_insert, real_delete, real_find = coll.insert_one, coll.delete_one, coll.find
+    stalled, seen, audit_down = {}, {}, {"on": False}
+
+    def land_the_stalled_writes():
+        if "op" in stalled:
+            real_insert(rig.db.get_collection("payroll_discards"), stalled["op"])
+        stalled["deleted"] = real_delete(
+            rig.db.get_collection("payroll"), stalled["filter"])
+
+    def find(self, *a, **k):
+        # The lock's month-wide payroll read: the stalled discard lands first.
+        if self.name == "payroll" and a and a[0] == {"month": MONTH, "year": YEAR} \
+                and "filter" in stalled and "deleted" not in stalled:
+            land_the_stalled_writes()
+        return real_find(self, *a, **k)
+
+    def stall_then_lock():
+        rig.db.get_collection("payroll_period_guards").update_one(
+            {"_id": f"{YEAR}-{MONTH:02d}"}, {"$set": {"beat": time.time() - 180}})
+        t, box = _in_thread(lambda: rig.lock(without_payroll=True))
+        t.join(30)
+        seen["lock"] = box["reply"]
+        audit_down["on"] = True  # the discard's own audit write then fails
+
+    def insert_one(self, doc, *a, **k):
+        if self.name == "payroll_discards" and stall == "before_record" and not stalled:
+            stalled.update(op=dict(doc), filter={
+                "employee_id": EMP, "month": MONTH, "year": YEAR,
+                "status": "DRAFT", "updated_at": doc["version"]})
+            stall_then_lock()
+            assert "deleted" in stalled
+            return None  # its record landed inside the lock
+        return real_insert(self, doc, *a, **k)
+
+    def delete_one(self, filter, *a, **k):
+        if self.name == "payroll" and stall == "before_delete" and not stalled:
+            stalled["filter"] = filter
+            stall_then_lock()
+            assert "deleted" in stalled
+            return stalled["deleted"]  # its delete landed inside the lock
+        return real_delete(self, filter, *a, **k)
+
+    real_create = AuditRepository.create
+
+    def create(self, doc):
+        if doc.get("action") == "PAYROLL_DRAFT_DISCARDED" and audit_down["on"]:
+            return None
+        return real_create(self, doc)
+
+    monkeypatch.setattr(coll, "find", find)
+    monkeypatch.setattr(coll, "insert_one", insert_one)
+    monkeypatch.setattr(coll, "delete_one", delete_one)
+    monkeypatch.setattr(AuditRepository, "create", create)
+    first = _discard(rig)
+
+    assert "deleted" in stalled and _row(rig) is None
+    # The month closes only with the removed draft logged, by the lock itself.
+    assert seen["lock"].status_code == 200, seen["lock"].text
+    assert len(rig.lock_rows()) == 1 and not rig.stranded()
+    _the_one_audit_says(rig, draft)
+    assert [o["state"] for o in _ops(rig)] == ["DONE"]
+    # The stalled request finds its discard already logged: one row, no 500.
+    assert first.status_code == 200, first.text
+    assert len(_audits(rig)) == 1
