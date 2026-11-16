@@ -48,6 +48,7 @@ from tests.test_pos_money_doors_r8 import _two_unit_bill  # noqa: E402
 from tests.test_pos_money_doors_r9 import _balance, _customer  # noqa: E402
 from tests.test_pos_money_doors_r12 import tasks  # noqa: E402,F401
 from tests.test_pos_money_doors_r13 import _bill_with_hold, _complete  # noqa: E402
+from tests.test_pos_money_doors_r18 import REAL_CLAIM, REAL_RELEASE, TokenLines  # noqa: E402
 
 pytestmark = pytest.mark.usefixtures("gst_numbers")
 
@@ -541,3 +542,92 @@ def test_a_cash_paid_record_never_tells_a_person_to_add_a_unit_already_in_stock(
     doc = _complete("RET-CP", cash_leg_paid=True)
     assert doc["status"] == "COMPLETED"
     assert "already shows in stock" in doc["message"] and "do not add it again" in doc["message"]
+
+
+# --- D85(1), round 8: Nothing was paid between the press's claim fence and its unit claim ---
+
+
+def _real_claims(till, monkeypatch):
+    """A credit-note return whose unit claims and releases are the REAL ones,
+    on the bill line with Mongo's positional semantics (TokenLines); the
+    bill's refund holds stay on the stored bill (the takeover's mark and the
+    press's claim meet on ONE document, as in Mongo)."""
+    payload = _credit_note_return(till, monkeypatch)
+    lines = TokenLines([{"item_id": "li1", "product_id": "P1", "quantity": 2, "claim_tokens": []}],
+                       till["db"].get_collection("orders"))
+    monkeypatch.setattr(returns_router, "_orders_coll", lambda: lines)
+    monkeypatch.setattr(returns_router, "_claim_returnable_qty", REAL_CLAIM)
+    monkeypatch.setattr(returns_router, "_release_returnable_qty", REAL_RELEASE)
+    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda *a, **k: True)
+    return payload, lines
+
+
+def test_nothing_paid_before_the_press_claims_its_units_leaves_no_claim_on_the_bill(till, monkeypatch, tasks):
+    """Reviewers' must-fix (head 48638aba): the press passed its claim fence
+    and stalled before _claim_returnable_qty; Nothing was paid took it over and
+    released its lines by token (none there yet: 'done'); the press then woke
+    and claimed. Its next fence refused, and its give-back trusted the 'done'
+    mark: returned_qty 1 and its token stayed on the line with no return doc
+    -- the unit locked out of every later return and refund."""
+    payload, lines = _real_claims(till, monkeypatch)
+    real_claim = REAL_CLAIM
+    out = {}
+
+    def stalled(*a, **k):
+        if "takeover" not in out:
+            _takeover_now(till, out)
+        return real_claim(*a, **k)
+
+    monkeypatch.setattr(returns_router, "_claim_returnable_qty", stalled)
+    r = _advance_client().post("/api/v1/returns", json=payload, headers=_hdr("STORE_MANAGER"))
+    assert isinstance(out["takeover"], dict) and out["takeover"]["status"] == "NOTHING_PAID", out
+    assert r.status_code == 409 and "NOTHING was issued" in r.text, r.text
+    assert _issued(till) == [] and _balance(till) == 0.0 and _docs(till) == ["NOTHING_PAID"]
+    line = lines.lines[0]
+    assert float(line.get("returned_qty") or 0) == 0.0, line
+    assert not line.get("claim_tokens"), line
+    assert not (_stored(till).get("refund_holds") or {})
+    # The unit is returnable again: a fresh return of it goes through.
+    monkeypatch.setattr(returns_router, "_claim_returnable_qty", real_claim)
+    monkeypatch.setattr(returns_router, "next_document_number", lambda *a, **k: "TST01/C2627/0003")
+    again = _advance_client().post("/api/v1/returns", json=payload, headers=_hdr("STORE_MANAGER"))
+    assert again.status_code == 201, again.text
+    assert float(lines.lines[0].get("returned_qty") or 0) == 1.0
+
+
+def test_a_claim_that_landed_before_nothing_paid_is_released_by_the_takeover(till, monkeypatch, tasks):
+    """The other order: the press's claim lands, THEN Nothing was paid takes
+    it over -- the takeover's release finds the token and gives the unit back
+    once; the press issues nothing."""
+    payload, lines = _real_claims(till, monkeypatch)
+    real_claim = REAL_CLAIM
+    out = {}
+
+    def landed_then_stalled(*a, **k):
+        res = real_claim(*a, **k)
+        if "takeover" not in out:
+            _takeover_now(till, out)
+        return res
+
+    monkeypatch.setattr(returns_router, "_claim_returnable_qty", landed_then_stalled)
+    r = _advance_client().post("/api/v1/returns", json=payload, headers=_hdr("STORE_MANAGER"))
+    assert isinstance(out["takeover"], dict) and out["takeover"]["status"] == "NOTHING_PAID", out
+    assert r.status_code == 409 and _issued(till) == [] and _docs(till) == ["NOTHING_PAID"]
+    line = lines.lines[0]
+    assert float(line.get("returned_qty") or 0) == 0.0 and not line.get("claim_tokens"), line
+
+
+def test_the_counter_claim_needs_its_own_live_hold_on_the_bill(till, monkeypatch):
+    """The shared rule (_claim_returnable_qty hold_key): the claim and the
+    hold are on ONE bill document, so the claim lands only while the press's
+    hold is there and not taken by Nothing was paid -- in the same write."""
+    _, lines = _real_claims(till, monkeypatch)
+    orders = till["db"].get_collection("orders")
+    orig = {"item_id": "li1", "product_id": "P1", "quantity": 2}
+    mark = returns_router.NOTHING_PAID_MARK
+    assert returns_router._claim_returnable_qty("ORD-1", orig, 1.0, token="T:0", hold_key="RET-X") is False
+    orders.update_one({"order_id": "ORD-1"}, {"$set": {"refund_holds": {"RET-X": {"kept": True, mark: True}}}})
+    assert returns_router._claim_returnable_qty("ORD-1", orig, 1.0, token="T:0", hold_key="RET-X") is False
+    orders.update_one({"order_id": "ORD-1"}, {"$set": {"refund_holds": {"RET-X": {"kept": True}}}})
+    assert returns_router._claim_returnable_qty("ORD-1", orig, 1.0, token="T:0", hold_key="RET-X") is True
+    assert float(lines.lines[0].get("returned_qty") or 0) == 1.0

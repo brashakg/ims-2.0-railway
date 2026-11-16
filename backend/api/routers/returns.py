@@ -679,6 +679,7 @@ def _claim_returnable_qty(
     refund_id: Optional[str] = None,
     refund_qty: Optional[float] = None,
     token: Optional[str] = None,
+    hold_key: Optional[str] = None,
 ) -> bool:
     """Atomically reserve `return_qty` units against an order line's remaining
     returnable quantity -- the same guard-in-the-filter pattern as the voucher
@@ -703,6 +704,14 @@ def _claim_returnable_qty(
     on a line once, whichever door (Goods back, the confirm, the retry) runs
     first, and the rest later (a held unit that comes back, one that did not
     land).
+
+    `hold_key`: the counter press's own refund hold (its return id). The
+    claim then lands only while that hold is on the bill and not taken by
+    "Nothing was paid" (NOTHING_PAID_MARK) -- in the SAME write, since the
+    hold and the line are one bill document (D85). A takeover marks the hold
+    before it releases the press's lines by token, so a claim either lands
+    first (and is released by the takeover) or never lands at all: none is
+    left on the line that no door owns.
 
     Returns True when the claim succeeded, False on no-match (already returned /
     over-cap / concurrent loser / this refund already restocked these units)
@@ -765,6 +774,9 @@ def _claim_returnable_qty(
         elem[mark] = {"$not": {"$gt": room}}
         update["$inc"][f"items.$.{mark}"] = return_qty
     match = {"order_id": order_id, "items": {"$elemMatch": elem}}
+    if hold_key:
+        match[f"refund_holds.{hold_key}"] = {"$exists": True}
+        match[f"refund_holds.{hold_key}.{NOTHING_PAID_MARK}"] = {"$ne": True}
     try:
         updated = coll.find_one_and_update(
             match, update, return_document=ReturnDocument.AFTER
@@ -4703,6 +4715,21 @@ def _nothing_paid_ids(order_id: Optional[str]) -> set:
         return {"*"}
 
 
+def _hold_taken(order_id: Optional[str], return_id: Optional[str]) -> bool:
+    """The press's own hold is gone from the bill or taken by "Nothing was
+    paid" (an unreadable bill reads as not taken: the caller's own refusal
+    stands)."""
+    coll = _orders_coll() if order_id and return_id else None
+    if coll is None:
+        return False
+    try:
+        order = coll.find_one({"order_id": order_id}) or {}
+    except Exception:  # noqa: BLE001
+        return False
+    mine = (order.get("refund_holds") or {}).get(return_id)
+    return not mine or bool(mine.get(NOTHING_PAID_MARK))
+
+
 def _keep_order_refund_hold(order_id: Optional[str], return_id: Optional[str], *,
                             amount: Optional[float] = None, extra: Optional[Dict[str, Any]] = None,
                             fence: bool = False) -> None:
@@ -5310,7 +5337,8 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
     claimed: List[Dict[str, Any]] = []
     for rl in resolved_lines:
         ok = _claim_returnable_qty(
-            resolved_order_id, rl["orig_line"], float(rl["ret_line"].return_qty), token=rl["token"]
+            resolved_order_id, rl["orig_line"], float(rl["ret_line"].return_qty), token=rl["token"],
+            hold_key=held.get("return_id"),
         )
         if not ok:
             for done in claimed:
@@ -5320,6 +5348,10 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
                     float(done["ret_line"].return_qty),
                     token=done["token"],
                 )
+            if _hold_taken(resolved_order_id, held.get("return_id")):
+                # Nothing was paid (or another door) took the bill over while
+                # this press stalled: its claim never landed (D85).
+                raise HTTPException(status_code=409, detail=_HOLD_LOST)
             name = (
                 rl["ret_line"].product_name
                 or rl["orig_line"].get("product_name")
