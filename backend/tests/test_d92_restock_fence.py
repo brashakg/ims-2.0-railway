@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 
 import pytest
 
@@ -125,6 +126,99 @@ def test_a_press_that_cannot_check_its_record_restocks_nothing_and_says_so(till,
     r = _advance_client().post("/api/v1/returns", json=payload, headers=_hdr("STORE_MANAGER"))
     assert r.status_code == 201 and restocks == [], r.text
     assert "NOT put back in stock" in r.json()["message"] and r.json()["restock_applied"] is False
+    # Round 11: a real step, not a "Restock" button no screen has -- one P1
+    # Inventory task naming the return, deduped, and the message says so.
+    rid = r.json()["return_id"]
+    raised = [t for t in tasks if t.get("dedupe_ref") == f"return_restock_blocked:{rid}"]
+    assert len(raised) == 1 and raised[0]["priority"] == "P1", tasks
+    assert rid in raised[0]["title"] and "press Restock" not in r.json()["message"]
+    assert "a task was raised" in r.json()["message"], r.json()["message"]
+    # The task's step is real: the record's Restock puts the unit back, once.
+    first, second = _retry_restock(rid), _retry_restock(rid)
+    assert first["restock_applied"] is True and second["message"] == "Already restocked"
+    assert restocks == [rid]
+
+
+def _read_back_fails_after_the_collision(rcoll, monkeypatch):
+    """The press's own insert collides with the record Needs completing wrote
+    (uniq_returns_return_id); every read of the returns after it fails."""
+    real_insert, real_find, state = rcoll.insert_one, rcoll.find_one, {}
+
+    def insert(doc, *a, **k):
+        try:
+            return real_insert(doc, *a, **k)
+        except Exception:
+            if not doc.get("recovered"):
+                state["collided"] = True
+            raise
+
+    def find_one(*a, **k):
+        if state.get("collided"):
+            state["reads"] = state.get("reads", 0) + 1
+            raise AutoReconnect("returns unreadable")
+        return real_find(*a, **k)
+
+    monkeypatch.setattr(rcoll, "insert_one", insert)
+    monkeypatch.setattr(rcoll, "find_one", find_one)
+    return state
+
+
+@pytest.mark.parametrize("cash_leg_paid", [False, True])
+def test_a_press_that_collides_with_the_taken_record_answers_409_without_reading(
+        till, monkeypatch, tasks, cash_leg_paid):
+    """Round 11 (reviewers' D92(4) flag): the press passed its restock fence
+    and put its unit back, stalled; Accounts answered Needs completing (the
+    record, restock_left_to_counter); the press's insert collided and its ONE
+    read-back failed. Before: 201 'Refund of Rs X recorded' -- the cashier
+    paid beside the owed-cash task. The duplicate key alone decides: 409."""
+    from tests.test_nothing_paid_fence_d85 import _aged_past_the_timeout, _complete
+
+    payload, rcoll, restocks = _cash_press(till, monkeypatch)
+    real_restock, out = returns_router._restock_good_items, {}
+
+    def stalled(*a, **k):
+        res = real_restock(*a, **k)
+        if "record" not in out:
+            out["rid"] = rid = _aged_past_the_timeout(till)
+            t = threading.Thread(target=lambda: out.update(record=_complete(rid, cash_leg_paid=cash_leg_paid)))
+            t.start()
+            t.join(60)
+        return res
+
+    monkeypatch.setattr(returns_router, "_restock_good_items", stalled)
+    state = _read_back_fails_after_the_collision(rcoll, monkeypatch)
+    r = _advance_client().post("/api/v1/returns", json=payload, headers=_hdr("STORE_MANAGER"))
+    assert out["record"]["status"] == "COMPLETED" and out["record"].get("restock_left_to_counter") is True
+    assert state.get("collided"), state
+    assert r.status_code == 409 and r.json()["detail"] == returns_router.RECORD_TAKEN_MESSAGE, r.text
+    assert not [t for t in tasks if "return_doc_missing" in str(t.get("dedupe_ref"))], tasks
+    assert restocks == [out["rid"]]  # the press's own restock, once
+
+
+def test_an_insert_failure_whose_read_back_fails_never_answers_201(till, monkeypatch, tasks):
+    """Not a duplicate key and the read-back fails: whether Needs completing
+    took the record is unknown -- 503 'do not pay', never 'Refund recorded'.
+    The doc rides on the kept hold and the P1 task, for Needs completing."""
+    payload, rcoll, restocks = _cash_press(till, monkeypatch)
+    real_find, state = rcoll.find_one, {}
+
+    def insert(doc, *a, **k):
+        state["failed"] = True
+        raise AutoReconnect("insert failed")
+
+    def find_one(*a, **k):
+        if state.get("failed"):
+            raise AutoReconnect("returns unreadable")
+        return real_find(*a, **k)
+
+    monkeypatch.setattr(rcoll, "insert_one", insert)
+    monkeypatch.setattr(rcoll, "find_one", find_one)
+    r = _advance_client().post("/api/v1/returns", json=payload, headers=_hdr("STORE_MANAGER"))
+    assert r.status_code == 503 and r.json()["detail"] == returns_router.RECORD_UNCONFIRMED_MESSAGE, r.text
+    rid = next(iter(_stored(till)["refund_holds"]))
+    hold = _stored(till)["refund_holds"][rid]
+    assert hold.get("kept") is True and hold.get("doc", {}).get("return_id") == rid
+    assert [t for t in tasks if t.get("dedupe_ref") == f"return_doc_missing:{rid}"], tasks
 
 
 # --- D92(2) ----------------------------------------------------------------------

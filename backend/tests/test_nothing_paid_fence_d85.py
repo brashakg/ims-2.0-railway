@@ -732,8 +732,10 @@ def test_cash_paid_after_the_press_began_restocking_leaves_the_units_to_the_pres
         return real_restock(*a, **k)
 
     monkeypatch.setattr(returns_router, "_restock_good_items", stalled)
-    _advance_client().post("/api/v1/returns", json=payload, headers=_hdr("STORE_MANAGER"))
+    r = _advance_client().post("/api/v1/returns", json=payload, headers=_hdr("STORE_MANAGER"))
     assert isinstance(out["record"], dict) and out["record"]["status"] == "COMPLETED", out
+    # D92(4): Cash paid recorded the cash -- the counter never says "Refund recorded".
+    assert r.status_code == 409 and r.json()["detail"] == returns_router.RECORD_TAKEN_MESSAGE, r.text
     assert restocks == [out["rid"]]  # the press's own restock, once
     rec = rcoll.find_one({"_id": f"recovered:{out['rid']}"})
     assert rec["restock_left_to_counter"] is True
