@@ -28,6 +28,7 @@ Scope of MVP implementation:
 
 from typing import Dict, Any, List
 from datetime import datetime, timezone, timedelta
+from api.utils.event_time import utc_now_naive
 import logging
 
 from ..base import JarvisAgent, AgentType, AgentResponse, AgentContext
@@ -316,7 +317,7 @@ class TaskmasterAgent(JarvisAgent):
 
         actions = []
         try:
-            now = datetime.now()
+            now = utc_now_naive()
             query = {
                 # Incl. ESCALATED: an ignored task climbs the ladder
                 # again on each fresh breach (multi-hop). should_escalate
@@ -775,14 +776,14 @@ class TaskmasterAgent(JarvisAgent):
                             "priority": {"$ne": "P1"},
                         },
                         {
-                            "$set": {"priority": "P1", "updated_at": now},
+                            "$set": {"priority": "P1", "updated_at": utc_now_naive()},
                             "$push": {
                                 "history": {
                                     "action": "priority_escalated",
                                     "to": "P1",
                                     "reason": "Backorder critically overdue (14d+)",
                                     "by": self.agent_id,
-                                    "at": now,
+                                    "at": utc_now_naive(),
                                 }
                             },
                         },
@@ -1041,7 +1042,7 @@ class TaskmasterAgent(JarvisAgent):
                 store_id=anomaly.get("store_id"),
                 dedupe_ref=f"anomaly:{ref}",
                 assigned_to="STORE_MANAGER",
-                due_at=datetime.now() + timedelta(hours=24),
+                due_at=utc_now_naive() + timedelta(hours=24),
                 extra={"auto_created_by": self.agent_id, "linked_anomaly": anomaly},
             )
         except Exception as e:
@@ -1099,7 +1100,7 @@ class TaskmasterAgent(JarvisAgent):
                 grn = grns.find_one({"grn_id": grn_id}, {"_id": 0, "items": 1})
                 if not receipt_fully_billed(grn, booked):
                     continue
-                now = datetime.now()
+                now = utc_now_naive()
                 numbers = ", ".join(
                     str(b.get("invoice_number") or b.get("bill_number") or b.get("bill_id"))
                     for b in booked

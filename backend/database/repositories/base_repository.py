@@ -6,7 +6,7 @@ Abstract base class for all repositories
 
 from abc import ABC, abstractmethod
 from typing import List, Optional, Dict, Any, TypeVar, Generic
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from api.utils.event_time import utc_now_naive
 import re
 import uuid
@@ -64,9 +64,33 @@ class BaseRepository(ABC, Generic[T]):
         """Add created_at/updated_at timestamps"""
         now = utc_now_naive()
         if not is_update:
-            data["created_at"] = now
+            data["created_at"] = self._supplied_instant(data.get("created_at"), now) or now
         data["updated_at"] = now
         return data
+
+    @staticmethod
+    def _supplied_instant(value: Any, now: datetime) -> Optional[datetime]:
+        """A caller-supplied creation instant worth keeping (RUN-02).
+
+        Only an UNAMBIGUOUS instant is kept: an aware datetime or an ISO string
+        carrying its offset ("Z", "+00:00", "+05:30"). A naive value cannot say
+        which clock wrote it (legacy callers pass the host's local
+        datetime.now()), so it is replaced by the UTC clock as before. A value
+        more than five minutes ahead of the clock is not a real past event and
+        is replaced too. Stored in the BSON naive-UTC frame like every other row.
+        """
+        if isinstance(value, str) and value.strip():
+            try:
+                value = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+            except ValueError:
+                return None
+        if not isinstance(value, datetime) or value.tzinfo is None:
+            return None
+        try:
+            instant = value.astimezone(timezone.utc).replace(tzinfo=None)
+        except (ValueError, OverflowError):
+            return None
+        return instant if instant <= now + timedelta(minutes=5) else None
 
     @staticmethod
     def _clean_id(doc: Optional[Dict]) -> Optional[Dict]:

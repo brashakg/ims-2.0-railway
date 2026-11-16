@@ -67,7 +67,7 @@ class TaskRepository(BaseRepository):
     def find_overdue(self, store_id: str = None) -> List[Dict]:
         filter = {
             "status": {"$in": ["OPEN", "IN_PROGRESS"]},
-            "due_at": {"$lt": datetime.now()}
+            "due_at": {"$lt": utc_now_naive()}
         }
         if store_id:
             filter["store_id"] = store_id

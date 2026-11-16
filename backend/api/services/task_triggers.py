@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timedelta
+from api.utils.event_time import utc_now_naive
 from typing import Any, Dict, List, Optional
 
 from .task_sla import sla_for
@@ -235,7 +236,7 @@ def create_system_task(
     except Exception:  # noqa: BLE001
         pass  # dedupe is best-effort
 
-    now = datetime.now()
+    now = utc_now_naive()
     if due_at is None:
         grace = sla_for(priority)["grace_minutes"]
         due_at = now + timedelta(minutes=grace)

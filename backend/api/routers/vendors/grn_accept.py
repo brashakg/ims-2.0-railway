@@ -1,10 +1,9 @@
 """POST /grn/{grn_id}/accept - the three-way match and the stock mint."""
 
-from api.utils.event_time import utc_now, utc_now_iso
+from api.utils.event_time import utc_now, utc_now_iso, utc_now_naive
 
 from contextvars import ContextVar
 from datetime import timedelta
-from api.utils.event_time import utc_now_naive
 from typing import Tuple
 from urllib.parse import quote
 
@@ -1584,7 +1583,7 @@ def _complete_receipt_tasks(db, grn_id, note: str, category: Optional[str] = Non
 
 def complete_tasks(db, flt: dict, note: str) -> None:
     """Close the OPEN tasks `flt` matches as done by the system, with `note`."""
-    now = datetime.now()
+    now = utc_now_naive()
     db.get_collection("tasks").update_many(
         {**flt, "status": {"$in": _TASK_OPEN}},
         {
@@ -1816,7 +1815,7 @@ def tell_catalogue_managers(
             ever=ever,
             refresh_only=refresh_only,
             priority="P3",
-            due_at=datetime.now() + timedelta(days=1),
+            due_at=utc_now_naive() + timedelta(days=1),
             title=title,
             description=description,
             category="Catalogue",
