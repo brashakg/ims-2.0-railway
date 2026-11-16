@@ -388,8 +388,10 @@ def test_a_door_hold_stuck_after_its_fence_raises_one_p1_task(till, monkeypatch)
     monkeypatch.setattr("api.services.task_triggers.create_system_task", lambda repo, **k: out.append(k) or k)
     monkeypatch.setattr("api.dependencies.get_task_repository", lambda: object(), raising=False)
     orders = till["db"].get_collection("orders")
+    # D85(2) round 8: its claim is still on the bill (a door that never
+    # claimed it is finished by itself, _advance_doors_stopped).
     orders.insert_one({"order_id": "ORD-S", "order_number": "BV-S", "store_id": "BV-TEST-01",
-                       "refund_holds_v": 1, "refund_holds": {
+                       "advance_refund_id": "RET-X", "refund_holds_v": 1, "refund_holds": {
                            "advance:RET-X": {"amount": 500.0, "at": _ago(30), "kept": True, "door": "advance",
                                              "ttl": 900},
                            "credit-note:young": {"amount": 100.0, "at": _ago(2), "kept": True,
@@ -398,6 +400,7 @@ def test_a_door_hold_stuck_after_its_fence_raises_one_p1_task(till, monkeypatch)
     assert returns_router.sweep_stuck_return_holds() == 1  # the task itself is deduped
     assert [t["dedupe_ref"] for t in out] == ["door_hold_stuck:ORD-S:advance:RET-X"] * 2
     assert out[0]["priority"] == "P1"
+    assert "press Refund advance on this order again" in out[0]["description"]  # never "ask the IMS team"
     assert orders.find_one({"order_id": "ORD-S"})["refund_holds"]["advance:RET-X"]["kept"] is True  # never released
 
 

@@ -2082,8 +2082,8 @@ def _task_door_hold_stuck(order: Dict[str, Any], key: str, hold: Dict[str, Any])
             todo = ("a SUPERADMIN presses the SAME correction again (Orders > this bill > Edit order): it finishes the "
                     "credit note, or clears the lock if nothing was written. Never issue it in another way.")
         else:
-            todo = ("check the customer's store credit and the bill's history for it, then ask the IMS team to "
-                    "clear it.")
+            todo = ("press Refund advance on this order again: it finishes the refund, or frees the bill if "
+                    "nothing was written. Never refund the advance in another way.")
         create_system_task(
             get_task_repository(),
             title=f"Bill {bill}: a refund or credit note stopped part way - the bill takes no refund",
@@ -4392,10 +4392,13 @@ def _live_refund_holds(order_id: str, holds: Dict[str, Any],
     out instead of blocking the bill forever."""
     documented = 0.0
     done: set = set()
+    advance_docs: set = set()
     coll = _returns_coll()
     if coll is not None:
         try:
             for doc in coll.find({"order_id": order_id}, {"_id": 0}):
+                if doc.get("advance_refund"):
+                    advance_docs.add(doc.get("return_id"))
                 if doc.get("advance_refund") and doc.get("status") in ("COMPLETED", "VOIDED"):
                     # The advance door's own record is finished (D85): its hold
                     # ("advance:<id>") no longer counts, even if its release failed.
@@ -4418,6 +4421,10 @@ def _live_refund_holds(order_id: str, holds: Dict[str, Any],
             )
     done |= _credit_note_doors_finished([rid for rid, h in (holds or {}).items()
                                          if rid.startswith(CREDIT_NOTE_HOLD_PREFIX) and (h or {}).get("kept")])
+    done |= _advance_doors_stopped(order_id, [
+        rid for rid, h in (holds or {}).items()
+        if rid.startswith(ADVANCE_HOLD_PREFIX) and (h or {}).get("kept")
+        and _hold_aged_out({**h, "kept": False}) and rid[len(ADVANCE_HOLD_PREFIX):] not in advance_docs])
     live: Dict[str, Any] = {}
     for rid, h in (holds or {}).items():
         if rid in done or (own_refund and rid == f"{ONLINE_HOLD_PREFIX}{own_refund}"):
@@ -4426,6 +4433,28 @@ def _live_refund_holds(order_id: str, holds: Dict[str, Any],
             continue
         live[rid] = h
     return live, round(documented, 2)
+
+
+def _advance_doors_stopped(order_id: str, keys: List[str]) -> set:
+    """D85(2): an advance refund's kept hold ("advance:<id>"), older than its
+    ttl, with no record of that refund and the bill's advance claim not its
+    own: the door stopped after its fence, before its claim or its record.
+    It can write nothing from here -- its claim needs its hold (dropped by the
+    next door that takes the bill, take_bill_hold) and its record stamp its
+    claim (a stale claim is freed by pressing Refund advance again,
+    release_stale_advance_claim) -- so the hold counts as finished: no bill
+    waits on a developer for it. Fails CLOSED (503)."""
+    coll = _orders_coll() if keys else None
+    if coll is None:
+        return set()
+    try:
+        order = coll.find_one({"order_id": order_id}) or {}
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[RETURNS] advance claim unreadable for %s: %s", order_id, exc)
+        raise HTTPException(status_code=503, detail=(
+            "Could not check earlier refunds on this bill - try again. Nothing was recorded."))
+    claim = order.get("advance_refund_id")
+    return {k for k in keys if not claim or k != f"{ADVANCE_HOLD_PREFIX}{claim}"}
 
 
 def _credit_note_doors_finished(keys: List[str]) -> set:
@@ -7852,11 +7881,17 @@ async def refund_advance_and_cancel(
         # landing mid-refund makes this refuse instead of refunding a stale amount.
         # D79: first the fence -- the hold is still this press's and kept from here.
         _fence()
+        # D85(2): ...and only while this door's own hold is still on the bill:
+        # a door that stopped here and was cleared (_advance_doors_stopped)
+        # claims nothing when it wakes.
+        _own_hold = ({f"refund_holds.{ADVANCE_HOLD_PREFIX}{return_id}": {"$exists": True}}
+                     if getattr(repo, "collection", None) is not None else {})
         if not repo.update_if(
             order_id,
             # ...and the invoice state the plan read: an invoice minted in
             # between would mean a refund with no credit note for it.
-            {"status": status, "advance_refund_id": None, "amount_paid": order.get("amount_paid"),
+            {**_own_hold,
+             "status": status, "advance_refund_id": None, "amount_paid": order.get("amount_paid"),
              "invoice_number": order.get("invoice_number"),
              # An e-invoice landing mid-refund would need an e-invoice credit note.
              "irn": order.get("irn"),

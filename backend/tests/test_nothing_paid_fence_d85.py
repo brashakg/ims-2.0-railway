@@ -477,9 +477,15 @@ def test_a_credit_note_doors_hold_counts_as_finished_by_its_ledger_line(till, ro
     assert (key in got) is live
 
 
-@pytest.mark.parametrize("status, live", [("COMPLETED", False), ("VOIDED", False), ("PENDING", True), (None, True)])
-def test_an_advance_doors_hold_counts_as_finished_by_its_record(till, status, live):
+@pytest.mark.parametrize("status, claim, live", [
+    ("COMPLETED", "RET-ADV", False), ("VOIDED", None, False), ("PENDING", "RET-ADV", True),
+    # D85(2), round 8: no record yet. Its claim still on the bill: the door may
+    # be writing (a re-press frees a stale claim). No claim, or another's: it
+    # stopped before its claim -- it can write nothing more, so it is finished.
+    (None, "RET-ADV", True), (None, None, False), (None, "RET-OTHER", False)])
+def test_an_advance_doors_hold_counts_as_finished_by_its_record(till, status, claim, live):
     _door_bill(till, "advance:RET-ADV", amount=1000.0)
+    till["db"].get_collection("orders").update_one({"order_id": "ORD-1"}, {"$set": {"advance_refund_id": claim}})
     if status:
         till["db"].get_collection("returns").insert_one({"return_id": "RET-ADV", "order_id": "ORD-1",
                                                           "advance_refund": True, "status": status,
@@ -742,3 +748,84 @@ def test_the_press_puts_its_units_back_when_nobody_took_its_record(till, monkeyp
     assert r.status_code == 201 and r.json()["restock_applied"] is True and len(restocks) == 1, r.text
     hold = next(iter(_stored(till)["refund_holds"].values()))
     assert hold.get("restocking") is True and not hold.get(returns_router.RECORD_TAKEN_MARK)
+
+
+# --- D85(2), round 8: an advance door that stopped after its fence, before its record ---
+
+
+def _old(till, key, hours=2):
+    """Age ONLY that door hold past its ttl."""
+    old = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    till["db"].get_collection("orders").update_one({"order_id": "ORD-1"}, {"$set": {f"refund_holds.{key}.at": old}})
+
+
+def _adv_key(till):
+    keys = [k for k in (_stored(till).get("refund_holds") or {}) if k.startswith("advance:")]
+    assert len(keys) == 1, _stored(till).get("refund_holds")
+    return keys[0]
+
+
+def test_an_advance_door_that_died_after_its_fence_never_locks_the_bill(till, monkeypatch):
+    """Reviewers' flag: the door's worker died after its fence (its hold KEPT,
+    never released), before its claim. A re-press could not clear it (a new
+    return id each press): every refund of the bill was refused and the task
+    said 'ask the IMS team'. Now pressing Refund advance again goes through."""
+    from tests.test_pos_money_doors import _ADV_BODY, _advance_order
+
+    _advance_order(till)
+    real_fence, real_drop = returns_router.fence_bill_hold, returns_router.drop_bill_hold
+    monkeypatch.setattr(returns_router, "drop_bill_hold", lambda *a, **k: None)  # the worker is gone
+
+    def dies(coll, order_id, key, **k):
+        real_fence(coll, order_id, key, **k)
+        raise RuntimeError("worker died after its fence")
+
+    monkeypatch.setattr(returns_router, "fence_bill_hold", dies)
+    with pytest.raises(RuntimeError):
+        _advance_client().post("/api/v1/returns/advance-refund", json=_ADV_BODY, headers=_hdr("ACCOUNTANT"))
+    key = _adv_key(till)
+    assert _stored(till)["refund_holds"][key]["kept"] and _stored(till).get("advance_refund_id") is None
+    monkeypatch.setattr(returns_router, "fence_bill_hold", real_fence)
+    monkeypatch.setattr(returns_router, "drop_bill_hold", real_drop)
+    _old(till, key)
+    again = _advance_client().post("/api/v1/returns/advance-refund", json=_ADV_BODY, headers=_hdr("ACCOUNTANT"))
+    assert again.status_code == 201, again.text
+    assert _stored(till)["refund_holds"] == {} and _stored(till)["status"] == "CANCELLED"
+    docs = list(till["db"].get_collection("returns").find({"advance_refund": True}))
+    assert [d["status"] for d in docs] == ["COMPLETED"]
+
+
+def test_an_advance_door_cleared_while_it_stalled_claims_nothing_when_it_wakes(till, monkeypatch):
+    """The other half: the stalled door is not dead. Its hold aged past its
+    ttl and another door took the bill (dropping it); the door wakes and its
+    claim -- which now needs its own hold on the bill -- lands nowhere."""
+    from tests.test_pos_money_doors import _ADV_BODY, _advance_order
+
+    _advance_order(till)
+    real_fence, out = returns_router.fence_bill_hold, {}
+    go, at_fence = threading.Event(), threading.Event()
+
+    def stalls(coll, order_id, key, **k):
+        ok = real_fence(coll, order_id, key, **k)
+        at_fence.set()
+        assert go.wait(60)
+        return ok
+
+    monkeypatch.setattr(returns_router, "fence_bill_hold", stalls)
+
+    def press():
+        out["r"] = _advance_client().post("/api/v1/returns/advance-refund", json=_ADV_BODY,
+                                          headers=_hdr("ACCOUNTANT"))
+    t = threading.Thread(target=press)
+    t.start()
+    assert at_fence.wait(60)
+    key = _adv_key(till)
+    _old(till, key)
+    orders = till["db"].get_collection("orders")
+    assert returns_router.take_bill_hold(orders, "ORD-1", "credit-note:other", 100.0, door="credit_note")
+    returns_router.drop_bill_hold(orders, "ORD-1", "credit-note:other")
+    go.set()
+    t.join(60)
+    assert out["r"].status_code == 409, out["r"].text
+    assert _stored(till).get("advance_refund_id") is None and _stored(till)["status"] == "CONFIRMED"
+    assert till["db"].get_collection("returns").count_documents({}) == 0
