@@ -13,6 +13,7 @@ from typing import Optional, List, Dict, Literal
 from datetime import datetime, date, timedelta
 from calendar import monthrange
 import uuid
+from pymongo.errors import DuplicateKeyError
 import math
 import logging
 
@@ -2023,22 +2024,27 @@ async def discard_payroll_draft(
 
     An APPROVED or PAID row is never removed (409), nothing is removed in a
     locked month (423), and every removed draft leaves an audit-log row: who,
-    which employee, which month, the draft's net figure. No trace, no discard.
+    which employee, which month, the draft's net figure.
+
+    Each removal is a durable operation (``payroll_discards``, see
+    ``_open_discard``) written BEFORE the draft is deleted, holding who asked
+    and the exact draft. A discard whose delete answer or audit write is lost
+    is finished by the next identical request -- and by the period lock --
+    from that record. A removed draft is never put back, so nothing can land
+    behind a lock that committed meanwhile.
     """
     _assert_salary_admin(current_user, "discard a payroll draft")
     db = _get_db()
     if db is None:
         raise HTTPException(status_code=503, detail="Database not available")
-    from .finance import check_period_locked
-
-    check_period_locked(db, date(req.year, req.month, 1))
-    not_recorded = (
-        "The discard could not be written to the audit log, so nothing was "
-        "discarded. Please try again."
-    )
     audit_repo = get_audit_repository()
     if audit_repo is None:
-        raise HTTPException(status_code=503, detail=not_recorded)
+        raise HTTPException(
+            status_code=503,
+            detail="The discard could not be written to the audit log, so "
+            "nothing was discarded. Please try again.",
+        )
+    from .finance import check_period_locked
 
     period = {"month": req.month, "year": req.year}
     whose = (
@@ -2046,10 +2052,31 @@ async def discard_payroll_draft(
         if req.employee_id
         else {"store_id": req.store_id}
     )
+    # An earlier discard of this scope whose answer was lost is finished
+    # first -- also in a month locked since: its draft is already gone, and
+    # writing its audit row posts nothing.
+    try:
+        done = _settle_pending_discards(db, {**period, **whose}, audit_repo)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("payroll discard settle failed: %s", exc)
+        raise HTTPException(
+            status_code=500,
+            detail="An earlier discard here could not be finished and logged, "
+            "so nothing new was discarded. Please try again.",
+        )
+    try:
+        check_period_locked(db, date(req.year, req.month, 1))
+    except HTTPException:
+        if done:  # finished just now; nothing new is removed in a locked month
+            return {"status": "success", "discarded": len(done), "employees": done}
+        raise
+
     payroll_coll = db.get_collection("payroll")
     rows = list(payroll_coll.find({**period, **whose}))
     drafts = [r for r in rows if r.get("status") == "DRAFT"]
     if not drafts:
+        if done:
+            return {"status": "success", "discarded": len(done), "employees": done}
         posted = sorted(
             {r.get("status") for r in rows if r.get("status") in POSTED_PAYROLL_STATUSES}
         )
@@ -2065,81 +2092,214 @@ async def discard_payroll_draft(
             detail=f"There is no payroll draft to discard for {req.month}/{req.year}.",
         )
 
-    # A discard is a payroll write: it holds the month through the same guard
-    # as a saving run (payroll_period_guard), so the period lock cannot commit
-    # between the delete and the audit row -- else a draft put back after a
-    # failed audit write would sit behind the lock for good. The claim is also
-    # refused (423) once the guard is locked, before period_locks is written.
+    # The claim is refused (423) once the month's guard is locked, also before
+    # period_locks is written. Nothing here depends on holding it any longer:
+    # a removed draft is never put back.
     payroll_period_guard.claim_run(db, req.year, req.month)
     try:
-        return _discard_drafts(db, req, drafts, audit_repo, current_user, not_recorded)
+        for row in drafts:
+            who = row.get("employee_name") or row.get("employee_id")
+            try:
+                op = _open_discard(db, row, current_user, audit_repo)
+                one = _settle_discard(db, op, audit_repo, delete=True)
+            except HTTPException:
+                raise
+            except Exception as exc:  # noqa: BLE001 - said in plain words below
+                logger.error("payroll discard of %s failed: %s", who, exc)
+                before = (
+                    f"{len(done)} draft(s) before it were discarded and logged. "
+                    if done
+                    else ""
+                )
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"The discard of {who} could not be finished. {before}"
+                    "Press Discard again to finish it: who asked and the "
+                    "draft's figures are kept until then.",
+                )
+            if one:
+                done.append(one)
     finally:
-        payroll_period_guard.release_run(db, req.year, req.month)
+        try:
+            payroll_period_guard.release_run(db, req.year, req.month)
+        except Exception:  # noqa: BLE001 - the claim lapses after its lease
+            logger.exception("payroll discard: guard release failed")
+    return {"status": "success", "discarded": len(done), "employees": done}
 
 
-def _discard_drafts(db, req, drafts, audit_repo, current_user, not_recorded) -> dict:
-    """The body of POST /discard-draft, run while the month is held."""
-    period = {"month": req.month, "year": req.year}
-    payroll_coll = db.get_collection("payroll")
-    discarded = []
-    for row in drafts:
-        emp = row.get("employee_id")
-        # Guarded on DRAFT: a row approved in the same moment is left alone.
-        gone = payroll_coll.delete_one({"employee_id": emp, **period, "status": "DRAFT"})
-        if getattr(gone, "deleted_count", 0) != 1:
-            continue
-        name = row.get("employee_name") or _get_employee_details(db, emp).get(
-            "full_name", ""
+DISCARDS = "payroll_discards"
+
+
+def _row_key(row: dict) -> dict:
+    return {k: row.get(k) for k in ("employee_id", "year", "month")}
+
+
+def _open_discard(db, row: dict, current_user: dict, audit_repo) -> dict:
+    """Write the durable discard operation for this exact draft BEFORE it is
+    deleted: who asked, and the draft as it is now. One per employee-month
+    (``_id``). An identical retry reuses the earlier, unfinished one. Any
+    other unfinished one is settled first (finished if its draft is gone,
+    cancelled if that draft was rewritten), then replaced. 409 while another
+    request replaces it."""
+    ops = db.get_collection(DISCARDS)
+    key = _row_key(row)
+    op_id = "{employee_id}|{year}|{month}".format(**key)
+    name = row.get("employee_name") or _get_employee_details(
+        db, row.get("employee_id")
+    ).get("full_name", "")
+    op = {
+        "_id": op_id,
+        **key,
+        "store_id": row.get("store_id"),
+        "state": "PENDING",
+        "version": row.get("updated_at"),
+        "snapshot": {k: v for k, v in row.items() if k != "_id"},
+        "employee_name": name,
+        "by": {
+            "user_id": current_user.get("user_id"),
+            "user_name": current_user.get("full_name") or current_user.get("username"),
+        },
+        "requested_at": datetime.utcnow(),
+        "audit_id": f"PAYROLL-DISCARD-{uuid.uuid4().hex}",
+        "settled_at": None,
+    }
+    try:
+        ops.insert_one(op)
+        return op
+    except DuplicateKeyError:
+        pass
+    old = ops.find_one({"_id": op_id})
+    if old and old.get("state") == "PENDING":
+        if old.get("version") == op["version"] and (old.get("snapshot") or {}).get(
+            "payroll_id"
+        ) == row.get("payroll_id"):
+            return old  # the same discard, asked again
+        _settle_discard(db, old, audit_repo)
+        old = ops.find_one({"_id": op_id})
+    if old and old.get("state") != "PENDING" and ops.find_one_and_update(
+        {"_id": op_id, "audit_id": old.get("audit_id"), "state": old.get("state")},
+        {"$set": {k: v for k, v in op.items() if k != "_id"}},
+    ):
+        return op  # finished (DONE/CANCELLED) or stale: this is a new discard
+    raise HTTPException(
+        status_code=409,
+        detail="This draft is being discarded by someone else right now. "
+        "Refresh the list.",
+    )
+
+
+def _settle_discard(db, op: dict, audit_repo, delete: bool = False) -> Optional[dict]:
+    """Bring one discard operation to its end, idempotently. Returns the
+    discarded employee once the draft is gone AND its audit row exists; None
+    when the draft was not removed. Raises when a write fails: the operation
+    stays PENDING and the next call carries on from where this one stopped.
+
+    * ``delete``: remove the draft -- only the exact version the operation
+      recorded, and only while it is a DRAFT.
+    * the draft is still there unchanged: not removed yet (None, PENDING).
+    * the same row was approved or rewritten by a rerun: this discard never
+      happened (CANCELLED, no audit row).
+    * the draft is gone: write its audit row exactly once (its id is fixed in
+      the operation, and ``audit_logs._id`` is unique), drop its cached
+      payslip copy, mark the operation DONE.
+    """
+    payroll = db.get_collection("payroll")
+    ops = db.get_collection(DISCARDS)
+    snap = op.get("snapshot") or {}
+    key = _row_key(op)
+    if delete:
+        payroll.delete_one({**key, "status": "DRAFT", "updated_at": op.get("version")})
+    now = payroll.find_one(key)
+    # A row with another payroll_id is a NEW draft run after this one was
+    # removed; this discard's draft is gone all the same.
+    if now is not None and now.get("payroll_id") == snap.get("payroll_id"):
+        if now.get("status") == "DRAFT" and now.get("updated_at") == op.get("version"):
+            return None
+        ops.update_one(
+            {"_id": op["_id"], "audit_id": op["audit_id"], "state": "PENDING"},
+            {"$set": {"state": "CANCELLED", "settled_at": datetime.utcnow()}},
         )
+        return None
+
+    month, year = op.get("month"), op.get("year")
+    name = op.get("employee_name") or op.get("employee_id")
+    if not _audit_written(audit_repo, op["audit_id"]):
         logged = audit_repo.create(
             {
+                "log_id": op["audit_id"],
                 "action": "PAYROLL_DRAFT_DISCARDED",
                 "entity_type": "PAYROLL",
-                "entity_id": row.get("payroll_id"),
-                "store_id": row.get("store_id"),
-                "user_id": current_user.get("user_id"),
-                "user_name": current_user.get("full_name")
-                or current_user.get("username"),
-                "timestamp": datetime.utcnow(),
+                "entity_id": snap.get("payroll_id"),
+                "store_id": snap.get("store_id"),
+                "user_id": op["by"].get("user_id"),
+                "user_name": op["by"].get("user_name"),
+                "timestamp": op.get("requested_at") or datetime.utcnow(),
                 "severity": "WARNING",
                 "source": "domain",
-                "description": f"Discarded the payroll draft of {name or emp} for "
-                f"{req.month}/{req.year} (net {row.get('net_salary')})",
+                "description": f"Discarded the payroll draft of {name} for "
+                f"{month}/{year} (net {snap.get('net_salary')})",
                 "detail": {
-                    "employee_id": emp,
-                    "employee_name": name,
-                    "entity_id": row.get("entity_id"),
-                    "month": req.month,
-                    "year": req.year,
-                    "net_salary": row.get("net_salary"),
+                    "employee_id": op.get("employee_id"),
+                    "employee_name": op.get("employee_name"),
+                    "entity_id": snap.get("entity_id"),
+                    "month": month,
+                    "year": year,
+                    "net_salary": snap.get("net_salary"),
                 },
             }
         )
-        if logged is None:
-            # Put the draft back: no trace, no discard. The month is held, so
-            # it cannot have been locked meanwhile. ponytail: unless this one
-            # request stalled past the guard's lease (LEASE_SECONDS), the same
-            # ceiling as a saving run's.
-            payroll_coll.insert_one(row)
-            raise HTTPException(
-                status_code=500,
-                detail=not_recorded
-                if not discarded
-                else f"The discard of {name or emp} could not be written to the "
-                f"audit log, so that draft was kept. {len(discarded)} draft(s) "
-                "before it were discarded and logged. Please try again.",
-            )
-        # The old code kept a copy of a payroll row in ``payslips`` under the
-        # row's own id, and the payslip doors fall back to that collection when
-        # the month has no payroll row: without this the discarded figure would
-        # come back as the employee's payslip. A payslip made from the legacy
-        # salary records has its own id and is not touched.
-        if row.get("payroll_id"):
-            db.get_collection("payslips").delete_many(
-                {"employee_id": emp, **period, "payslip_id": row["payroll_id"]}
-            )
-        discarded.append({"employee_id": emp, "employee_name": name})
-    return {"status": "success", "discarded": len(discarded), "employees": discarded}
+        # A lost answer, or a twin request that wrote it first (the fixed id
+        # refused this one): what counts is that the row is there.
+        if logged is None and not _audit_written(audit_repo, op["audit_id"]):
+            raise RuntimeError("the audit-log row could not be written")
+    # The old code kept a copy of a payroll row in ``payslips`` under the
+    # row's own id, and the payslip doors fall back to that collection when
+    # the month has no payroll row: without this the discarded figure would
+    # come back as the employee's payslip. A payslip made from the legacy
+    # salary records has its own id and is not touched.
+    if snap.get("payroll_id"):
+        db.get_collection("payslips").delete_many(
+            {
+                "employee_id": op.get("employee_id"),
+                "month": month,
+                "year": year,
+                "payslip_id": snap["payroll_id"],
+            }
+        )
+    ops.update_one(
+        {"_id": op["_id"], "audit_id": op["audit_id"]},
+        {"$set": {"state": "DONE", "settled_at": datetime.utcnow()}},
+    )
+    return {"employee_id": op.get("employee_id"), "employee_name": op.get("employee_name")}
+
+
+def _audit_written(audit_repo, log_id: str) -> bool:
+    find = getattr(audit_repo, "find_by_id", None)
+    return bool(callable(find) and find(log_id))
+
+
+def _settle_pending_discards(db, scope: dict, audit_repo) -> List[dict]:
+    """Finish every unfinished discard of this scope whose draft is already
+    gone (an answer lost after the delete or at the audit write). Raises when
+    one still cannot be finished, so a reply never claims what is not logged.
+    A PENDING one whose draft is still there is left to the discard request."""
+    done = []
+    for op in list(db.get_collection(DISCARDS).find({**scope, "state": "PENDING"})):
+        one = _settle_discard(db, op, audit_repo)
+        if one:
+            done.append(one)
+    return done
+
+
+def settle_month_discards(db, year: int, month: int) -> None:
+    """For the period lock: finish the month's unfinished discards so the
+    audit log is complete when the books close. Never raises."""
+    try:
+        audit_repo = get_audit_repository()
+        if audit_repo is not None:
+            _settle_pending_discards(db, {"month": month, "year": year}, audit_repo)
+    except Exception:  # noqa: BLE001 - the next discard request retries
+        logger.exception("payroll discard settle failed for %s/%s", month, year)
 
 
 # ============================================================================

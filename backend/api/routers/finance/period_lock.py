@@ -74,7 +74,11 @@ async def lock_period(
     # month, so a payroll run still in DRAFT would be stuck there for good and
     # its wages would never reach the P&L, Tally or the PF file (they count
     # APPROVED and PAID rows only). The lock is chain-wide, so any shop's
-    # draft stops it.
+    # draft stops it. A draft discard whose answer was lost is finished first,
+    # so the audit log says who discarded what before the books close.
+    from ..payroll import settle_month_discards
+
+    settle_month_discards(db, year, month)
     payroll_rows = list(
         db.get_collection("payroll").find({"month": month, "year": year})
     )

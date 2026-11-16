@@ -294,28 +294,53 @@ def test_one_audit_row_per_discarded_draft_in_a_shop(monkeypatch):
     assert {a["detail"]["employee_id"]: a["detail"]["net_salary"] for a in _audits(db)} == nets
 
 
-@pytest.mark.parametrize("broken", ["no audit log", "write fails"])
-def test_no_trace_no_discard(monkeypatch, broken):
+def test_no_audit_log_no_discard(monkeypatch):
     """A deletion nobody can see afterwards is worse than a stuck draft."""
     db, c = _drafted(monkeypatch)
     before = copy.deepcopy(b09._stored_row(db))
+    monkeypatch.setattr(payroll_router, "get_audit_repository", lambda: None, raising=False)
+
+    r = c.post(DISCARD, json=ONE)
+
+    assert r.status_code == 503, r.text
+    assert "nothing was discarded" in r.json()["detail"].lower()
+    assert b09._stored_row(db) == before
+    assert list(db.get_collection("payroll_discards").find({})) == []
+
+
+def test_a_failed_audit_write_keeps_who_and_what_until_the_retry_logs_it(monkeypatch):
+    """Codex 2026-11-15 P1: putting the draft back after a failed audit write
+    could land it behind a lock that committed meanwhile. The draft stays
+    removed; the durable discard record keeps who asked and the exact draft,
+    and the next press writes the audit row from it, once."""
+    db, c = _drafted(monkeypatch)
+    draft = copy.deepcopy(b09._stored_row(db))
 
     class _Fails:
         def create(self, _doc):
             return None  # AuditRepository.create's answer when the write failed
 
-    monkeypatch.setattr(
-        payroll_router,
-        "get_audit_repository",
-        (lambda: None) if broken == "no audit log" else _Fails,
-        raising=False,
-    )
-
+    monkeypatch.setattr(payroll_router, "get_audit_repository", _Fails, raising=False)
     r = c.post(DISCARD, json=ONE)
 
-    assert r.status_code in (500, 503), r.text
-    assert "nothing was discarded" in r.json()["detail"].lower()
-    assert b09._stored_row(db) == before
+    assert r.status_code == 500, r.text
+    assert "Press Discard again" in r.json()["detail"]
+    assert b09._stored_row(db) is None and _audits(db) == []
+    [op] = db.get_collection("payroll_discards").find({})
+    assert op["state"] == "PENDING" and op["by"]["user_id"] == ADMIN["user_id"]
+    assert {k: v for k, v in op["snapshot"].items()} == {
+        k: v for k, v in draft.items() if k != "_id"}
+
+    monkeypatch.setattr(
+        payroll_router, "get_audit_repository",
+        lambda: AuditRepository(db.get_collection("audit_logs")), raising=False,
+    )
+    assert c.post(DISCARD, json=ONE).status_code == 200
+    [log] = _audits(db)
+    assert log["detail"]["net_salary"] == draft["net_salary"]
+    assert log["user_id"] == ADMIN["user_id"]
+    assert c.post(DISCARD, json=ONE).status_code == 404
+    assert len(_audits(db)) == 1
 
 
 def test_a_shop_discard_that_loses_the_audit_log_halfway_says_what_happened(monkeypatch):
@@ -323,6 +348,7 @@ def test_a_shop_discard_that_loses_the_audit_log_halfway_says_what_happened(monk
     _second_employee(db)
     c = _client(db, monkeypatch)
     assert b09._run(c).status_code == 200
+    nets = {x["employee_id"]: x["net_salary"] for x in _rows(db)}
     real = AuditRepository(db.get_collection("audit_logs"))
 
     class _FailsSecond:
@@ -332,15 +358,22 @@ def test_a_shop_discard_that_loses_the_audit_log_halfway_says_what_happened(monk
             _FailsSecond.calls += 1
             return real.create(doc) if _FailsSecond.calls == 1 else None
 
+        def find_by_id(self, log_id):
+            return real.find_by_id(log_id)
+
     monkeypatch.setattr(payroll_router, "get_audit_repository", _FailsSecond, raising=False)
 
     r = c.post(DISCARD, json=SHOP)
 
     assert r.status_code == 500 and "1 draft(s) before it" in r.json()["detail"]
-    [kept] = _rows(db)
+    assert _rows(db) == []
     [logged] = _audits(db)
-    assert kept["status"] == "DRAFT"
-    assert logged["detail"]["employee_id"] != kept["employee_id"]
+    [pending] = db.get_collection("payroll_discards").find({"state": "PENDING"})
+    assert pending["employee_id"] != logged["detail"]["employee_id"]
+
+    monkeypatch.setattr(payroll_router, "get_audit_repository", lambda: real, raising=False)
+    assert c.post(DISCARD, json=SHOP).json()["discarded"] == 1
+    assert {a["detail"]["employee_id"]: a["detail"]["net_salary"] for a in _audits(db)} == nets
 
 
 def _lock_in_another_request(db, monkeypatch):
@@ -360,14 +393,12 @@ def _lock_in_another_request(db, monkeypatch):
     return said["r"]
 
 
-def test_a_lock_cannot_slip_in_while_a_discard_is_putting_a_draft_back(monkeypatch):
-    """The discard deletes the draft, then writes the audit row. If the month is
-    locked in between and the audit write then fails, the draft is put back:
-    without the shared payroll guard it lands INSIDE the locked month, where it
-    can never be approved or discarded (423 both) -- the dead end D15 exists to
-    remove. The discard holds the month exactly like a saving run does."""
+def test_a_lock_waits_for_a_live_discard_and_no_draft_is_ever_put_back(monkeypatch):
+    """A live discard holds the month: a lock sent while it writes its audit
+    row is refused (409). The audit write then fails; the draft is NOT put
+    back (that is what could land it behind a lock -- Codex 2026-11-15 P1),
+    the retry logs it, and the month then locks."""
     db, c = _drafted(monkeypatch)
-    before = copy.deepcopy(b09._stored_row(db))
     seen = {}
 
     class _LockThenFail:
@@ -379,19 +410,16 @@ def test_a_lock_cannot_slip_in_while_a_discard_is_putting_a_draft_back(monkeypat
 
     r = c.post(DISCARD, json=ONE)
 
-    assert r.status_code == 500 and "nothing was discarded" in r.json()["detail"].lower()
+    assert r.status_code == 500 and "Press Discard again" in r.json()["detail"]
     assert seen["lock"][0] == 409, seen  # the lock waited for the discard
     assert db.get_collection("period_locks").count_documents({}) == 0
-    restored = b09._stored_row(db)
-    assert {k: v for k, v in restored.items() if k != "_id"} == {
-        k: v for k, v in before.items() if k != "_id"
-    }
-    # The month is free again: the draft can now be discarded and the month locked.
+    assert b09._stored_row(db) is None
     monkeypatch.setattr(
         payroll_router, "get_audit_repository",
         lambda: AuditRepository(db.get_collection("audit_logs")), raising=False,
     )
     assert c.post(DISCARD, json=ONE).status_code == 200
+    assert len(_audits(db)) == 1
     assert b09._lock_month_through_the_route(db, monkeypatch, without_payroll=True) == (200, "")
 
 
