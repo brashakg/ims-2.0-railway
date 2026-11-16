@@ -100,6 +100,8 @@ _ALLOWED = {
     ("vendor_repository.py", '"expected_date": {"$lt": datetime.now()}'),
     # PO expected_date day counting (po_variance_engine): a calendar rule.
     ("taskmaster.py", "now = datetime.now()"),
+    # A reward id's date label, not a stored instant.
+    ("loyalty.py", "reward_id = f\"RWD-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}\""),
 }
 
 
@@ -129,6 +131,11 @@ _TASK_FILES = [
     # sold_at readers: the unsaved-claim sweep and the stock ledger's GRN join.
     "api/routers/orders/stock.py",
     "api/routers/inventory/stock.py",
+    "api/routers/notifications.py",
+    "api/routers/loyalty.py",
+    "api/routers/products.py",
+    "api/routers/reports/blueprint.py",
+    "api/routers/workshop/spoilage.py",
 ]
 
 
@@ -345,3 +352,91 @@ def test_unsaved_claim_sweep_reads_sold_at_on_the_utc_clock(monkeypatch):
     bound = seen["flt"]["sold_at"]
     assert bound["$lt"] == UTC_NAIVE - timedelta(minutes=guard.CLAIM_SWEEP_MINUTES)
     assert bound["$gt"] == UTC_NAIVE - timedelta(days=1)
+
+
+# --------------------------------------------------------------------------
+# Other readers of UTC-stamped rows in files this PR changed.
+# --------------------------------------------------------------------------
+
+
+def test_loyalty_expiry_sweep_compares_expires_at_on_the_utc_clock(monkeypatch):
+    """expires_at = UTC stamp + validity. Read with the host's local clock, an
+    IST host expired every lot 5h30m early (points lost before their day)."""
+    import asyncio
+
+    from api.routers import loyalty as loy
+
+    monkeypatch.setattr(loy, "datetime", IstHostClock)
+    monkeypatch.setattr(et, "utc_now", lambda: INSTANT)
+    seen = {}
+
+    class _Txns:
+        def find_expired_unprocessed(self, now):
+            seen["now"] = now
+            return []
+
+    monkeypatch.setattr(loy, "get_loyalty_transaction_repository", lambda: _Txns())
+    monkeypatch.setattr(loy, "get_loyalty_account_repository", lambda: object())
+    monkeypatch.setattr(loy, "_is_admin", lambda u: True)
+    out = asyncio.run(loy.expire_sweep(current_user={"user_id": "a", "roles": ["ADMIN"]}))
+    assert out["expired_txns"] == 0
+    assert seen["now"] == UTC_NAIVE
+
+
+def test_snooze_one_hour_ahead_is_accepted_and_stored_as_the_utc_instant(monkeypatch):
+    """The UI sends an aware ISO instant. Its offset was stripped and the UTC
+    digits compared with the IST wall clock: a 1-hour snooze was 'in the past'."""
+    import asyncio
+
+    from api.routers import notifications as notif
+
+    monkeypatch.setattr(notif, "datetime", IstHostClock)
+    monkeypatch.setattr(et, "utc_now", lambda: INSTANT)
+    writes = []
+
+    class _Coll:
+        def find_one(self, *a, **k):
+            return {"notification_id": "N1", "user_id": "u1", "snooze_count": 0}
+
+        def update_one(self, flt, upd, *a, **k):
+            writes.append(upd)
+
+    monkeypatch.setattr(notif, "_coll", lambda: _Coll())
+    until = (INSTANT + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+    asyncio.run(notif.snooze_notification("N1", until=until, current_user={"user_id": "u1"}))
+    assert writes[-1]["$set"]["snoozed_until"] == UTC_NAIVE + timedelta(hours=1)
+    # an IST-offset instant is the same moment
+    until_ist = (INSTANT + timedelta(hours=1)).astimezone(IST).isoformat()
+    asyncio.run(notif.snooze_notification("N1", until=until_ist, current_user={"user_id": "u1"}))
+    assert writes[-1]["$set"]["snoozed_until"] == UTC_NAIVE + timedelta(hours=1)
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException):
+        past = (INSTANT - timedelta(minutes=1)).isoformat()
+        asyncio.run(notif.snooze_notification("N1", until=past, current_user={"user_id": "u1"}))
+
+
+def test_stranded_receipt_healer_ages_created_at_on_the_utc_clock(monkeypatch):
+    """A receipt is 'stranded' a minute after its UTC created_at. On the host's
+    local clock (IST) a receipt created this second already qualified, so the
+    healer raced the live create for its number."""
+    from api.routers.vendors import grn as grn_mod
+
+    monkeypatch.setattr(grn_mod, "datetime", IstHostClock)
+    monkeypatch.setattr(et, "utc_now", lambda: INSTANT)
+    seen = {}
+
+    class _Cur:
+        def limit(self, n):
+            return []
+
+    class _Coll:
+        def find(self, q, *a, **k):
+            seen["q"] = q
+            return _Cur()
+
+    class _Repo:
+        collection = _Coll()
+
+    grn_mod._number_stranded_receipts(_Repo())
+    assert seen["q"]["created_at"]["$lt"] == UTC_NAIVE - grn_mod._STRANDED_AFTER
