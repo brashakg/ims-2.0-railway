@@ -857,7 +857,8 @@ async def _maybe_queue_followup_outbound(
     capped customer is suppressed (no notification, no ledger row). On a queue,
     a comms_ledger row is recorded so the cap stays accurate.
 
-    Returns one of: 'no_customer', 'capped', 'queued', 'unavailable', 'error'.
+    Returns one of: 'no_customer', 'capped', 'queued', 'refused' (D56: an
+    unfilled placeholder, nothing stored), 'unavailable', 'error'.
     A staff Task is ALWAYS created by the caller regardless of this outcome.
     """
     customer_id = walkout_row.get("customer_id")
@@ -887,7 +888,7 @@ async def _maybe_queue_followup_outbound(
         return "unavailable"
 
     try:
-        await send_notification(
+        res = await send_notification(
             store_id=walkout_row.get("store_id") or "",
             customer_id=customer_id,
             customer_phone=phone,
@@ -902,6 +903,14 @@ async def _maybe_queue_followup_outbound(
         )
     except Exception as e:  # noqa: BLE001
         logger.warning(f"[WALKOUT] dark FU outbound failed: {e}")
+        return "error"
+    # The writer's durable verdict (D56 / Codex 1419): a message refused for an
+    # unfilled placeholder, or a row that did not reach storage, is never
+    # "queued" and uses no cap.
+    res = res if isinstance(res, dict) else {}
+    if res.get("status") == "REFUSED":
+        return "refused"
+    if not res.get("persisted"):
         return "error"
     # Record the cap ledger row so the 30-day cap stays accurate.
     try:
@@ -1234,6 +1243,7 @@ async def escalate_overdue_followups(
     outbound = {
         "queued": 0,
         "capped": 0,
+        "refused": 0,
         "no_customer": 0,
         "unavailable": 0,
         "error": 0,
