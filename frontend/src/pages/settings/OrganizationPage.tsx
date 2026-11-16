@@ -66,6 +66,8 @@ export default function OrganizationPage() {
   const [storesByEntity, setStoresByEntity] = useState<Record<string, Store[]>>({});
   const [meta, setMeta] = useState<OrgMeta>({ state_codes: [], entity_types: [] });
   const [loading, setLoading] = useState(true);
+  // #1434: a failed read must never render as "no entities / 0 stores".
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
   const [entityModal, setEntityModal] = useState<Entity | 'new' | null>(null);
@@ -89,7 +91,9 @@ export default function OrganizationPage() {
         (grouped[eid] = grouped[eid] || []).push(s);
       }
       setStoresByEntity(grouped);
+      setLoadError(null);
     } catch (e) {
+      setLoadError(getErrorMessage(e, 'Failed to load organization'));
       toast.error(getErrorMessage(e, 'Failed to load organization'));
     } finally {
       setLoading(false);
@@ -107,6 +111,26 @@ export default function OrganizationPage() {
     return (
       <div className="p-8 flex items-center gap-2 text-gray-500">
         <Loader2 className="w-4 h-4 animate-spin" /> Loading organization...
+      </div>
+    );
+  }
+
+  if (loadError) {
+    return (
+      <div className="p-6 max-w-5xl mx-auto">
+        <h1 className="text-xl font-semibold text-gray-900 flex items-center gap-2 mb-3">
+          <Building2 className="w-5 h-5" /> Organization
+        </h1>
+        <div role="alert" className="text-sm border border-red-200 bg-red-50 text-red-800 rounded-lg p-4">
+          <p>The organization could not be loaded, so nothing is known about its entities or stores. {loadError}</p>
+          <button
+            type="button"
+            onClick={() => load()}
+            className="mt-3 text-sm font-medium text-white bg-bv hover:bg-bv-600 rounded-lg px-3 py-1.5"
+          >
+            Retry
+          </button>
+        </div>
       </div>
     );
   }

@@ -167,3 +167,24 @@ describe('Organization choose-your-store hint (APP-01)', () => {
     expect(screen.queryByRole('link', { name: 'Choose your store' })).toBeNull();
   });
 });
+
+// #1434 round 1 (Codex P2): with the store read down the server now answers
+// 503; the page must say the organization could not be loaded -- never draw
+// "0 stores" or "No legal entities yet" -- and Retry must recover.
+describe('Organization load failure (#1434 P2)', () => {
+  it('shows a load failure with Retry instead of zero stores', async () => {
+    const user = userEvent.setup();
+    vi.mocked(orgStoreApi.list).mockRejectedValueOnce(
+      Object.assign(new Error('Store list unavailable'), { response: { status: 503, data: { detail: 'Store list unavailable' } } }),
+    );
+    render(<OrganizationPage />);
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toMatch(/could not be loaded/);
+    expect(screen.queryByText(/0 stores/)).toBeNull();
+    expect(screen.queryByText(/No legal entities yet/)).toBeNull();
+    expect(screen.queryByRole('button', { name: /Add entity/ })).toBeNull();
+    await user.click(within(alert).getByRole('button', { name: 'Retry' }));
+    await screen.findByText(/1 store\b/);
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+});
