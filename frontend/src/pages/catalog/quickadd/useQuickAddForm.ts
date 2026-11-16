@@ -85,8 +85,9 @@ export function useQuickAddForm() {
   // unsaved-work guard asks about (the page's buttons, a toast action).
   // `navigate` / `setSearchParams` below are this form's OWN moves: after a
   // successful save, after its own Skip / Cancel question, the duplicate
-  // popup's / exact-match hint's "open the existing one" (the typed item IS
-  // that product, so nothing is lost), or an address rewrite while loading.
+  // popup's / exact-match hint's "open the existing one" and a sibling chip
+  // (each asks first via editLeaveOk while an edit is unsaved; on a new form
+  // the typed item IS that product), or an address rewrite while loading.
   const routerNavigate = useNavigate();
   const [searchParams, routerSetSearchParams] = useSearchParams();
   const navigate = useCallback(
@@ -149,6 +150,11 @@ export function useQuickAddForm() {
   // settles, or the save goes without it (L1-F45 / CAT-01).
   const imagesBusy = imageCtl.uploadingImages || imageCtl.editingImages.size > 0;
   const IMAGES_BUSY_MSG = 'A photo is still uploading. Wait for it to finish, then save.';
+  // CAT-04 / D51: the form's OWN doors that swap the open product for another
+  // (a similar-products sibling chip, the exact-match "Open it", the duplicate
+  // popup's two buttons) bypass the shared guard, so while an edit is unsaved
+  // they ask the same leave question first. Set once editDirty is known below.
+  const editLeaveOk = useRef<() => boolean>(() => true);
 
   // UI state
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -761,6 +767,7 @@ export function useQuickAddForm() {
   // Rescue popup: default action — fetch the existing product and flip into
   // variant mode seeded from it. The enriched 409 payload carries product_id.
   const handleDupAddVariant = useCallback(async () => {
+    if (!editLeaveOk.current()) return;
     const pid = dupInfo?.product_id;
     if (!pid) {
       setDupInfo(null);
@@ -784,6 +791,7 @@ export function useQuickAddForm() {
   // Rescue popup: open the existing product (existingProductPath -- an
   // ordered draft opens here to be finished, anything else the stock ledger).
   const handleDupOpenExisting = useCallback(() => {
+    if (!editLeaveOk.current()) return;
     const target = existingProductPath(dupInfo);
     setDupInfo(null);
     navigate(target);
@@ -795,7 +803,7 @@ export function useQuickAddForm() {
   // "Open it" follows the same product-open destination as the popup.
   const handleSimilarPick = useCallback(
     async (productId: string) => {
-      if (!productId) return;
+      if (!productId || !editLeaveOk.current()) return;
       try {
         const product = (await productApi.getProduct(productId)) as ProductDoc;
         enterVariantMode(product, { attributes, weight, reorderLevel });
@@ -818,6 +826,7 @@ export function useQuickAddForm() {
 
   const handleSimilarOpen = useCallback(
     (existing?: SimilarProductSummary | null) => {
+      if (!editLeaveOk.current()) return;
       navigate(existingProductPath(existing));
     },
     [navigate]
@@ -858,6 +867,12 @@ export function useQuickAddForm() {
     editMode?.kind === 'spine' &&
     ((editBaseline !== null && editBaseline !== editFingerprint) ||
       typedLevel(reorderLevel) !== typedLevel(levelText(editLevels?.[reorderShop])));
+  useEffect(() => {
+    // In create mode the typed item IS the product those doors open, so they never ask.
+    editLeaveOk.current = () =>
+      !(editMode?.kind === 'spine' && (editDirty || imagesBusy)) ||
+      window.confirm('You have unsaved changes on this product — leave without saving?');
+  }, [editMode, editDirty, imagesBusy]);
 
   // Open the product after position `at` of the queue. Past the stashed rows,
   // the list's own query is asked for the rows after those queued, a page at

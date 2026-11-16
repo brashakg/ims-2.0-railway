@@ -70,7 +70,15 @@ vi.mock('../../../services/api/catalog', () => ({
   catalogProductsApi: {},
   catalogBulkApi: { fixFlags: vi.fn() },
 }));
-vi.mock('../SimilarProductsHint', () => ({ SimilarProductsHint: () => null }));
+// The strip's two doors, as plain buttons: a sibling chip and the exact-match "Open it".
+vi.mock('../SimilarProductsHint', () => ({
+  SimilarProductsHint: (p: { onPickSibling: (id: string) => void; onOpenExisting: (e: unknown) => void }) => (
+    <>
+      <button type="button" onClick={() => p.onPickSibling('P-SIB')}>sibling chip</button>
+      <button type="button" onClick={() => p.onOpenExisting({ product_id: 'P-SIB' })}>open exact match</button>
+    </>
+  ),
+}));
 vi.mock('../../../constants/gstRuntime', () => ({
   hsnOptions: () => [{ value: '900410', label: '900410 - Sunglasses (18%)', gstRate: 18 }],
   resolveHsn: (c?: string | null) => (c === 'SG' ? '900410' : ''),
@@ -410,6 +418,52 @@ describe('CAT-04 / D51: every exit asks, in every form mode', () => {
     fireEvent.click(screen.getByRole('button', { name: 'palette catalog' }));
     expect(confirm).toHaveBeenCalledTimes(1);
     expect(where()).toBe('/catalog/add');
+    confirm.mockRestore();
+  });
+
+  it('a sibling chip while editing asks; Stay keeps ?edit=P-A and the typed MRP', async () => {
+    await dirtyEdit();
+    const loads = productSpies.getProduct.mock.calls.length;
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    fireEvent.click(screen.getByRole('button', { name: 'sibling chip' }));
+    await sleep(50);
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(where()).toBe('/catalog/add?edit=P-A');
+    expect((screen.getByLabelText(/^MRP/) as HTMLInputElement).value).toBe('7990');
+    expect(screen.getByRole('button', { name: /Save changes/ })).toBeInTheDocument();
+    expect(productSpies.getProduct.mock.calls.length).toBe(loads);
+    confirm.mockRestore();
+  });
+
+  it('a sibling chip while editing, confirmed: a new variant of the sibling', async () => {
+    await dirtyEdit();
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    fireEvent.click(screen.getByRole('button', { name: 'sibling chip' }));
+    await waitFor(() => expect(where()).toBe('/catalog/add'));
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(productSpies.getProduct).toHaveBeenLastCalledWith('P-SIB');
+    confirm.mockRestore();
+  });
+
+  it('a sibling chip on an unchanged edit does not ask', async () => {
+    renderAt('/catalog/add?edit=P-A');
+    await screen.findByRole('button', { name: /Save changes/ });
+    await sleep(30);
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    fireEvent.click(screen.getByRole('button', { name: 'sibling chip' }));
+    await waitFor(() => expect(where()).toBe('/catalog/add'));
+    expect(confirm).not.toHaveBeenCalled();
+    confirm.mockRestore();
+  });
+
+  it('the exact-match "Open it" while editing asks; Stay keeps the edit', async () => {
+    await dirtyEdit();
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    fireEvent.click(screen.getByRole('button', { name: 'open exact match' }));
+    await sleep(30);
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(where()).toBe('/catalog/add?edit=P-A');
+    expect((screen.getByLabelText(/^MRP/) as HTMLInputElement).value).toBe('7990');
     confirm.mockRestore();
   });
 
