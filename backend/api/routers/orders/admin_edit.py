@@ -720,10 +720,10 @@ async def superadmin_invoice_change(
     # meanwhile waits, and so does an online refund.
     from contextlib import nullcontext
 
-    from ..returns import bill_money_door, bill_room_left
+    from ..returns import CREDIT_NOTE_HOLD_PREFIX, bill_money_door, bill_room_left
 
     _amount = round(float(delta.get("abs_delta") or 0), 2)
-    _door = (bill_money_door(db, getattr(repo, "collection", None), order_id, f"credit-note:{sacn_id}",
+    _door = (bill_money_door(db, getattr(repo, "collection", None), order_id, f"{CREDIT_NOTE_HOLD_PREFIX}{sacn_id}",
                              _amount, door="credit_note") if is_cn else nullcontext())
     with _door as _fence:
         if is_cn:

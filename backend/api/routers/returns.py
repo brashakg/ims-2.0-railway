@@ -2017,7 +2017,8 @@ def sweep_stuck_return_holds() -> int:
             try:
                 if coll.find_one({"return_id": rid, "status": {"$in": list(_NO_MONEY_DOC_STATUSES)}}):
                     continue
-                line = ledger.find_one({"entry_id": f"{rid}:credit"}) if ledger is not None else None
+                line = _real_credit_line(ledger.find_one({"entry_id": f"{rid}:credit"})
+                                         if ledger is not None else None)
             except Exception as exc:  # noqa: BLE001
                 logger.error("[RETURNS] stuck hold %s unreadable: %s", rid, exc)
                 continue
@@ -2063,15 +2064,22 @@ def _task_door_hold_stuck(order: Dict[str, Any], key: str, hold: Dict[str, Any])
         from ..services.task_triggers import create_system_task
 
         bill = order.get("order_number") or order.get("order_id")
+        # A finished door never gets here (its record counts it, D85): this one
+        # stopped part way before its record was written.
+        if key.startswith(CREDIT_NOTE_HOLD_PREFIX):
+            todo = ("a SUPERADMIN presses the SAME correction again (Orders > this bill > Edit order): it finishes the "
+                    "credit note, or clears the lock if nothing was written. Never issue it in another way.")
+        else:
+            todo = ("check the customer's store credit and the bill's history for it, then ask the IMS team to "
+                    "clear it.")
         create_system_task(
             get_task_repository(),
-            title=f"Bill {bill}: a refund or credit note left the bill locked - it takes no refund",
+            title=f"Bill {bill}: a refund or credit note stopped part way - the bill takes no refund",
             description=(
                 f"A {hold.get('door')} refund or credit note on bill {bill} (Rs {float(hold.get('amount') or 0):.2f}, "
-                f"{key}) either stopped after it started to write, or finished but could not unlock the bill. "
-                "Until it is cleared, every return, online refund and "
-                "credit note of this bill is refused. Do this: check the customer's store credit and the bill's "
-                "history for it, then ask the IMS team to clear it. Nothing is released by itself."
+                f"{key}) stopped after it started to write, before its record was saved. Until it is cleared, "
+                f"every return, online refund and credit note of this bill is refused. Do this: {todo} "
+                "Nothing is released by itself."
             ),
             priority="P1",
             category="Accounts",
@@ -2168,17 +2176,34 @@ def _step_store(order_id: Optional[str], return_id: Optional[str]):
     if not return_id:
         return None
     ledger = _ledger_coll()
+    line = {"entry_id": f"{return_id}:credit"}
     try:
-        if ledger is not None and ledger.find_one({"entry_id": f"{return_id}:credit"}) is not None:
-            return ledger, {"entry_id": f"{return_id}:credit"}, "", {}
+        row = ledger.find_one(line) if ledger is not None else None
     except Exception as exc:  # noqa: BLE001
         logger.error("[RETURNS] credit line of %s unreadable: %s", return_id, exc)
         return STEP_ERROR
+    if row is not None and row.get("type") != scl.FENCED:
+        return ledger, line, "", {}
     coll = _orders_coll()
-    if coll is None or not order_id:
-        return None
-    path = f"refund_holds.{return_id}"
-    return coll, {"order_id": order_id, path: {"$exists": True}}, f"{path}.", {"$inc": {"refund_holds_v": 1}}
+    hold = None
+    if coll is not None and order_id:
+        path = f"refund_holds.{return_id}"
+        flt = {"order_id": order_id, path: {"$exists": True}}
+        if ledger is not None:
+            # Once "Nothing was paid" took the hold (D85) its marks live on its
+            # fence (copied there first, _take_from_the_press): a claim here no
+            # longer matches and re-resolves to the fence (_give_back).
+            flt[f"{path}.{NOTHING_PAID_MARK}"] = {"$ne": True}
+        hold = (coll, flt, f"{path}.", {"$inc": {"refund_holds_v": 1}})
+    if row is None:
+        return hold
+    try:
+        if hold is not None and coll.find_one(hold[1]) is not None:
+            return hold
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[RETURNS] refund hold of %s unreadable: %s", return_id, exc)
+        return STEP_ERROR
+    return ledger, line, "", {}
 
 
 def _step_claim(store, step: str):
@@ -2253,6 +2278,11 @@ def _give_back(order_id, return_id, store_id, acts: Dict[str, Any], *, finisher:
     all_done = True
     for step, act in acts.items():
         got = _step_claim(store, step)
+        if got is None and store not in (None, STEP_ERROR):
+            # The hold went (or "Nothing was paid" took it) since the store was
+            # read: its marks are on the fence now, if there is one (D85).
+            store = _step_store(order_id, return_id)
+            got = _step_claim(store, step)
         if got is None:
             if not sole_owner:
                 continue  # no line and no hold: whoever released the hold finished it
@@ -2393,6 +2423,7 @@ def _issue_store_credit(
         NOT_WRITTEN,
         PENDING,
         POSTED,
+        REFUSED,
         RESUMED,
         UNCLEAR,
         _current_credit_balance,
@@ -2554,6 +2585,12 @@ def _issue_store_credit(
                 stored = coll.find_one({"entry_id": entry["entry_id"]})
             except Exception:  # noqa: BLE001
                 stored = None
+            if status == REFUSED and (stored or {}).get("type") == scl.FENCED:
+                # "Nothing was paid" took this line (D85): nothing was written;
+                # the caller refuses, and its number is given back through the
+                # return's one set of give-back marks (never twice).
+                outcome["fenced"] = True
+                return None
             if note_number and (stored is None or stored.get("note_number") != note_number):
                 _record_unused_credit_note(note_number, {"order_id": order_id, "store_id": entry.get("store_id")},
                                            ref, current_user, "another press issued this credit note")
@@ -4305,6 +4342,10 @@ def _refund_hold_ttl_seconds() -> int:
 # doors, so an online refund and a counter return never price one bill at once
 # (#1397, Codex round 6).
 ONLINE_HOLD_PREFIX = "shopify:"
+# The admin invoice-change credit note's and the advance refund's entries
+# (bill_money_door): "credit-note:<ledger line id>", "advance:<return id>".
+CREDIT_NOTE_HOLD_PREFIX = "credit-note:"
+ADVANCE_HOLD_PREFIX = "advance:"
 
 
 def _live_refund_holds(order_id: str, holds: Dict[str, Any],
@@ -4323,6 +4364,10 @@ def _live_refund_holds(order_id: str, holds: Dict[str, Any],
     if coll is not None:
         try:
             for doc in coll.find({"order_id": order_id}, {"_id": 0}):
+                if doc.get("advance_refund") and doc.get("status") in ("COMPLETED", "VOIDED"):
+                    # The advance door's own record is finished (D85): its hold
+                    # ("advance:<id>") no longer counts, even if its release failed.
+                    done.add(f"{ADVANCE_HOLD_PREFIX}{doc.get('return_id')}")
                 if doc.get("status") == "NOTHING_PAID":
                     done.add(doc.get("return_id"))  # finished, no money: its hold no longer counts
                     continue
@@ -4339,6 +4384,8 @@ def _live_refund_holds(order_id: str, holds: Dict[str, Any],
                 status_code=503,
                 detail="Could not check earlier refunds on this bill - try again. Nothing was recorded.",
             )
+    done |= _credit_note_doors_finished([rid for rid, h in (holds or {}).items()
+                                         if rid.startswith(CREDIT_NOTE_HOLD_PREFIX) and (h or {}).get("kept")])
     live: Dict[str, Any] = {}
     for rid, h in (holds or {}).items():
         if rid in done or (own_refund and rid == f"{ONLINE_HOLD_PREFIX}{own_refund}"):
@@ -4347,6 +4394,27 @@ def _live_refund_holds(order_id: str, holds: Dict[str, Any],
             continue
         live[rid] = h
     return live, round(documented, 2)
+
+
+def _credit_note_doors_finished(keys: List[str]) -> set:
+    """The admin credit-note door's kept holds ("credit-note:<line id>")
+    whose own record is finished (D85): its ledger line ISSUED / ADJUSTED, or
+    VOID and settled (nothing given). Such a hold is left only by a release
+    that failed and never counts again -- no bill waits on a person for it. An
+    un-kept one is the door still pricing (it ages out by its ttl). Fails
+    CLOSED (503) like the returns read."""
+    ledger = _ledger_coll() if keys else None
+    if ledger is None:
+        return set()
+    try:
+        rows = ledger.find({"entry_id": {"$in": [k[len(CREDIT_NOTE_HOLD_PREFIX):] for k in keys]}})
+        return {f"{CREDIT_NOTE_HOLD_PREFIX}{r.get('entry_id')}" for r in rows
+                if r.get("type") in (scl.ISSUED, scl.ADJUSTED)
+                or (r.get("type") == "VOID" and r.get("void_settled") is not False)}
+    except Exception as exc:  # noqa: BLE001 -- fail CLOSED (owner 2026-10-23)
+        logger.error("[RETURNS] credit-note lines unreadable for %s: %s", keys, exc)
+        raise HTTPException(status_code=503, detail=(
+            "Could not check earlier credit notes on this bill - try again. Nothing was recorded."))
 
 
 def _hold_aged_out(h: Optional[Dict[str, Any]]) -> bool:
@@ -4363,6 +4431,10 @@ def _hold_aged_out(h: Optional[Dict[str, Any]]) -> bool:
     ttl = float(h.get("ttl") or _refund_hold_ttl_seconds())
     return at is None or (datetime.now(timezone.utc).replace(tzinfo=None) - at).total_seconds() > ttl
 
+
+# "Nothing was paid" (Returns > Needs completing) has taken this counter
+# return's hold (D85): every fence of its press refuses from here.
+NOTHING_PAID_MARK = "nothing_paid"
 
 _HOLD_LOST = ("This took too long and another refund or return of this bill may have been "
               "booked meanwhile, so NOTHING was issued. Check the bill and try again.")
@@ -4394,7 +4466,8 @@ def fence_bill_hold(coll, order_id: Any, key: str, *, extra: Optional[Dict[str, 
             return repo is None  # a door: nothing to race; the counter: its hold is gone with the bill
         holds = dict(order.get("refund_holds") or {})
         mine = holds.get(key)
-        if not mine or _hold_aged_out(mine):
+        if not mine or _hold_aged_out(mine) or mine.get(NOTHING_PAID_MARK):
+            # Gone, aged out, or taken by "Nothing was paid" (D85): write nothing.
             return False
         holds[key] = {**mine, **(extra or {}), "kept": True}
         version = order.get("refund_holds_v")
@@ -5434,6 +5507,13 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
                 held["unclear"] = True
                 raise HTTPException(status_code=503, detail=CREDIT_UNCONFIRMED_MESSAGE) from exc
             entry, _outcome["not_written"] = None, True
+        if entry is None and _outcome.get("fenced"):
+            # D85: Returns > Needs completing answered "Nothing was paid" while
+            # this press stalled; its fence holds the credit line -- nothing
+            # was issued. create_return gives the claims and the number back
+            # on the shared marks (the takeover's own give-backs never repeat).
+            logger.error("[RETURNS] return %s taken over by 'Nothing was paid': nothing issued", return_id)
+            raise HTTPException(status_code=409, detail=_HOLD_LOST)
         if entry is None:
             # The claims go back and the number is written off by
             # create_return (the press's one owner) -- unless a VOID that
@@ -6059,7 +6139,13 @@ def _unfinished_return(return_id: str) -> Dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail="Could not read this return - try again.") from exc
     hold = ((order or {}).get("refund_holds") or {}).get(return_id) or {}
-    return {"line": line, "order": order or {}, "hold": hold}
+    return {"line": _real_credit_line(line), "order": order or {}, "hold": hold}
+
+
+def _real_credit_line(line: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """A return's credit line, or None when there is none -- the fence
+    "Nothing was paid" writes at its id (scl.FENCED, D85) is no credit line."""
+    return None if line is not None and line.get("type") == scl.FENCED else line
 
 
 def _money_moved_at(state: Dict[str, Any]) -> Optional[str]:
@@ -6396,13 +6482,112 @@ def _audit_complete(return_id, store_id, current_user, details, now) -> None:
         logger.warning("[RETURNS] complete-record audit skipped: %s", exc)
 
 
+_MONEY_MOVED = ("Money moved on this return (store credit, or the counter finished its refund), so it "
+                "cannot be marked as nothing paid. Answer whether the cash part was paid.")
+
+
+def _take_from_the_press(return_id: str, order_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    """D85: "Nothing was paid" and the counter press it takes over can never
+    both land. Two writes, each on the key the press itself writes through:
+
+    1. the press's credit line id ('<return id>:credit') is taken by a
+       FENCED row (insert on _id) -- a press stalled before its credit finds
+       it there and issues nothing (customers._post_ledger_credit); a live
+       credit line already there means money moved or is settling (409); a
+       VOID one (never landed) is past its posting and stays the line;
+    2. the hold is marked taken (NOTHING_PAID_MARK) in one compare-and-set
+       that also requires no money out -- every later fence of the press
+       (fence_bill_hold: its unit claim, its credit, its cash money-out mark)
+       refuses; a press whose money-out mark landed first wins (409, the
+       fence row is taken back).
+
+    Returns the hold as taken (its final facts), {} when it is gone (its
+    owner gave everything back before releasing it), or raises. A lost
+    acknowledgement is read back; anything unknown is 503 with nothing
+    given back."""
+    ledger = _ledger_coll()
+    eid = f"{return_id}:credit"
+    if ledger is not None:
+        try:
+            ledger.insert_one({"_id": eid, "entry_id": eid, "type": scl.FENCED, "return_id": return_id,
+                               "applied": False, "fenced_at": utc_now_iso(), "reason": "nothing was paid"})
+        except Exception as exc:  # noqa: BLE001 -- the press's line, our own fence, or no answer
+            try:
+                row = ledger.find_one({"entry_id": eid})
+            except Exception:  # noqa: BLE001
+                row = None
+            if row is None:
+                logger.error("[RETURNS] fence for %s not confirmed: %s", return_id, exc)
+                raise HTTPException(status_code=503, detail=(
+                    "Could not mark this return as nothing paid just now - nothing was changed. Try again."))
+            # A VOID line (the reconciler found its credit never landed) is the
+            # press's own, already past its posting: it fences it as well.
+            if row.get("type") not in (scl.FENCED, "VOID"):
+                if row.get("type") == "ISSUING":
+                    raise HTTPException(status_code=409, detail=(
+                        "This return's store credit is still being confirmed - it settles by itself within 10 "
+                        "minutes. Complete the record then."))
+                raise HTTPException(status_code=409, detail=_MONEY_MOVED)
+    repo = get_order_repository()
+    if not order_id or repo is None or not callable(getattr(repo, "update_if", None)):
+        return None
+    for _ in range(8):
+        try:
+            order = repo.read_or_raise(order_id) or {}
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=503, detail="Could not read this bill - nothing was changed. Try again.") from exc
+        holds = dict(order.get("refund_holds") or {})
+        mine = holds.get(return_id)
+        if mine is None:
+            return {}
+        if mine.get("money_out") or mine.get("doc"):
+            # The press's money-out mark landed first: it owns the return.
+            if ledger is not None:
+                try:
+                    ledger.delete_one({"_id": eid, "type": scl.FENCED})
+                except Exception as exc:  # noqa: BLE001 -- a stray fence on a cash return moves nothing
+                    logger.warning("[RETURNS] fence of %s not taken back: %s", return_id, exc)
+            raise HTTPException(status_code=409, detail=_MONEY_MOVED)
+        if mine.get(NOTHING_PAID_MARK):
+            return mine
+        if ledger is not None:
+            # The give-back marks the press already stamped on its hold go onto
+            # the fence BEFORE the hold is taken (the version below proves none
+            # landed since): every owner then reads one set (_step_store).
+            marks = {k: v for k, v in mine.items() if any(k == st or k.startswith(f"{st}_") for st in GIVE_BACK_STEPS)}
+            if marks:
+                try:
+                    ledger.update_one({"_id": eid, "type": scl.FENCED}, {"$set": marks})
+                except Exception as exc:  # noqa: BLE001 -- nothing taken yet: retryable
+                    raise HTTPException(status_code=503, detail=(
+                        "Could not mark this return as nothing paid just now - nothing was changed. "
+                        "Try again.")) from exc
+        holds[return_id] = {**mine, NOTHING_PAID_MARK: True}
+        if repo.update_if(order_id, {"refund_holds_v": order.get("refund_holds_v")},
+                          {"refund_holds": holds, "refund_holds_v": int(order.get("refund_holds_v") or 0) + 1}):
+            return holds[return_id]
+    raise HTTPException(status_code=503, detail="This bill is busy - nothing was changed. Try again.")
+
+
 def _complete_nothing_paid(return_id, line, order, hold, store_id, recovered, current_user):
-    """Nothing moved: a tombstone doc (status NOTHING_PAID, no money, the
-    lines and number it gives back) is written FIRST under a fixed _id, then
-    its steps run, each ONCE (_nothing_paid_steps)."""
+    """Nothing moved: the press is taken over first (_take_from_the_press,
+    D85), then a tombstone doc (status NOTHING_PAID, no money, the lines and
+    number it gives back) is written under a fixed _id, then its steps run,
+    each ONCE (_nothing_paid_steps)."""
     coll = _returns_coll()
     spec = (line or {}).get("undo_on_void") or {}
     order_id = spec.get("order_id") or order.get("order_id")
+    taken = _take_from_the_press(return_id, order_id)
+    if taken == {} and line is None:
+        # No credit line, and the hold is gone: the press gave its claims and
+        # number back before it released it (a release follows every
+        # give-back) -- stamped done on the fence, never repeated.
+        store = _step_store(order_id, return_id)
+        for step in ("claims_released", "number_written_off"):
+            if _step_claim(store, step) is True:
+                _step_done(store, step)
+    elif taken:
+        hold = taken
     lines = spec.get("lines") or hold.get("lines") or []
     number = (line or {}).get("note_number") or hold.get("note_number")
     now = recovered["at"]
@@ -7483,7 +7668,7 @@ async def refund_advance_and_cancel(
     # bill (#1397 round 7): the shared refund hold and the credit lock
     # (bill_money_door) from the plan to the finished refund.
     return_id = generate_return_id()
-    with bill_money_door(_get_db(), getattr(repo, "collection", None), order_id, f"advance:{return_id}",
+    with bill_money_door(_get_db(), getattr(repo, "collection", None), order_id, f"{ADVANCE_HOLD_PREFIX}{return_id}",
                          float(order.get("amount_paid") or 0), door="advance") as _fence:
         plan = _advance_refund_plan(order)
         if not plan["ok"]:

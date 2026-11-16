@@ -3094,6 +3094,12 @@ def _post_ledger_credit(repo, entry: Dict[str, Any], *, ledger=None) -> str:
     row = dict(row)
     row.pop("_id", None)
     kind = row.get("type")
+    from ..services import store_credit_ledger as scl
+
+    if kind == scl.FENCED:
+        # "Nothing was paid" took this line's place (D85): nothing posts here.
+        entry[NOT_WRITTEN] = True
+        return REFUSED
     # A final row (or a pre-#1264 row with no 'applied' key at all) carries
     # its balance already: only an explicit applied False is ever moved.
     if kind not in (PENDING, VOID) and row.get("applied") is not False:
