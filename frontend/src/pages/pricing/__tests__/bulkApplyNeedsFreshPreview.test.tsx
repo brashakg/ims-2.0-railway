@@ -135,4 +135,37 @@ describe.each([
     expect(screen.queryByRole('alert')).toBeNull();
     expect(fn).toHaveBeenCalled();
   });
+
+  // Reviewer round 2: the server's safe replay (a saved row is never written
+  // again; its website copy is carried again) was reachable only by API. The
+  // held preview now offers it, sending exactly the reviewed rows again.
+  it('"Retry the same Apply" re-sends the reviewed rows once, and never the new-change Apply', async () => {
+    render(<PricingOffersPage />);
+    fireEvent.click(await screen.findByRole('button', { name: tabLabel }));
+    fireEvent.change(brandSelect(), { target: { value: 'BRAND A' } });
+    await waitFor(() => expect(asked('BRAND A')).toBe(true), { timeout: 2000 });
+    await act(async () => {
+      pending.filter((p) => !p.args.apply).forEach((p) => p.resolve(withRow));
+    });
+    fireEvent.click(await screen.findByRole('button', { name: 'Apply 1 valid row' }));
+    await waitFor(() => expect(pending.some((p) => p.args.apply)).toBe(true));
+    await act(async () => {
+      pending.find((p) => p.args.apply)!.reject(new Error('Network Error'));
+    });
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry the same Apply' }));
+    await waitFor(() => expect(pending.filter((p) => p.args.apply)).toHaveLength(2));
+    const [first, retry] = pending.filter((p) => p.args.apply);
+    expect(retry.args).toEqual(first.args);
+    expect((retry.args as unknown as { expected: unknown }).expected).toEqual([
+      { product_id: 'P-1', mrp: 1000, offer_price: 1000 },
+    ]);
+    // While the retry runs it cannot be sent a third time.
+    expect(screen.getByRole('button', { name: 'Retry the same Apply' })).toBeDisabled();
+    await act(async () => {
+      retry.resolve({ ...withRow, summary: { ...withRow.summary, committed: 0 } });
+    });
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+    expect(screen.getByRole('button', { name: /^Apply/ })).toBeDisabled();
+    expect(fn.mock.calls.filter((c) => (c[0] as Call).apply)).toHaveLength(2);
+  });
 });

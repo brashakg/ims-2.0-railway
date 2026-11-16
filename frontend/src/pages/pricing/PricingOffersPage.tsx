@@ -240,8 +240,10 @@ function PreviewTable({ rows, kind }: { rows: BulkRowResult[]; kind: 'price' | '
 // The Apply also sends the reviewed rows and their prices, so the server
 // refuses (409) a scope that grew or a price that moved since the preview, and
 // never moves a row twice. An Apply that FAILED may still have saved (a lost
-// reply), so its preview is held: Apply stays off until a fresh Preview shows
-// the prices as they are now.
+// reply), so its preview is held: Apply stays off. "Retry the same Apply"
+// re-sends exactly those reviewed rows -- the server writes the rows that did
+// not land, never moves a saved row again, and re-carries its website copy.
+// A fresh Preview instead starts a new change from the prices as they are now.
 const reviewedRowsOf = (rows: BulkRowResult[]): BulkReviewedRow[] =>
   rows.map((r) => ({ product_id: r.product_id, mrp: r.old_mrp ?? r.mrp ?? 0, offer_price: r.old_offer_price }));
 
@@ -261,7 +263,9 @@ function useReviewedBulk(
   const canApply = !!result && !shown?.applied && result.summary.counts.valid > 0 && !busy;
 
   const run = useCallback(async (apply: boolean, fail: (e: unknown) => void) => {
-    if (apply && !canApply) return; // never apply inputs nobody previewed
+    // Never apply inputs nobody previewed; a held (uncertain) preview may
+    // only be re-sent as it was reviewed.
+    if (apply && !canApply && !(uncertain && !busy)) return;
     const key = inputKey;
     const seq = ++latest.current;
     inFlight.current += 1;
@@ -278,17 +282,24 @@ function useReviewedBulk(
       inFlight.current -= 1;
       if (inFlight.current === 0) setBusy(false);
     }
-  }, [inputKey, call, onApplied, canApply, result]);
+  }, [inputKey, call, onApplied, canApply, uncertain, busy, result]);
 
   return { result, busy, canApply, uncertain, run };
 }
 
-function UncertainApplyNote({ show }: { show: boolean }) {
+function UncertainApplyNote({ show, busy, onRetry }: { show: boolean; busy: boolean; onRetry: () => void }) {
   if (!show) return null;
   return (
     <div role="alert" className="mb-3 flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-[12.5px] text-amber-800">
       <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
-      <span>The last Apply did not confirm, so it may already have saved. Press Preview to see the prices as they are now before applying again.</span>
+      <span className="flex-1">
+        The last Apply did not confirm, so it may already have saved. Retry the same Apply: rows it already
+        saved are not changed again. Pressing Preview instead starts a new change from today&apos;s prices.
+      </span>
+      <button type="button" onClick={onRetry} disabled={busy}
+        className="shrink-0 rounded border border-amber-400 bg-white px-2.5 py-1 text-[12px] font-medium text-amber-800 hover:bg-amber-100 disabled:opacity-50">
+        Retry the same Apply
+      </button>
     </div>
   );
 }
@@ -345,7 +356,7 @@ function BulkPriceTab({ categories, brands, stores }: { categories: string[]; br
 
   return (
     <>
-      <UncertainApplyNote show={uncertain} />
+      <UncertainApplyNote show={uncertain} busy={busy} onRetry={() => run(true)} />
       <StatStrip result={result} />
 
       {/* Dark bulk-action bar (high contrast on purpose — destructive operation) */}
@@ -445,7 +456,7 @@ function BulkOfferTab({ categories, brands, stores }: { categories: string[]; br
 
   return (
     <>
-      <UncertainApplyNote show={uncertain} />
+      <UncertainApplyNote show={uncertain} busy={busy} onRetry={() => run(true)} />
       <StatStrip result={result} />
 
       {/* Offer builder card */}
