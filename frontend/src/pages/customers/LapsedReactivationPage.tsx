@@ -63,6 +63,8 @@ export function LapsedReactivationPage() {
   const [busy, setBusy] = useState(false);
   // A refused / failed save is SHOWN (Codex PR-1428 r1); the modal stays for the retry.
   const [saveError, setSaveError] = useState('');
+  // A failed read is shown with a Retry, never as an empty list.
+  const [loadError, setLoadError] = useState('');
   // D69: the call is saved but its next reminder is not. The entries are
   // locked so Retry repeats the SAME request (the server sets it once).
   const callSaved = saveError.startsWith(CALL_SAVED);
@@ -81,8 +83,10 @@ export function LapsedReactivationPage() {
       setEntries(Array.isArray(list?.entries) ? list.entries : []);
       setListDate(list?.date || '');
       setAnalytics(an);
-    } catch {
+      setLoadError('');
+    } catch (error) {
       setEntries([]);
+      setLoadError(getErrorMessage(error, 'The work-list for today could not be loaded; try again.'));
     } finally {
       setIsLoading(false);
     }
@@ -175,6 +179,11 @@ export function LapsedReactivationPage() {
         </div>
       ) : !storeId ? (
         <p className="text-gray-500 py-8">Select a store to see its reactivation list.</p>
+      ) : loadError ? (
+        <div role="alert" className="py-8 text-sm text-red-700 space-y-3">
+          <p>{loadError}</p>
+          <button type="button" className="btn-secondary" onClick={load}>Retry</button>
+        </div>
       ) : entries.length === 0 ? (
         <p className="text-gray-500 py-8">No lapsed patients to reactivate today.</p>
       ) : (

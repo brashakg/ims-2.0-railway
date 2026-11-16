@@ -818,6 +818,7 @@ _OUTCOME_NOT_SAVED = (
     "retry says so and records nothing twice."
 )
 _ALREADY_RECORDED = "This call was already recorded; its outcome is kept. Reload the list."
+_LIST_UNREADABLE = "Today's list could not be read; try again."
 _CHANGED_DETAILS = (
     "This call was already recorded with different details; the saved outcome "
     "is kept. Reload the list."
@@ -1035,13 +1036,15 @@ async def get_nba_call_list(
             "cards": [],
         }
 
-    doc = None
     try:
         doc = db.get_collection("nba_scores").find_one(
             {"store_id": store_id, "date": target_date}
         )
-    except Exception:  # noqa: BLE001
-        doc = None
+    except Exception as exc:  # noqa: BLE001
+        # A failed read is not "no list today": rescoring here would show
+        # cards without their follow-ups and forget today's done ones.
+        logger.warning("[CRM] nba list read failed for %s: %s", store_id, exc)
+        raise HTTPException(status_code=503, detail=_LIST_UNREADABLE)
 
     if doc:
         return {
@@ -1272,13 +1275,13 @@ async def get_reactivation_worklist(
         }
 
     if not preview:
-        doc = None
         try:
             doc = db.get_collection("reactivation_cohorts").find_one(
                 {"store_id": store_id, "date": target_date}
             )
-        except Exception:  # noqa: BLE001
-            doc = None
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[CRM] reactivation list read failed for %s: %s", store_id, exc)
+            raise HTTPException(status_code=503, detail=_LIST_UNREADABLE)
         if doc:
             return {
                 "store_id": store_id,

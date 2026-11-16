@@ -65,6 +65,8 @@ export function NBADashboardPage() {
   const [busy, setBusy] = useState(false);
   // A refused / failed save is SHOWN (Codex PR-1428 r1); the modal stays for the retry.
   const [saveError, setSaveError] = useState('');
+  // A failed read is shown with a Retry, never as an empty list.
+  const [loadError, setLoadError] = useState('');
   // D69: the call is saved but its next reminder is not. The entries are
   // locked so Retry repeats the SAME request (the server sets it once).
   const callSaved = saveError.startsWith(CALL_SAVED);
@@ -79,8 +81,10 @@ export function NBADashboardPage() {
       const res = await crmApi.getNbaCallList(storeId);
       setCards(Array.isArray(res?.cards) ? res.cards : []);
       setListDate(res?.date || '');
-    } catch {
+      setLoadError('');
+    } catch (error) {
       setCards([]);
+      setLoadError(getErrorMessage(error, 'The call list for today could not be loaded; try again.'));
     } finally {
       setIsLoading(false);
     }
@@ -169,6 +173,11 @@ export function NBADashboardPage() {
         </div>
       ) : !storeId ? (
         <p className="text-gray-500 py-8">Select a store to see its call list.</p>
+      ) : loadError ? (
+        <div role="alert" className="py-8 text-sm text-red-700 space-y-3">
+          <p>{loadError}</p>
+          <button type="button" className="btn-secondary" onClick={load}>Retry</button>
+        </div>
       ) : cards.length === 0 ? (
         <p className="text-gray-500 py-8">No calls scheduled for today.</p>
       ) : (

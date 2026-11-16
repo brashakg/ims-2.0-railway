@@ -394,3 +394,25 @@ def test_same_product_lines_in_one_receipt_are_one_supply():
     supplies = [(newer, line) for line in clr.supplied_cl_lines(newer)]
     supplies += [(older, line) for line in clr.supplied_cl_lines(older)]
     assert clr.earliest_refill(supplies, now=now)["days_remaining"] < 0
+
+
+# ---------------------------------------------------------------------------
+# A failed list read is a 503, never a re-scored or empty list
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("coll,url", [
+    ("nba_scores", f"/api/v1/crm/nba/{STORE}"),
+    ("reactivation_cohorts", f"/api/v1/crm/reactivation/{STORE}"),
+])
+def test_a_failed_list_read_is_503_not_a_rescored_list(monkeypatch, coll, url):
+    sdb = StrictDB()
+    real_get = sdb.get_collection
+
+    class _Down:
+        def find_one(self, *a, **k):
+            raise ConnectionError("AutoReconnect: list read failed")
+
+    monkeypatch.setattr(sdb, "get_collection", lambda n: _Down() if n == coll else real_get(n))
+    r = _client(monkeypatch, sdb).get(url, headers=_hdr())
+    assert r.status_code == 503, r.text

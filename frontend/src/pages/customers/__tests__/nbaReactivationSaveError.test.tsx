@@ -133,3 +133,29 @@ describe('D69 call saved, next reminder not set', () => {
     expect(crmApi.logReactivationOutcome.mock.calls[1]).toEqual(crmApi.logReactivationOutcome.mock.calls[0]);
   });
 });
+
+describe('a failed list read', () => {
+  const down = () => Promise.reject(buildApiError({
+    isAxiosError: true, message: 'x', config: { method: 'get', url: '/crm/x' },
+    response: { status: 503, data: { detail: "Today's list could not be read; try again." } },
+  } as never));
+
+  it('NBA shows the failure with Retry, not "No calls scheduled"', async () => {
+    crmApi.getNbaCallList.mockImplementationOnce(down)
+      .mockResolvedValueOnce({ date: '2026-11-14', cards: [CARD] });
+    render(<NBADashboardPage />);
+    expect(await screen.findByRole('alert')).toHaveTextContent(/could not be read/);
+    expect(screen.queryByText(/No calls scheduled/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(await screen.findByRole('button', { name: 'Done' })).toBeInTheDocument();
+  });
+
+  it('Reactivation shows the failure with Retry, not an empty work-list', async () => {
+    crmApi.getReactivationAnalytics.mockResolvedValue(null);
+    crmApi.getReactivationWorklist.mockImplementationOnce(down);
+    render(<LapsedReactivationPage />);
+    expect(await screen.findByRole('alert')).toHaveTextContent(/could not be read/);
+    expect(screen.queryByText(/No lapsed patients/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
+  });
+});
