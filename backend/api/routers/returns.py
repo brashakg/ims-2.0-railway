@@ -2670,8 +2670,13 @@ def _issue_store_credit(
         except Exception as exc:  # noqa: BLE001 -- the fence, another press's line, a lost ack, or a failure
             try:
                 stored = coll.find_one({"entry_id": entry["entry_id"]})
-            except Exception:  # noqa: BLE001
-                stored = None
+            except Exception as read_exc:  # noqa: BLE001 -- D92(3): UNKNOWN, never "not written"
+                # The insert may have landed: the caller keeps its claims and
+                # the number (the line may carry it) and answers 503.
+                logger.error("[RETURNS] credit line %s: insert failed (%s) and its read-back failed (%s)",
+                             entry["entry_id"], exc, read_exc)
+                outcome["not_written"] = False
+                raise CreditNotConfirmed(entry["entry_id"]) from read_exc
             kind = (stored or {}).get("type")
             if kind == scl.FENCED:
                 outcome["fenced"] = True
@@ -5097,24 +5102,60 @@ def _hold_cas(order_id: Optional[str], return_id: Optional[str], decide) -> Any:
     raise RuntimeError("bill busy")
 
 
-def _fence_restock(order_id: Optional[str], return_id: Optional[str]) -> bool:
-    """D85: the press's stock writes (restock, quarantine) and "Cash paid"
-    never both put the units back. True: the press may write them -- its hold
-    is stamped "restocking" first, so Cash paid leaves the units to it. False:
-    Cash paid took the record (RECORD_TAKEN_MARK), or the bill could not be
-    read -- nothing goes back here; the record's Restock puts the units back,
-    once (retry_restock). No hold (nothing can take it over): True."""
+RESTOCK_UNKNOWN = "unknown"
+
+# D92(4): a press whose record Needs completing took answers this, never 201,
+# so the cash is never handed over twice.
+RECORD_TAKEN_MESSAGE = "This return was completed from Needs completing. Do not pay at the counter."
+
+
+def _record_exists(return_id: str) -> bool:
+    """D92(1): the durable mark left once the hold is gone -- a record of this
+    return (Cash paid's recovered record, Nothing was paid's). Raises when the
+    returns cannot be read (never "no record")."""
+    coll = _returns_coll()
+    if coll is None:
+        raise RuntimeError("returns not available")
+    return coll.find_one({"return_id": return_id}, {"_id": 1}) is not None
+
+
+def _record_taken_by_needs_completing(return_id: str, quarantined: List[Dict[str, Any]]) -> None:
+    """D92(4): Returns > Needs completing ("Cash paid") already wrote this
+    return's record while the press stalled. The press writes no record and
+    answers 409 -- never 201, so the cash is never handed over twice. A
+    DAMAGED unit it set aside (D92(2)) is noted on that record (fail-soft)."""
+    logger.error("[RETURNS] return %s was completed from Needs completing while its press ran: 409", return_id)
+    if quarantined:
+        try:
+            _returns_coll().update_one({"return_id": return_id}, {"$set": {
+                "quarantined_stock_ids": [u["stock_id"] for u in quarantined]}})
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[RETURNS] quarantined units of %s not noted on its record: %s", return_id, exc)
+    raise HTTPException(status_code=409, detail=RECORD_TAKEN_MESSAGE)
+
+
+def _fence_restock(order_id: Optional[str], return_id: Optional[str]) -> Any:
+    """D85/D92: the press's restock and "Cash paid" never both put the units
+    back. True: the press may restock -- its hold is stamped "restocking"
+    first, so Cash paid leaves the units to it. RECORD_TAKEN_MARK: Cash paid
+    took the record (the mark on the hold, or -- the hold gone, dropped by a
+    later return once that record counted -- the record itself): nothing goes
+    back here; the record's Restock puts the units back, once. RESTOCK_UNKNOWN:
+    the bill or the returns could not be read -- nothing goes back here
+    either. A missing hold is never permission (D92(1))."""
     def decide(h):
-        if h is None or h.get("restocking"):
+        if h is not None and h.get("restocking"):
             return True, None
+        if h is None:
+            return (RECORD_TAKEN_MARK if return_id and _record_exists(return_id) else True), None
         if h.get(RECORD_TAKEN_MARK):
-            return False, None
+            return RECORD_TAKEN_MARK, None
         return True, {**h, "restocking": True}
     try:
         return _hold_cas(order_id, return_id, decide)
     except Exception as exc:  # noqa: BLE001 -- unknown: put nothing back here
         logger.error("[RETURNS] restock of %s not fenced (%s): left to the record's Restock", return_id, exc)
-        return False
+        return RESTOCK_UNKNOWN
 
 
 def _take_record(order_id: Optional[str], return_id: str) -> bool:
@@ -6406,8 +6447,9 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         "restock_store_redirected_from": None,
         "restock_store_reason": None,
     }
-    # D85: Cash paid may have taken this return's record while it stalled.
-    stock_ok = _fence_restock(resolved_order_id, held.get("return_id"))
+    # D85/D92: Cash paid may have taken this return's record while it stalled.
+    stock_fence = _fence_restock(resolved_order_id, return_id)
+    stock_ok = stock_fence is True
     try:
         if stock_ok:
             restock_result = _restock_good_items(
@@ -6433,10 +6475,13 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         logger.warning("[RETURNS] restock failed (recorded, not applied): %s", exc)
     # F21-3: a DAMAGED or OPENED piece comes back QUARANTINED (tracked, can
     # go to the supplier or be cleared), and the task agent raises its 7-day
-    # follow-up. D85: nothing is set aside here once Cash paid took the record.
+    # follow-up. D92(2): never gated on the restock fence -- it moves only the
+    # unit THIS order sold out of SOLD, on the press's slots (moved_ids=set(),
+    # as for the put-back above): a set-aside the record's Retry stock step
+    # already made holds the same slot, so a second run moves nothing (D45a).
     quarantined, aside_ok = _quarantine_damaged_units(
         active_lines, resolved_order_id, order, return_id, current_user.get("user_id"),
-        moved_ids=set()) if stock_ok else ([], True)  # the press's slots, as for the put-back above
+        moved_ids=set())
     for unit in quarantined:
         try:
             from agents.registry import dispatch_event
@@ -6449,6 +6494,8 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[RETURNS] stock.quarantined dispatch failed: %s", exc)
+    if stock_fence == RECORD_TAKEN_MARK:
+        _record_taken_by_needs_completing(return_id, quarantined)
     restocked = restock_result.get("restocked", [])
     # A piece whose set-aside failed still reads SOLD: the stock step stays
     # open for the retry (D7), which sets it aside once.
@@ -6585,6 +6632,14 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         try:
             coll.insert_one(dict(doc))
         except Exception as exc:  # noqa: BLE001
+            # D92(4): the record Needs completing wrote holds this return id
+            # (uniq_returns_return_id) -- the return is complete: 409, never 201.
+            try:
+                _taken = (coll.find_one({"return_id": return_id}) or {}).get("recovered")
+            except Exception:  # noqa: BLE001 -- unknown: the doc-missing path below
+                _taken = None
+            if _taken:
+                _record_taken_by_needs_completing(return_id, quarantined)
             # The money already went out: the KEPT hold keeps this refund in the
             # bill's refunded total (Rs 2,000 rule, cap) -- loud, for the admin:
             # the doc rides on the hold and on a P1 task, for Complete record.
@@ -6647,6 +6702,10 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         "CREDIT_NOTE": f"Store credit of Rs {pays} issued{fee_note}{points_note}",
         "EXCHANGE": "Exchange recorded",
     }[body.return_type]
+    if stock_fence == RESTOCK_UNKNOWN and any(ln.restock and ln.condition == "GOOD" for ln in active_lines):
+        # D92(1): the bill could not be checked, so no unit went back here.
+        message += (". Its units were NOT put back in stock (the bill could not be checked just now): "
+                    "press Restock on this return")
 
     return {
         "return_id": return_id,
