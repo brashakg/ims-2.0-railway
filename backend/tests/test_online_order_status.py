@@ -623,7 +623,15 @@ def test_the_orders_screen_can_filter_on_shipped(monkeypatch):
     app.include_router(_shared.router, prefix="/api/v1/orders")
     app.dependency_overrides[get_current_user] = lambda: {
         "user_id": "u-1", "roles": ["SUPERADMIN"], "active_store_id": None}
-    monkeypatch.setattr(lists, "get_order_repository", lambda: None)
+    # A real (empty) repository: with no repository at all the list is now a
+    # 503 "could not read", never a 200 empty list (PR #1427 round 2).
+    import mongomock
+    from database.repositories.order_repository import OrderRepository
+
+    monkeypatch.setattr(
+        lists, "get_order_repository",
+        lambda: OrderRepository(mongomock.MongoClient().db.orders),
+    )
     monkeypatch.setattr(lists, "validate_store_access", lambda sid, user: None)
     client = TestClient(app)
     for status in ("READY", "SHIPPED", "DELIVERED"):
