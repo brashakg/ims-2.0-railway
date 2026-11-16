@@ -1018,7 +1018,13 @@ describe('D34: a shop change closes any receiving form not yet sent', () => {
     expect(toldShopChanged()).toBe(0);
   });
 
-  it('a send for shop A that fails after the switch: the form does not come back to be sent to B', async () => {
+  /** Closed with "it may already be saved -- check the shop you left", never "nothing was saved". */
+  const toldMaybeSaved = () =>
+    toast.warning.mock.calls.filter(([m]) =>
+      /shop changed.*may already be saved.*switch back.*Receipts still waiting/i.test(String(m)) && !/nothing was saved/i.test(String(m))).length;
+
+  it('a send for shop A whose answer is lost after the switch: closed, and never told "nothing was saved"', async () => {
+    // Codex PR-1414 round 2: the receipt was committed, its reply lost (503).
     let refuse: (e: unknown) => void = () => undefined;
     api.createGRN.mockImplementation(() => new Promise((_r, no) => { refuse = no; }));
     const view = render(tree());
@@ -1029,9 +1035,75 @@ describe('D34: a shop change closes any receiving form not yet sent', () => {
     switchTo(view, 'S2');
     await act(async () => { refuse(serverSaid(503, 'The stock store is not answering.')); });
     await formIsClosed();
-    expect(toldShopChanged()).toBe(1);
+    expect(toldShopChanged()).toBe(0);
+    expect(toldMaybeSaved()).toBe(1);
     expect(api.createGRN).toHaveBeenCalledTimes(1);
     expect(api.acceptGRN).not.toHaveBeenCalled();
+  });
+
+  it('a send with no answer at all (the line dropped), then the switch: may be saved, not "nothing was saved"', async () => {
+    api.createGRN.mockRejectedValue(new ApiError('Network Error'));
+    const view = render(tree());
+    await fillWithoutOrder(/^Bought without PO$/);
+    await attachBill('');
+    fireEvent.click(receiveBtn());
+    await waitFor(() => expect(toast.error).toHaveBeenCalled());
+    switchTo(view, 'S2');
+    await formIsClosed();
+    expect(toldShopChanged()).toBe(0);
+    expect(toldMaybeSaved()).toBe(1);
+    expect(api.createGRN).toHaveBeenCalledTimes(1);
+  });
+
+  it('one lost answer stays remembered: a later plain refusal (422) does not turn it into "nothing was saved"', async () => {
+    api.createGRN
+      .mockRejectedValueOnce(serverSaid(502, 'Bad gateway'))
+      .mockRejectedValueOnce(serverSaid(422, 'The supplier is switched off.'));
+    const view = render(tree());
+    await fillWithoutOrder(/^Bought without PO$/);
+    await attachBill('');
+    fireEvent.click(receiveBtn());
+    await waitFor(() => expect(toast.error).toHaveBeenCalledTimes(1));
+    fireEvent.click(receiveBtn());
+    await waitFor(() => expect(toast.error).toHaveBeenCalledTimes(2));
+    switchTo(view, 'S2');
+    await formIsClosed();
+    expect(toldShopChanged()).toBe(0);
+    expect(toldMaybeSaved()).toBe(1);
+  });
+
+  it('a send the server plainly refused (422), then the switch: nothing was saved, and it says so', async () => {
+    api.createGRN.mockRejectedValue(serverSaid(422, 'The supplier is switched off.'));
+    const view = render(tree());
+    await fillWithoutOrder(/^Bought without PO$/);
+    await attachBill('');
+    fireEvent.click(receiveBtn());
+    await waitFor(() => expect(toast.error).toHaveBeenCalled());
+    switchTo(view, 'S2');
+    await formIsClosed();
+    expect(toldShopChanged()).toBe(1);
+    expect(toldMaybeSaved()).toBe(0);
+  });
+
+  it('an express send for an order whose answer is lost, then the switch: may be saved', async () => {
+    cockpit.expressReceive.mockRejectedValue(serverSaid(504, 'Gateway timeout'));
+    const view = render(tree());
+    const card = (await screen.findByText('PO-0412')).closest('.card') as HTMLElement;
+    fireEvent.click(within(card).getByRole('button', { name: /Receive this box/ }));
+    await screen.findByText(/What arrived/);
+    await waitFor(() => expect(products.getProduct).toHaveBeenCalledTimes(2));
+    fireEvent.click(screen.getByRole('button', { name: /Everything arrived as ordered/ }));
+    await attachBill();
+    fireEvent.click(receiveBtn());
+    await waitFor(() => expect(cockpit.expressReceive).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(toast.error).toHaveBeenCalled());
+    api.getPurchaseOrders.mockResolvedValue({ purchase_orders: [PO_B] });
+    switchTo(view, 'S2');
+    expect(await screen.findByText('PO-0900')).toBeInTheDocument();
+    expect(screen.queryByText(/What arrived/)).toBeNull();
+    expect(toldShopChanged()).toBe(0);
+    expect(toldMaybeSaved()).toBe(1);
+    expect(api.createGRN).not.toHaveBeenCalled();
   });
 
   it('the same shop confirmed again changes nothing: the form and what was typed stay', async () => {

@@ -124,17 +124,26 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
   // standard receipt follows its order's delivery shop), so a form opened for
   // shop A and still open under shop B would be posted to B. When the shop
   // signed in to changes -- or the Shop filter moves off the order's delivery
-  // shop -- a form not yet sent is closed and says so; nothing is saved. A
-  // receipt already sent keeps its screen: its answer is the old shop's. One
-  // whose send failed comes back unsent, and is closed then.
+  // shop -- a form not yet sent is closed and says so. A receipt already sent
+  // keeps its screen: its answer is the old shop's. One whose send failed
+  // comes back to the form, and is closed then -- but a send whose answer was
+  // lost (no reply, a 5xx) may have been saved, so it never says "nothing was
+  // saved": it points at the receipts still waiting in the shop left.
   const openedFor = useRef({ storeId, ownStoreId });
   const unsent = stage.kind === 'form' && !submitting;
+  // Sticky: one uncertain send is enough, whatever a later retry answers.
+  const [maybeSaved, setMaybeSaved] = useState(false);
   useEffect(() => {
     const was = openedFor.current;
     const orderLeftTheFilter =
       was.storeId !== storeId && !!po?.delivery_store_id && !!storeId && po.delivery_store_id !== storeId;
     if (!unsent || (was.ownStoreId === ownStoreId && !orderLeftTheFilter)) return;
-    toast.warning('The shop changed, so this receipt was closed and nothing was saved. Start it again for the new shop.', 12000);
+    toast.warning(
+      maybeSaved
+        ? 'The shop changed, so this receipt was closed. It was sent but no answer came back, so it may already be saved in the shop you switched from: switch back and check "Receipts still waiting" before receiving this box again.'
+        : 'The shop changed, so this receipt was closed and nothing was saved. Start it again for the new shop.',
+      12000,
+    );
     onClose();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [storeId, ownStoreId, unsent]);
@@ -525,6 +534,10 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
         },
       });
     } catch (err) {
+      // Only a plain "no" from the server (a 4xx other than timeout/conflict)
+      // proves nothing was saved; no answer or a 5xx proves nothing.
+      const st = err instanceof ApiError ? err.status ?? 0 : 0;
+      if (!(st >= 400 && st < 500 && st !== 408 && st !== 409)) setMaybeSaved(true);
       failed(err);
     } finally {
       setSubmitting(false);
