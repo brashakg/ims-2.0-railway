@@ -829,3 +829,49 @@ def test_an_advance_door_cleared_while_it_stalled_claims_nothing_when_it_wakes(t
     assert out["r"].status_code == 409, out["r"].text
     assert _stored(till).get("advance_refund_id") is None and _stored(till)["status"] == "CONFIRMED"
     assert till["db"].get_collection("returns").count_documents({}) == 0
+
+
+# --- D85(1), round 8: a VOID credit line's late balance move vs Nothing was paid ---
+
+
+def _void_line_bill(till, rid="RET-V"):
+    eid = f"{rid}:credit"
+    _bill_with_hold(till, rid, writing=True)
+    _customer(till)
+    _ledger(till).insert_one({
+        "_id": eid, "entry_id": eid, "customer_id": "CUST-1", "type": "VOID", "final_type": scl.ISSUED,
+        "delta": 0.0, "void_delta": 900.0, "amount": 900.0, "applied": False, "note_number": "TST01/C2627/0031",
+        "pending_at": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
+        "undo_on_void": {"order_id": "ORD-1", "return_id": rid,
+                         "lines": [{"item_id": "li1", "product_id": "P1", "qty": 1.0}]}})
+    return eid
+
+
+def _late_move(eid):
+    return cust_router.apply_store_credit_delta(returns_router.get_customer_repository(), "CUST-1", 900.0,
+                                                guard_ref=eid, entry_id=eid)
+
+
+def test_a_void_lines_late_move_never_lands_after_nothing_paid(till, monkeypatch, tasks):
+    """Reviewers' flag: the press stalled on its balance move past the
+    reconciler's timeout (its line VOID), Nothing was paid answered, then the
+    move landed: the line healed to ISSUED beside the NOTHING_PAID record --
+    Rs 900 credit, its number both filed and written off, the bill cap blind
+    to it. Now the takeover fences the move's guard first."""
+    _counted(monkeypatch)
+    eid = _void_line_bill(till)
+    doc = _complete("RET-V", nothing_paid=True)
+    assert doc["status"] == "NOTHING_PAID"
+    assert _late_move(eid) is False and _balance(till) == 0.0
+    assert _ledger(till).find_one({"entry_id": eid})["type"] == "VOID"
+    assert not cust_router._guard_landed(returns_router.get_customer_repository(), "CUST-1", eid)
+
+
+def test_a_void_lines_move_that_landed_first_refuses_nothing_paid(till, monkeypatch, tasks):
+    _counted(monkeypatch)
+    eid = _void_line_bill(till)
+    assert _late_move(eid) is True and _balance(till) == 900.0  # the money moved
+    with pytest.raises(HTTPException) as exc:
+        _complete("RET-V", nothing_paid=True)
+    assert exc.value.status_code == 409 and "Money moved" in exc.value.detail
+    assert _docs(till) == [] and _balance(till) == 900.0

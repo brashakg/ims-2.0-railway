@@ -6660,6 +6660,31 @@ _MONEY_MOVED = ("Money moved on this return (store credit, or the counter finish
                 "cannot be marked as nothing paid. Answer whether the cash part was paid.")
 
 
+def _fence_void_move(row: Dict[str, Any]) -> None:
+    """D85: a VOID credit line's balance move could still land late (a
+    stalled press) and be healed beside a NOTHING_PAID record. One
+    compare-and-set on the customer decides: the move's guard is fenced
+    (customers.GUARD_FENCED) only while the move has not landed -- from then
+    on it never can. Landed first: 409, the money moved. Unknown: 503."""
+    from .customers import GUARD_FENCED, STORE_CREDIT_REFS
+
+    eid, cid = row.get("entry_id"), row.get("customer_id")
+    coll = getattr(get_customer_repository(), "collection", None) if cid else None
+    if coll is None or not eid:
+        return  # no customer balance: no move can land
+    try:
+        res = coll.update_one({"customer_id": cid, STORE_CREDIT_REFS: {"$ne": eid}},
+                              {"$addToSet": {STORE_CREDIT_REFS: eid + GUARD_FENCED}})
+        matched = getattr(res, "matched_count", getattr(res, "modified_count", 0))
+        landed = not matched and coll.find_one({"customer_id": cid, STORE_CREDIT_REFS: eid}) is not None
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[RETURNS] late credit of %s not fenced: %s", eid, exc)
+        raise HTTPException(status_code=503, detail=(
+            "Could not mark this return as nothing paid just now - nothing was changed. Try again.")) from exc
+    if landed:
+        raise HTTPException(status_code=409, detail=_MONEY_MOVED)
+
+
 def _take_from_the_press(return_id: str, order_id: Optional[str]) -> Optional[Dict[str, Any]]:
     """D85: "Nothing was paid" and the counter press it takes over can never
     both land. Two writes, each on the key the press itself writes through:
@@ -6696,6 +6721,8 @@ def _take_from_the_press(return_id: str, order_id: Optional[str]) -> Optional[Di
                     "Could not mark this return as nothing paid just now - nothing was changed. Try again."))
             # A VOID line (the reconciler found its credit never landed) is the
             # press's own, already past its posting: it fences it as well.
+            if row.get("type") == "VOID":
+                _fence_void_move(row)
             if row.get("type") not in (scl.FENCED, "VOID"):
                 if row.get("type") == "ISSUING":
                     raise HTTPException(status_code=409, detail=(

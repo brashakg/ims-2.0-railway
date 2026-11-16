@@ -2668,6 +2668,10 @@ def store_credit_balance_unready(repo, customer_id: str, exclude_entry_id: Optio
 # scheduler and before any posting for the same customer.
 # --------------------------------------------------------------------------- #
 STORE_CREDIT_REFS = "store_credit_refs"
+# '<entry id>' + this in store_credit_refs: the line's move may never land
+# (D85: "Nothing was paid" took over a counter return whose credit line is
+# VOID). Never read as "the move landed" (_guard_landed reads the bare id).
+GUARD_FENCED = "#fenced"
 PENDING = "ISSUING"
 VOID = "VOID"
 PENDING_TIMEOUT_SECONDS = 600
@@ -3313,7 +3317,7 @@ def apply_store_credit_delta(
     flt: Dict[str, Any] = {"customer_id": customer_id}
     upd: Dict[str, Any] = {"$inc": {"store_credit": float(delta)}}
     if guard_ref:
-        flt[STORE_CREDIT_REFS] = {"$ne": guard_ref}
+        flt[STORE_CREDIT_REFS] = {"$nin": [guard_ref, guard_ref + GUARD_FENCED]}
         upd["$push"] = {STORE_CREDIT_REFS: guard_ref}
     res = coll.update_one(flt, upd)
     if getattr(res, "matched_count", getattr(res, "modified_count", 0)):
