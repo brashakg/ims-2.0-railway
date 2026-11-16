@@ -23,6 +23,10 @@ import type {
   ReactivationAnalytics,
 } from '../../services/api/crm';
 
+// The server's D69 answer when the call is saved but the next reminder is not
+// (crm.py _NEXT_NOT_SET).
+const CALL_SAVED = 'Call saved. The next reminder was NOT set.';
+
 const OUTCOMES: { value: ReactivationOutcome; label: string; reached: boolean }[] = [
   { value: 'reached', label: 'Reached -- interested', reached: true },
   { value: 'scheduled_visit', label: 'Scheduled a visit', reached: true },
@@ -59,6 +63,9 @@ export function LapsedReactivationPage() {
   const [busy, setBusy] = useState(false);
   // A refused / failed save is SHOWN (Codex PR-1428 r1); the modal stays for the retry.
   const [saveError, setSaveError] = useState('');
+  // D69: the call is saved but its next reminder is not. The entries are
+  // locked so Retry repeats the SAME request (the server sets it once).
+  const callSaved = saveError.startsWith(CALL_SAVED);
 
   const load = useCallback(async () => {
     if (!storeId) {
@@ -241,6 +248,7 @@ export function LapsedReactivationPage() {
                     name="react-outcome"
                     value={o.value}
                     checked={outcome === o.value}
+                    disabled={callSaved}
                     onChange={() => setOutcome(o.value)}
                   />
                   {o.label}
@@ -249,6 +257,7 @@ export function LapsedReactivationPage() {
             </div>
             <textarea
               value={notes}
+              disabled={callSaved}
               onChange={(e) => setNotes(e.target.value)}
               placeholder="Notes (optional)"
               rows={2}
@@ -261,6 +270,7 @@ export function LapsedReactivationPage() {
               id="react-next"
               type="date"
               value={nextDate}
+              disabled={callSaved}
               onChange={(e) => setNextDate(e.target.value)}
               className="border border-gray-200 rounded px-2 py-1 text-sm"
             />
@@ -275,7 +285,7 @@ export function LapsedReactivationPage() {
                 disabled={busy}
                 className="bg-bv-red text-white rounded px-3 py-1.5 text-sm disabled:opacity-40"
               >
-                Save
+                {callSaved ? 'Retry' : 'Save'}
               </button>
             </div>
           </div>
