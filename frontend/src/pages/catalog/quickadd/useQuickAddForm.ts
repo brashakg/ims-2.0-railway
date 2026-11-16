@@ -86,8 +86,8 @@ export function useQuickAddForm() {
   // `navigate` / `setSearchParams` below are this form's OWN moves: after a
   // successful save, after its own Skip / Cancel question, the duplicate
   // popup's / exact-match hint's "open the existing one" and a sibling chip
-  // (each asks first via editLeaveOk while an edit is unsaved; on a new form
-  // the typed item IS that product), or an address rewrite while loading.
+  // (each asks first via editLeaveOk while the form holds unsaved work, a new
+  // product included -- D89), or an address rewrite while loading.
   const routerNavigate = useNavigate();
   const [searchParams, routerSetSearchParams] = useSearchParams();
   const navigate = useCallback(
@@ -152,8 +152,9 @@ export function useQuickAddForm() {
   const IMAGES_BUSY_MSG = 'A photo is still uploading. Wait for it to finish, then save.';
   // CAT-04 / D51: the form's OWN doors that swap the open product for another
   // (a similar-products sibling chip, the exact-match "Open it", the duplicate
-  // popup's two buttons) bypass the shared guard, so while an edit is unsaved
-  // they ask the same leave question first. Set once editDirty is known below.
+  // popup's two buttons) bypass the shared guard, so while the form holds
+  // unsaved work (edit, review or a new product) they ask the same leave
+  // question first. Set once the dirty flags are known below.
   const editLeaveOk = useRef<() => boolean>(() => true);
 
   // UI state
@@ -867,12 +868,6 @@ export function useQuickAddForm() {
     editMode?.kind === 'spine' &&
     ((editBaseline !== null && editBaseline !== editFingerprint) ||
       typedLevel(reorderLevel) !== typedLevel(levelText(editLevels?.[reorderShop])));
-  useEffect(() => {
-    // In create mode the typed item IS the product those doors open, so they never ask.
-    editLeaveOk.current = () =>
-      !(editMode?.kind === 'spine' && (editDirty || imagesBusy)) ||
-      window.confirm('You have unsaved changes on this product — leave without saving?');
-  }, [editMode, editDirty, imagesBusy]);
 
   // Open the product after position `at` of the queue. Past the stashed rows,
   // the list's own query is asked for the rows after those queued, a page at
@@ -1213,7 +1208,15 @@ export function useQuickAddForm() {
   // ANY mode (edit, review, a new product) or a photo is still uploading:
   // refresh / tab close, links, menus, the command palette, Back / Forward
   // and a same-page switch to another ?edit= / ?review=.
-  useUnsavedGuard(editDirty || reviewDirty || createDirty || imagesBusy);
+  const formUnsaved = editDirty || reviewDirty || createDirty || imagesBusy;
+  useUnsavedGuard(formUnsaved);
+  // D89(1): the form's own doors (editLeaveOk above) ask the same question on
+  // the same rule -- a new product with typed work or a photo asks too.
+  useEffect(() => {
+    editLeaveOk.current = () =>
+      !formUnsaved ||
+      window.confirm('You have unsaved changes on this product — leave without saving?');
+  }, [formUnsaved]);
 
   const runReviewDryRun = useCallback(async (id: string) => {
     setReviewDryLoading(true);

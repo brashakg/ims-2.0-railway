@@ -477,3 +477,132 @@ describe('CAT-04 / D51: every exit asks, in every form mode', () => {
     confirm.mockRestore();
   });
 });
+
+// D89(1): on a NEW product the form's own doors ask too while it holds typed
+// work (a changed field or an added photo); a clean create form moves freely.
+describe('CAT-04 / D89(1): a new product with typed work asks at the form\'s own doors', () => {
+  const val = (label: RegExp) => (screen.getByLabelText(label) as HTMLInputElement).value;
+  const openCreate = async () => {
+    renderAt('/catalog/add');
+    await screen.findByRole('button', { name: /Save product/ });
+    fireEvent.click(screen.getByText('Sunglasses'));
+    await screen.findByRole('button', { name: 'sibling chip' });
+    await sleep(30);
+  };
+  const typeCreate = async () => {
+    await openCreate();
+    fireEvent.change(screen.getByLabelText(/^Brand Name/), { target: { value: 'Ray-Ban' } });
+    fireEvent.change(screen.getByLabelText(/^Model No/), { target: { value: 'RB4165' } });
+    fireEvent.change(screen.getByLabelText(/^Colour Code/), { target: { value: '601' } });
+    fireEvent.change(screen.getByLabelText(/^MRP/), { target: { value: '9876' } });
+    await sleep(30);
+  };
+  const keptTyping = () => {
+    expect(where()).toBe('/catalog/add');
+    expect(val(/^MRP/)).toBe('9876');
+    expect(val(/^Colour Code/)).toBe('601');
+    expect(screen.getByRole('button', { name: /Save product/ })).toBeInTheDocument();
+  };
+  /** Save meets an existing product: the duplicate popup opens over the typed form. */
+  const dupPopup = async () => {
+    await typeCreate();
+    const { DuplicateProductError } = await import('../../../services/api/products');
+    productSpies.createProduct.mockRejectedValue(
+      Object.assign(new DuplicateProductError('exists'), {
+        existing: { product_id: 'P-OLD', sku: 'SG-RAYBAN-OLD', is_active: true },
+      }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: /Save product/ }));
+    await screen.findByRole('button', { name: /Open the existing product/ });
+  };
+
+  it('exact-match "Open it" asks; Cancel keeps every typed value', async () => {
+    await typeCreate();
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    fireEvent.click(screen.getByRole('button', { name: 'open exact match' }));
+    await sleep(30);
+    expect(confirm).toHaveBeenCalledTimes(1);
+    keptTyping();
+    confirm.mockReturnValue(true);
+    fireEvent.click(screen.getByRole('button', { name: 'open exact match' }));
+    await waitFor(() => expect(where()).not.toBe('/catalog/add'));
+    confirm.mockRestore();
+  });
+
+  it('sibling chip asks; Cancel keeps the typing and never loads the sibling', async () => {
+    await typeCreate();
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    fireEvent.click(screen.getByRole('button', { name: 'sibling chip' }));
+    await sleep(50);
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(productSpies.getProduct).not.toHaveBeenCalledWith('P-SIB');
+    keptTyping();
+    confirm.mockReturnValue(true);
+    fireEvent.click(screen.getByRole('button', { name: 'sibling chip' }));
+    await waitFor(() => expect(productSpies.getProduct).toHaveBeenCalledWith('P-SIB'));
+    confirm.mockRestore();
+  });
+
+  it('duplicate popup "Open the existing product" asks; Cancel keeps the typing', async () => {
+    await dupPopup();
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    fireEvent.click(screen.getByRole('button', { name: /Open the existing product/ }));
+    await sleep(30);
+    expect(confirm).toHaveBeenCalledTimes(1);
+    keptTyping();
+    confirm.mockReturnValue(true);
+    fireEvent.click(screen.getByRole('button', { name: /Open the existing product/ }));
+    await waitFor(() => expect(where()).not.toBe('/catalog/add'));
+    confirm.mockRestore();
+  });
+
+  it('duplicate popup "Add as variant" asks; Cancel keeps the typing and loads nothing', async () => {
+    await dupPopup();
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    const variantBtn = screen.getByRole('button', { name: /Add a new colour.size of this model/ });
+    fireEvent.click(variantBtn);
+    await sleep(50);
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(productSpies.getProduct).not.toHaveBeenCalledWith('P-OLD');
+    keptTyping();
+    confirm.mockReturnValue(true);
+    fireEvent.click(variantBtn);
+    await waitFor(() => expect(productSpies.getProduct).toHaveBeenCalledWith('P-OLD'));
+    confirm.mockRestore();
+  });
+
+  it('a photo alone on a new form is typed work: the sibling chip asks; Cancel keeps the photo', async () => {
+    const release = holdUploads();
+    await openCreate();
+    pickPhoto('front.png');
+    await waitFor(() => expect(release.length).toBe(1));
+    await act(async () => { release[0](undefined); });
+    await waitFor(() => expect(document.querySelector('img[src*="front.png"]')).not.toBeNull());
+    await sleep(30);
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    fireEvent.click(screen.getByRole('button', { name: 'sibling chip' }));
+    await sleep(50);
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(productSpies.getProduct).not.toHaveBeenCalledWith('P-SIB');
+    expect(document.querySelector('img[src*="front.png"]')).not.toBeNull();
+    confirm.mockRestore();
+  });
+
+  it('a clean new form moves without a question (chip and Open it)', async () => {
+    await openCreate();
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    fireEvent.click(screen.getByRole('button', { name: 'sibling chip' }));
+    await waitFor(() => expect(productSpies.getProduct).toHaveBeenCalledWith('P-SIB'));
+    expect(confirm).not.toHaveBeenCalled();
+    confirm.mockRestore();
+  });
+
+  it('a clean new form: exact-match "Open it" moves without a question', async () => {
+    await openCreate();
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    fireEvent.click(screen.getByRole('button', { name: 'open exact match' }));
+    await waitFor(() => expect(where()).not.toBe('/catalog/add'));
+    expect(confirm).not.toHaveBeenCalled();
+    confirm.mockRestore();
+  });
+});
