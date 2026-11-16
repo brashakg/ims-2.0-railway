@@ -131,6 +131,11 @@ class _FakeColl:
     def insert_one(self, doc):
         self.docs.append(copy.deepcopy(doc))
 
+    def create_index(self, *_a, **_k):
+        # Uniqueness itself is proven on native Mongo in
+        # test_b03_campaign_queue_native.py; this fake only accepts the call.
+        return "ok"
+
     def _apply_update(self, doc, update):
         if "$set" in update:
             for k, v in update["$set"].items():
@@ -175,8 +180,8 @@ class _FakeDB:
 
 
 # A capturing fake send_notification: records calls + writes a notification_logs
-# row exactly like the real one (so the router's post-send campaign_id tag, and
-# analytics, can read it back). NEVER touches a provider.
+# row exactly like the real one (campaign_id lands at insert, so analytics can
+# read it back). NEVER touches a provider.
 class _SendRecorder:
     def __init__(self, db):
         self.db = db
@@ -195,9 +200,12 @@ class _SendRecorder:
             "status": "SIMULATED",  # DISPATCH_MODE off -> drain would SIMULATE
             "delivery_status": "QUEUED",
             "created_at": datetime.now().isoformat(),
+            # The real writer lands `extra` (campaign_id, dedupe_ref) in the
+            # same insert and reports the durable verdict.
+            **(kwargs.get("extra") or {}),
         }
         self.db.get_collection("notification_logs").insert_one(row)
-        return {"notification_id": nid, "dispatched": False, "status": "PENDING"}
+        return {"notification_id": nid, "dispatched": False, "status": "PENDING", "persisted": True}
 
 
 def _mk_client(db, *, monkeypatch, recorder=None):

@@ -910,7 +910,7 @@ def _campaign_db(monkeypatch, *, audience=None):
 
     async def _fake_send(**kw):
         sent.append(kw)
-        return {"notification_id": f"N-{len(sent)}"}
+        return {"notification_id": f"N-{len(sent)}", "persisted": True}
 
     import api.services.notification_service as ns
 
@@ -992,7 +992,7 @@ def test_manual_and_scheduled_doors_reach_the_same_customers(monkeypatch):
     camp = db.get_collection("campaigns").find_one({"campaign_id": "CMP-B03"})
 
     async def _manual_send(**kw):
-        return {"notification_id": "N-MANUAL"}
+        return {"notification_id": "N-MANUAL", "persisted": True}
 
     manual = asyncio.run(
         fan_out_campaign(

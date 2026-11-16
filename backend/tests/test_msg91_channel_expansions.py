@@ -355,6 +355,7 @@ def test_megaphone_drain_passes_the_rows_dlt_template_to_the_send_door(
             for i, r in enumerate(rows):
                 r.setdefault("_id", i)
                 r.setdefault("consent_basis", "transactional")
+                r.setdefault("category", "SERVICE")
             self.rows = rows
 
         def find(self, flt):
@@ -610,6 +611,7 @@ def test_megaphone_drains_an_email_row_through_the_email_transport(monkeypatch):
             for i, r in enumerate(rows):
                 r.setdefault("_id", i)
                 r.setdefault("consent_basis", "transactional")
+                r.setdefault("category", "SERVICE")
             self.rows = rows
             self.updates = []
 

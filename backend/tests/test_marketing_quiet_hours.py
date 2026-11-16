@@ -114,7 +114,7 @@ def test_task_notify_uses_shared_ist_window():
 
 
 async def _noop_send(**kwargs):
-    return {"status": "PENDING", "notification_id": "NTF-TEST", "dispatched": False}
+    return {"status": "PENDING", "notification_id": "NTF-TEST", "dispatched": False, "persisted": True}
 
 
 def _noop_rate(*_a, **_k):

@@ -440,6 +440,7 @@ def test_drain_passes_the_rows_store_id(monkeypatch):
             for i, r in enumerate(rows):
                 r.setdefault("_id", i)
                 r.setdefault("consent_basis", "transactional")
+                r.setdefault("category", "SERVICE")
             self.rows = rows
             self.updates = []
 
@@ -474,7 +475,7 @@ def test_drain_passes_the_rows_store_id(monkeypatch):
             "channel": "WHATSAPP",
             "customer_phone": "919000000002",
             "message": "m2",
-            "template_id": "BIRTHDAY_WISH",
+            "template_id": "ORDER_READY",
             "store_id": "WO-PUN-01",
             "scheduled_for": None,
         },
