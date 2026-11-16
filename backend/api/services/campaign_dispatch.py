@@ -49,6 +49,20 @@ from typing import Any, Awaitable, Callable, Dict, List
 logger = logging.getLogger(__name__)
 
 
+def parse_send_at(value: Any):
+    """A campaign's send_at as an aware UTC datetime, or None when it is
+    missing, unparseable or has no timezone (never guessed)."""
+    from datetime import datetime, timezone
+
+    try:
+        when = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        return None
+    return when.astimezone(timezone.utc)
+
+
 async def fan_out_campaign(
     db,
     campaign: Dict[str, Any],

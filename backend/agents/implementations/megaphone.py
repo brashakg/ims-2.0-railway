@@ -781,19 +781,26 @@ class MegaphoneAgent(JarvisAgent):
         if coll is None:
             return 0
 
-        now_iso = datetime.now(timezone.utc).isoformat()
+        from api.services.campaign_dispatch import parse_send_at
 
-        # Find SCHEDULED, ONE_TIME campaigns whose send_at is in the past.
+        now = datetime.now(timezone.utc)
+
+        # Find SCHEDULED, ONE_TIME campaigns whose send_at is in the past. The
+        # instant is compared, not the text: a stored '+05:30' send_at compared
+        # as a string with a UTC now fired 5.5 h late. A send_at that cannot be
+        # read as a zoned time is never fired (logged, left SCHEDULED).
         try:
-            due = list(
-                coll.find(
-                    {
-                        "status": "SCHEDULED",
-                        "schedule.kind": "ONE_TIME",
-                        "schedule.send_at": {"$lte": now_iso},
-                    }
-                ).limit(20)
-            )  # cap per tick to avoid a burst
+            due = []
+            for c in coll.find({"status": "SCHEDULED", "schedule.kind": "ONE_TIME"}).limit(500):
+                when = parse_send_at((c.get("schedule") or {}).get("send_at"))
+                if when is None:
+                    logger.warning(
+                        "[MEGAPHONE] Campaign %s has no readable zoned send_at; not sent",
+                        c.get("campaign_id"),
+                    )
+                elif when <= now:
+                    due.append(c)
+            due = due[:20]  # cap per tick to avoid a burst
         except Exception as exc:
             logger.warning("[MEGAPHONE] scheduled-campaign scan failed: %s", exc)
             return 0

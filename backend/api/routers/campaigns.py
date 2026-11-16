@@ -111,6 +111,22 @@ class CampaignSchedule(BaseModel):
     time_of_day: Optional[str] = None  # "09:00" (RECURRING)
     trigger_event: Optional[str] = None  # TRIGGERED
 
+    @field_validator("send_at")
+    @classmethod
+    def _send_at_is_utc(cls, v: Optional[str]) -> Optional[str]:
+        """Stored as one UTC ISO form. MEGAPHONE's tick compares instants, but
+        a '+05:30' or naive string used to be compared as TEXT with a UTC now,
+        so a campaign due at 10:00 IST fired at 15:30 IST. A time without a
+        zone is refused: it cannot say which 10:00 it means."""
+        if v is None or not str(v).strip():
+            return None
+        from api.services.campaign_dispatch import parse_send_at
+
+        when = parse_send_at(v)
+        if when is None:
+            raise ValueError("send_at must be an ISO date-time with a timezone, e.g. 2026-11-20T10:00:00+05:30")
+        return when.isoformat()
+
 
 class CampaignCreate(BaseModel):
     name: str = Field(..., min_length=2, max_length=120)
