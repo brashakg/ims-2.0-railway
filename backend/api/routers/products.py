@@ -1675,6 +1675,19 @@ def _finish_bulk_apply(action: str, user: dict, summary: dict, write_id: str,
         _audit_bulk(action, user, summary, groups)
 
 
+def _recent_bulk_change_at(product: dict) -> Optional[str]:
+    """When a bulk Apply last moved this product's price, if within the
+    last hour (only bulk Applies stamp price_updated_at). The preview shows
+    it, so an Apply whose reply was lost is visible after a reload or a
+    fresh preview -- the server-side record the page's hold cannot keep."""
+    at = product.get("price_updated_at")
+    if isinstance(at, datetime):
+        at = at.replace(tzinfo=None)
+        if datetime.utcnow() - at <= timedelta(hours=1):
+            return at.isoformat() + "Z"
+    return None
+
+
 def _price_reaches_website(row: dict, pid: str, product: dict, price_patch: dict) -> bool:
     """A committed bulk price takes THE spine -> website-twin rule a single
     product edit takes (product_master.mirror_update_to_catalog_twin): the
@@ -1840,6 +1853,7 @@ async def bulk_price_update(
             "reason": verdict["reason"],
             "message": verdict["message"],
             "changed": changed,
+            "recent_bulk_change_at": _recent_bulk_change_at(p),
         }
 
         if not verdict["ok"]:
@@ -2028,6 +2042,7 @@ async def bulk_offer_update(
             "reason": verdict["reason"],
             "message": verdict["message"],
             "changed": changed,
+            "recent_bulk_change_at": _recent_bulk_change_at(p),
         }
 
         if not verdict["ok"]:

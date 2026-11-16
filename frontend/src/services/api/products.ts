@@ -840,6 +840,8 @@ export interface BulkRowResult {
   already_applied?: boolean;
   // Applied rows only: false = billing price saved, website copy not updated.
   website_synced?: boolean;
+  // When a bulk Apply moved this row's price in the last hour (UTC ISO), else null.
+  recent_bulk_change_at?: string | null;
 }
 
 export interface BulkSummary {

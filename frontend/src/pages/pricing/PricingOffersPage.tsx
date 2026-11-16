@@ -304,6 +304,24 @@ function UncertainApplyNote({ show, busy, onRetry }: { show: boolean; busy: bool
   );
 }
 
+// The hold above lives in this browser tab only. The server names rows a bulk
+// Apply moved in the last hour, so after a reload or a fresh preview a landed
+// change is still visible before it is applied a second time.
+function RecentBulkNote({ result }: { result: BulkResponse | null }) {
+  const recent = (result?.rows ?? []).map((r) => r.recent_bulk_change_at).filter((x): x is string => !!x).sort();
+  if (!result || result.summary.applied || !recent.length) return null;
+  const latest = new Date(recent[recent.length - 1]).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
+  return (
+    <div role="status" className="mb-3 flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-[12.5px] text-amber-800">
+      <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+      <span>
+        {recent.length} row{recent.length === 1 ? ' was' : 's were'} changed by a bulk Apply in the last hour (latest {latest}).
+        If an earlier Apply did not confirm, it may already be saved: check these prices before applying again.
+      </span>
+    </div>
+  );
+}
+
 // ----------------------------------------------------------------------------
 // Bulk price tab
 // ----------------------------------------------------------------------------
@@ -357,6 +375,7 @@ function BulkPriceTab({ categories, brands, stores }: { categories: string[]; br
   return (
     <>
       <UncertainApplyNote show={uncertain} busy={busy} onRetry={() => run(true)} />
+      <RecentBulkNote result={result} />
       <StatStrip result={result} />
 
       {/* Dark bulk-action bar (high contrast on purpose — destructive operation) */}
@@ -457,6 +476,7 @@ function BulkOfferTab({ categories, brands, stores }: { categories: string[]; br
   return (
     <>
       <UncertainApplyNote show={uncertain} busy={busy} onRetry={() => run(true)} />
+      <RecentBulkNote result={result} />
       <StatStrip result={result} />
 
       {/* Offer builder card */}

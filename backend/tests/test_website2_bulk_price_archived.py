@@ -690,3 +690,24 @@ def test_a_new_change_back_to_the_same_prices_is_audited_again(db, monkeypatch):
     db["products"].update_many({}, {"$set": {"mrp": 5000.0, "offer_price": 4500.0}})
     _run(_reviewed(fn, body.model_copy(update={"apply": True})))
     assert len(_audits(db, action)) == 2
+
+
+def test_a_fresh_preview_shows_rows_a_bulk_apply_changed_in_the_last_hour(db):
+    """The page's hold on an unconfirmed Apply lives in the browser; a reload
+    or a fresh preview loses it. The preview itself now names the rows a
+    bulk Apply moved in the last hour, so a landed +10 is not re-applied
+    unseen as a new change."""
+    import datetime as _dt
+
+    fn, body, _action, _want = _BOTH_DOORS[0]
+    apply = _reviewed_apply(db, fn, body)
+    pre = _run(fn(body, ADMIN))
+    assert {r["recent_bulk_change_at"] for r in pre["rows"]} == {None}
+    _run(fn(apply, ADMIN))
+    again = _run(fn(body, ADMIN))
+    assert all(r["recent_bulk_change_at"] for r in again["rows"])
+    offer = _run(products_mod.bulk_offer_update(products_mod.BulkOfferRequest(action="CLEAR"), ADMIN))
+    assert all(r["recent_bulk_change_at"] for r in offer["rows"])
+    old = _dt.datetime.utcnow() - _dt.timedelta(hours=2)
+    db["products"].update_many({}, {"$set": {"price_updated_at": old}})
+    assert {r["recent_bulk_change_at"] for r in _run(fn(body, ADMIN))["rows"]} == {None}

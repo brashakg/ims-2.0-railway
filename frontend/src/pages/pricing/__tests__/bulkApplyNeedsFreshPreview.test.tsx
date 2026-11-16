@@ -168,4 +168,26 @@ describe.each([
     expect(screen.getByRole('button', { name: /^Apply/ })).toBeDisabled();
     expect(fn.mock.calls.filter((c) => (c[0] as Call).apply)).toHaveLength(2);
   });
+
+  // Reviewer round 3: the hold lives in this tab only. A fresh preview (after
+  // a reload, or a scope change and back) names the rows a bulk Apply moved
+  // in the last hour, from the server's own record.
+  it('a fresh preview names rows a bulk Apply changed in the last hour', async () => {
+    render(<PricingOffersPage />);
+    fireEvent.click(await screen.findByRole('button', { name: tabLabel }));
+    fireEvent.change(brandSelect(), { target: { value: 'BRAND A' } });
+    await waitFor(() => expect(asked('BRAND A')).toBe(true), { timeout: 2000 });
+    await act(async () => {
+      pending.filter((p) => !p.args.apply).forEach((p) => p.resolve(withRow));
+    });
+    await screen.findByRole('button', { name: 'Apply 1 valid row' });
+    expect(screen.queryByText(/changed by a bulk Apply in the last hour/)).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /Preview/ }));
+    await waitFor(() => expect(pending.filter((p) => !p.args.apply).length).toBeGreaterThan(1));
+    const recent = { ...row, recent_bulk_change_at: '2026-11-16T05:00:00Z' };
+    await act(async () => {
+      pending.filter((p) => !p.args.apply).forEach((p) => p.resolve({ ...withRow, rows: [recent] }));
+    });
+    expect(await screen.findByText(/1 row was changed by a bulk Apply in the last hour/)).toBeTruthy();
+  });
 });
