@@ -5,11 +5,13 @@
 // out of the old SettingsPage tab container. Renders inside SettingsLayout.
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { RefreshCw, Printer, Save, AlertCircle } from 'lucide-react';
 import clsx from 'clsx';
 import { useToast } from '../../context/ToastContext';
 import { settingsApi } from '../../services/api';
+import { useLoadedSettings, settingsLoadErrorText } from '../../hooks/useLoadedSettings';
+import { SettingsLoadError } from '../../components/settings/SettingsLoadError';
 import {
   LABEL_WIDTH_MM,
   PRINTABLE_MM,
@@ -19,53 +21,55 @@ import {
 } from '../../components/labels/unitLabel';
 
 export function PrinterSettingsPage() {
-  const [isLoading, setIsLoading] = useState(true);
-  const [printerSettings, setPrinterSettings] = useState<{
-    receipt_printer_name: string;
-    receipt_printer_width: number;
-    label_printer_name: string;
-    label_size: string;
-    auto_print_receipt: boolean;
-    auto_print_job_card: boolean;
-    copies_per_print: number;
-    qz_enabled?: boolean;
-    auto_print_stage_sticker?: boolean;
-  } | null>(null);
-  const [availablePrinters, setAvailablePrinters] = useState<Array<{ name: string; type: string; status: string }>>([]);
+  // Audit L1-F05: the stored printer record must be read before it can be
+  // edited or saved (a failed read used to leave Save sending {}, and the
+  // server wrote its defaults over the saved width and auto-print switches).
+  // The detected-printer list is display only, so its failure is just "none".
+  const { data, status, reload, update } = useLoadedSettings(async () => {
+    const [settings, available] = await Promise.all([
+      settingsApi.getPrinterSettings(),
+      settingsApi.getAvailablePrinters().catch(() => ({ printers: [] })),
+    ]);
+    if (!settings) throw new Error('empty settings answer');
+    return {
+      settings: settings as PrinterForm,
+      available: (available?.printers || []) as Array<{ name: string; type: string; status: string }>,
+    };
+  });
 
-  useEffect(() => {
-    let alive = true;
-    (async () => {
-      setIsLoading(true);
-      try {
-        const [printerRes, availableRes] = await Promise.all([
-          settingsApi.getPrinterSettings().catch(() => null),
-          settingsApi.getAvailablePrinters().catch(() => ({ printers: [] })),
-        ]);
-        if (!alive) return;
-        if (printerRes) setPrinterSettings(printerRes);
-        setAvailablePrinters(availableRes.printers || []);
-      } finally {
-        if (alive) setIsLoading(false);
-      }
-    })();
-    return () => { alive = false; };
-  }, []);
-
-  if (isLoading) {
+  if (status === 'loading') {
     return (
       <div className="flex items-center justify-center h-48">
         <RefreshCw className="w-8 h-8 animate-spin" style={{ color: 'var(--bv)' }} />
       </div>
     );
   }
+  if (status === 'error' || !data) {
+    return (
+      <div className="space-y-4">
+        <SettingsLoadError message={settingsLoadErrorText('printer settings')} onRetry={() => void reload()} />
+        {/* The label offset lives on this computer, not on the server. */}
+        <UnitLabelCard />
+      </div>
+    );
+  }
   return (
     <PrinterSection
-      printerSettings={printerSettings}
-      setPrinterSettings={setPrinterSettings}
-      availablePrinters={availablePrinters}
+      printerSettings={data.settings}
+      setPrinterSettings={(fn) => update((d) => ({ ...d, settings: fn(d.settings) }))}
+      availablePrinters={data.available}
     />
   );
+}
+
+interface PrinterForm {
+  receipt_printer_name?: string | null;
+  receipt_printer_width?: number;
+  label_printer_name?: string | null;
+  auto_print_receipt?: boolean;
+  auto_print_job_card?: boolean;
+  qz_enabled?: boolean;
+  auto_print_stage_sticker?: boolean;
 }
 
 function PrinterSection({
@@ -73,11 +77,12 @@ function PrinterSection({
   setPrinterSettings,
   availablePrinters,
 }: {
-  printerSettings: any;
-  setPrinterSettings: (fn: any) => void;
+  printerSettings: PrinterForm;
+  setPrinterSettings: (fn: (prev: PrinterForm) => PrinterForm) => void;
   availablePrinters: Array<{ name: string; type: string; status: string }>;
 }) {
   const toast = useToast();
+  const [saving, setSaving] = useState(false);
 
   return (
     <div className="space-y-4">
@@ -95,8 +100,9 @@ function PrinterSection({
         <div className="space-y-4">
           <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-gray-600 mb-1">Receipt Printer</label>
+              <label htmlFor="printer-receipt-name" className="block text-sm font-medium text-gray-600 mb-1">Receipt Printer</label>
               <select
+                id="printer-receipt-name"
                 value={printerSettings?.receipt_printer_name || ''}
                 onChange={e => setPrinterSettings((prev: any) => prev ? { ...prev, receipt_printer_name: e.target.value } : null)}
                 className="input-field"
@@ -108,8 +114,9 @@ function PrinterSection({
               </select>
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-600 mb-1">Receipt Width (mm)</label>
+              <label htmlFor="printer-receipt-width" className="block text-sm font-medium text-gray-600 mb-1">Receipt Width (mm)</label>
               <select
+                id="printer-receipt-width"
                 value={printerSettings?.receipt_printer_width || 80}
                 onChange={e => setPrinterSettings((prev: any) => prev ? { ...prev, receipt_printer_width: parseInt(e.target.value) } : null)}
                 className="input-field"
@@ -119,8 +126,9 @@ function PrinterSection({
               </select>
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-600 mb-1">Label Printer</label>
+              <label htmlFor="printer-label-name" className="block text-sm font-medium text-gray-600 mb-1">Label Printer</label>
               <select
+                id="printer-label-name"
                 value={printerSettings?.label_printer_name || ''}
                 onChange={e => setPrinterSettings((prev: any) => prev ? { ...prev, label_printer_name: e.target.value } : null)}
                 className="input-field"
@@ -137,7 +145,7 @@ function PrinterSection({
             <label className="flex items-center gap-2 cursor-pointer p-2 hover:bg-gray-100 rounded">
               <input
                 type="checkbox"
-                checked={printerSettings?.auto_print_receipt}
+                checked={printerSettings?.auto_print_receipt ?? true}
                 onChange={e => setPrinterSettings((prev: any) => prev ? { ...prev, auto_print_receipt: e.target.checked } : null)}
                 className="rounded border-gray-300 text-bv-red-600"
               />
@@ -146,7 +154,7 @@ function PrinterSection({
             <label className="flex items-center gap-2 cursor-pointer p-2 hover:bg-gray-100 rounded">
               <input
                 type="checkbox"
-                checked={printerSettings?.auto_print_job_card}
+                checked={printerSettings?.auto_print_job_card ?? true}
                 onChange={e => setPrinterSettings((prev: any) => prev ? { ...prev, auto_print_job_card: e.target.checked } : null)}
                 className="rounded border-gray-300 text-bv-red-600"
               />
@@ -176,18 +184,23 @@ function PrinterSection({
           </div>
 
           <button
+            type="button"
+            disabled={saving}
             onClick={async () => {
+              setSaving(true);
               try {
-                await settingsApi.updatePrinterSettings(printerSettings || {});
+                await settingsApi.updatePrinterSettings(printerSettings as Parameters<typeof settingsApi.updatePrinterSettings>[0]);
                 toast.success('Printer settings saved');
               } catch {
                 toast.error('Failed to save settings');
+              } finally {
+                setSaving(false);
               }
             }}
             className="btn-primary"
           >
             <Save className="w-4 h-4 mr-2" />
-            Save Printer Settings
+            {saving ? 'Saving…' : 'Save Printer Settings'}
           </button>
         </div>
       </div>
