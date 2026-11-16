@@ -11,10 +11,14 @@ import type { LensBrand, LensIndex, LensCoating, LensAddon } from './settingsTyp
 
 // L1-F08: a price must be a plain non-negative rupee amount (up to 2 decimals).
 // Anything else (blank, "banana", "12abc", "-5", "1e3") is refused - never
-// turned into 0, which made the item free. A deliberate "0" is kept.
+// turned into 0, which made the item free. A deliberate "0" is kept, and a
+// digit string too long to be a finite number is refused.
 function parseLensPrice(raw: string | null): number | null {
   const t = (raw ?? '').trim();
-  return /^\d+(\.\d{1,2})?$/.test(t) ? Number(t) : null;
+  if (!/^\d+(\.\d{1,2})?$/.test(t)) return null;
+  // A 400-digit string passes the pattern but is Infinity as a number.
+  const n = Number(t);
+  return Number.isFinite(n) ? n : null;
 }
 
 // Audit L1-F09: the row actions were bare 12px SVGs with a click handler - no

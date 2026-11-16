@@ -73,7 +73,7 @@ describe('Lens Master prices are validated, never turned into 0 (L1-F08)', () =>
     await new Promise((r) => setTimeout(r, 0));
   };
 
-  it.each(['banana', '  ', '-5', 'NaN', '12abc', '1e3', 'Infinity'])('refuses price %j', async (bad) => {
+  it.each(['banana', '  ', '-5', 'NaN', '12abc', '1e3', 'Infinity', '9'.repeat(400)])('refuses price %j', async (bad) => {
     await addCoating(['AUDIT BADPRICE', bad]);
     expect(post).not.toHaveBeenCalled();
   });
