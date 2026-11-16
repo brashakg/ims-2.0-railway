@@ -149,6 +149,20 @@ class _FakeAttendanceRepo:
             return True
         return False
 
+    def update_if(self, aid, expected, updates):
+        # Compare-and-set, as AttendanceRepository.update_if (dotted keys ok).
+        row = self._store.get(aid)
+        if row is None:
+            return False
+        for key, val in expected.items():
+            cur = row
+            for part in key.split("."):
+                cur = cur.get(part) if isinstance(cur, dict) else None
+            if cur != val:
+                return False
+        row.update(updates)
+        return True
+
 
 def _make_app(monkeypatch, attendance_records=None, leave_records=None,
               attendance_repo=None, leave_repo=None):

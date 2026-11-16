@@ -948,15 +948,19 @@ def legacy_day_range(date_iso: str) -> dict:
     }
 
 
-def _update_day_row(attendance_repo, row_id, data: dict) -> None:
+def _update_day_row(attendance_repo, row_id, data: dict, expected: Optional[dict] = None) -> None:
     """Write `data` onto one attendance row and make sure it LANDED.
 
     A database error whose write actually landed (the acknowledgement was
     lost) is reconciled by reading the row back; any other failure raises
     AttendanceUnavailable (503), so no caller reports or audits a change that
-    did not persist. A row that vanished meanwhile is a 409."""
+    did not persist. A row that vanished meanwhile -- or, with `expected`,
+    no longer matches it -- is a 409."""
     try:
-        matched = attendance_repo.update(row_id, data)
+        if expected is None:
+            matched = attendance_repo.update(row_id, data)
+        else:
+            matched = attendance_repo.update_if(row_id, expected, data)
     except AttendanceUnavailable:
         row = attendance_repo.find_one({"attendance_id": row_id})
         if row is not None and all(row.get(k) == v for k, v in data.items()):
@@ -1383,7 +1387,7 @@ async def mark_attendance(
                     status_code=422, detail="check_out must be after check_in"
                 )
         row_id = existing.get("attendance_id") or existing.get("_id")
-        _settle_attendance_audit(attendance_repo, existing)
+        _settle_or_503(attendance_repo, existing)
         before = {k: v for k, v in existing.items() if k not in ("_id", "audit_pending")}
         changed = [
             k
@@ -1394,7 +1398,9 @@ async def mark_attendance(
             data["audit_pending"] = _pending_attendance_audit(
                 current_user, before, data, changed
             )
-        _update_day_row(attendance_repo, row_id, data)  # raises before any audit
+        # Compare-and-set on the marker: never overwrite an audit another
+        # correction still owes (it landed after our read).
+        _update_day_row(attendance_repo, row_id, data, expected=_NO_PENDING)
         if changed:
             _settle_attendance_audit(attendance_repo, {**before, **data})
     else:
@@ -1484,15 +1490,34 @@ def _pending_attendance_audit(current_user, before: dict, data: dict, changed: l
     }
 
 
-def _settle_attendance_audit(attendance_repo, row: Optional[dict]) -> None:
+_NO_PENDING = {"audit_pending": None}  # matches a missing or cleared marker
+
+
+def _settle_or_503(attendance_repo, row: dict) -> None:
+    """A correction may only replace the row's marker once the audit it owes
+    is written; otherwise that earlier ATTENDANCE_EDIT would be lost for good
+    (#1433 review round 4). The caller retries once the audit store is back."""
+    if not _settle_attendance_audit(attendance_repo, row):
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "An earlier correction to this day is not yet in the audit log, "
+                "so this change was not saved. Try again in a minute."
+            ),
+        )
+
+
+def _settle_attendance_audit(attendance_repo, row: Optional[dict]) -> bool:
     """Write the audit row a landed correction still owes, then clear the marker.
 
-    Idempotent: the audit row's id is fixed by the marker, so a marker whose
-    audit landed but whose clearing failed is never audited twice. A failed
-    audit keeps the marker for the next touch."""
+    True when nothing is owed any more. Idempotent: the audit row's id is fixed
+    by the marker, so a marker whose audit landed but whose clearing failed is
+    never audited twice. A failed audit keeps the marker and returns False.
+    The clear is conditional on this marker's log_id, so it never wipes a
+    newer correction's marker."""
     pending = (row or {}).get("audit_pending")
     if not pending:
-        return
+        return True
     row_id = row.get("attendance_id") or row.get("_id")
     after = {k: v for k, v in row.items() if k not in ("_id", "audit_pending")}
     before = {**after, **(pending.get("before") or {})}
@@ -1502,11 +1527,14 @@ def _settle_attendance_audit(attendance_repo, row: Optional[dict]) -> None:
         {"user_id": pending.get("user_id"), "full_name": pending.get("full_name")},
         row_id, before, after, pending.get("changed") or [], log_id=pending["log_id"],
     ):
-        return
+        return False
     try:
-        attendance_repo.update(row_id, {"audit_pending": None})
+        attendance_repo.update_if(
+            row_id, {"audit_pending.log_id": pending["log_id"]}, {"audit_pending": None}
+        )
     except AttendanceUnavailable:
         pass  # the marker stays; the audit id stops a second audit row
+    return True
 
 
 @router.put("/attendance/{attendance_id}")
@@ -1559,7 +1587,7 @@ async def edit_attendance(
         _require_employee_at_store(existing.get("employee_id"), assign)
         updates["store_id"] = assign
 
-    _settle_attendance_audit(attendance_repo, existing)
+    _settle_or_503(attendance_repo, existing)
     before = {k: v for k, v in existing.items() if k not in ("_id", "audit_pending")}
 
     if "status" in sent:
@@ -1631,7 +1659,8 @@ async def edit_attendance(
         updates["audit_pending"] = _pending_attendance_audit(
             current_user, before, updates, changed
         )
-        _update_day_row(attendance_repo, row_id, updates)  # raises before any audit
+        # Compare-and-set on the marker (see POST /attendance/mark).
+        _update_day_row(attendance_repo, row_id, updates, expected=_NO_PENDING)
     after = {**before, **updates}
     if changed:
         _settle_attendance_audit(attendance_repo, after)

@@ -613,3 +613,78 @@ def test_pending_audit_is_not_duplicated_when_marker_clear_fails(real, monkeypat
     assert c.put(f"/api/v1/hr/attendance/{rid}", headers=_admin(), json={"status": "HALF_DAY"}).status_code == 200
     assert [a["detail"]["changed_fields"] for a in audit.rows] == [["status"]]
     assert not coll.find_one({"_id": rid}).get("audit_pending")
+
+
+# Reviewers 2026-11-16 (round 4): the owed-audit marker must never be lost.
+# Discriminating power (measured by restoring ca0e48a1's hr.py): the second
+# correction answered 200 and overwrote marker M1, so PRESENT->HALF_DAY was
+# never audited; a concurrent correction's marker was wiped by the first
+# request's unconditional clear; a correction overwrote a marker that landed
+# between its read and its write.
+
+
+def _correct(c, door, rid, status):
+    if door == "put":
+        return c.put(f"/api/v1/hr/attendance/{rid}", headers=_admin(), json={"status": status})
+    return c.post("/api/v1/hr/attendance/mark", headers=_admin(), json={"employee_id": "emp-a", "store_id": "S1", "date": DAY, "status": status})
+
+
+@pytest.mark.parametrize("door", ["put", "mark"])
+def test_unsettled_audit_blocks_next_correction_until_recorded(real, monkeypatch, door):
+    c, coll, audit = real
+    _seed(c)
+    rid = coll.find_one({"employee_id": "emp-a"})["attendance_id"]
+    create = audit.create
+    monkeypatch.setattr(audit, "create", lambda row: None)  # audit store failing (fail-soft None)
+    assert _correct(c, door, rid, "HALF_DAY").status_code == 200
+    m1 = coll.find_one({"_id": rid})["audit_pending"]
+    r = _correct(c, door, rid, "ABSENT")  # audit still failing
+    assert r.status_code == 503, r.text
+    row = coll.find_one({"_id": rid})
+    assert row["status"] == "HALF_DAY" and row["audit_pending"] == m1  # M1 kept
+    monkeypatch.setattr(audit, "create", create)  # audit store recovers
+    assert _correct(c, door, rid, "ABSENT").status_code == 200
+    edits = [(a["before_state"]["status"], a["after_state"]["status"]) for a in audit.rows if a["action"] == "ATTENDANCE_EDIT"]
+    assert edits == [("PRESENT", "HALF_DAY"), ("HALF_DAY", "ABSENT")]
+    assert all(a["user_id"] == "adm" for a in audit.rows)
+    assert not coll.find_one({"_id": rid}).get("audit_pending")
+
+
+def test_settling_never_clears_another_requests_marker(real, monkeypatch):
+    """A's audit lands, and meanwhile B's correction (with marker MB) lands on
+    the row: A's marker clear must leave MB in place."""
+    c, coll, audit = real
+    _seed(c)
+    rid = coll.find_one({"employee_id": "emp-a"})["attendance_id"]
+    create = audit.create
+    mb = {"log_id": "ATTEDIT-B", "changed": ["status"], "before": {"status": "HALF_DAY"}, "user_id": "mgr-b", "full_name": "B"}
+
+    def create_then_b_lands(row):
+        out = create(row)
+        coll.update_one({"_id": rid}, {"$set": {"status": "ABSENT", "audit_pending": mb}})
+        return out
+
+    monkeypatch.setattr(audit, "create", create_then_b_lands)
+    assert _correct(c, "put", rid, "HALF_DAY").status_code == 200
+    assert coll.find_one({"_id": rid})["audit_pending"] == mb
+
+
+@pytest.mark.parametrize("door", ["put", "mark"])
+def test_correction_never_overwrites_a_marker_that_landed_meanwhile(real, monkeypatch, door):
+    """B's correction (marker MB) lands between A's read and A's write: A is
+    refused (409) and MB survives for its audit."""
+    c, coll, audit = real
+    _seed(c)
+    rid = coll.find_one({"employee_id": "emp-a"})["attendance_id"]
+    mb = {"log_id": "ATTEDIT-B", "changed": ["status"], "before": {"status": "PRESENT"}, "user_id": "mgr-b", "full_name": "B"}
+    orig = hr._pending_attendance_audit
+
+    def pending_then_b_lands(*a, **kw):
+        coll.update_one({"_id": rid}, {"$set": {"status": "ABSENT", "audit_pending": mb}})
+        return orig(*a, **kw)
+
+    monkeypatch.setattr(hr, "_pending_attendance_audit", pending_then_b_lands)
+    r = _correct(c, door, rid, "HALF_DAY")
+    assert r.status_code == 409, r.text
+    row = coll.find_one({"_id": rid})
+    assert row["status"] == "ABSENT" and row["audit_pending"] == mb

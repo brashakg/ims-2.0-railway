@@ -64,6 +64,9 @@ class AttendanceRepository(BaseRepository):
         if matched is None:  # MockCollection reports modified_count only
             matched = getattr(result, "modified_count", 0)
         return bool(matched)
+
+    def update_if(self, id: str, expected: Dict, data: Dict, unset: Optional[List[str]] = None) -> bool:
+        return _strict(lambda: super(AttendanceRepository, self).update_if(id, expected, dict(data), unset))
     
     @property
     def entity_name(self) -> str:
