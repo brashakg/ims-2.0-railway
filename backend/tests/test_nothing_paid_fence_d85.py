@@ -26,6 +26,7 @@ Real code over the strict fakes of test_pos_money_doors (till). No emoji (cp1252
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 import threading
@@ -716,6 +717,10 @@ def test_cash_paid_before_the_press_restocks_leaves_the_units_to_the_record(till
     assert restocks == []  # the press put nothing back
     rec = rcoll.find_one({"_id": f"recovered:{out['rid']}"})
     assert rec["restock_applied"] is False and not rec.get("restock_left_to_counter")
+    assert out["record"]["stock_step_open"] is True  # #1413: its pieces are the record's to put back
+    from tests.test_pos_money_doors_r13 import _user
+    listed = asyncio.run(returns_router.needs_completing(_user("ACCOUNTANT")))["stock_open"]
+    assert out["rid"] in [row["return_id"] for row in listed], listed
     assert len(list(rcoll.find({"return_id": out["rid"]}))) == 1
     # The record's Restock puts the units back -- once.
     first = _retry_restock(out["rid"])
@@ -742,6 +747,11 @@ def test_cash_paid_after_the_press_began_restocking_leaves_the_units_to_the_pres
     assert restocks == [out["rid"]]  # the press's own restock, once
     rec = rcoll.find_one({"_id": f"recovered:{out['rid']}"})
     assert rec["restock_left_to_counter"] is True
+    # #1413: the panel offers no Retry stock step for it (its Restock refuses).
+    assert out["record"]["stock_step_open"] is False and "do not add it again" in out["record"]["message"]
+    from tests.test_pos_money_doors_r13 import _user
+    listed = asyncio.run(returns_router.needs_completing(_user("ACCOUNTANT")))["stock_open"]
+    assert out["rid"] not in [row["return_id"] for row in listed], listed
     again = _retry_restock(out["rid"])
     assert again["restock_applied"] is False and "adds nothing" in again["message"], again
     assert restocks == [out["rid"]]
