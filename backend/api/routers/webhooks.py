@@ -1962,7 +1962,8 @@ def _inbox_phones_in_reach(coll, filt: Dict[str, Any], current_user: dict):
         return None
     db = _get_db()
     if db is None:
-        return []
+        # Not "no chats in reach": the lookup could not run (caller -> 503).
+        raise RuntimeError("customers unavailable for the inbox shop scope")
     phones = [d.get("phone") for d in coll.find(filt, {"_id": 0, "phone": 1})]
     phones = [p for p in phones if p]
     if not phones:
@@ -2356,9 +2357,11 @@ async def list_whatsapp_conversations(
     if not any(r in allowed for r in payload.get("roles") or []):
         raise HTTPException(status_code=403, detail="forbidden")
 
+    # A read that fails is a 503, never an empty inbox: staff would be told no
+    # customer had written (the false-empty class, Codex round 2 hunt).
     coll = _get_wa_conversations_collection()
     if coll is None:
-        return {"conversations": [], "total": 0, "limit": limit, "offset": offset}
+        raise HTTPException(status_code=503, detail="inbox temporarily unavailable")
 
     try:
         filt: Dict[str, Any] = {}
@@ -2387,7 +2390,7 @@ async def list_whatsapp_conversations(
         }
     except Exception as e:
         logger.error("[WA_INBOUND] conversation list failed: %s", e)
-        return {"conversations": [], "total": 0, "limit": limit, "offset": offset}
+        raise HTTPException(status_code=503, detail="inbox temporarily unavailable")
 
 
 # ============================================================================

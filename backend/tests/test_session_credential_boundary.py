@@ -72,7 +72,13 @@ def world(monkeypatch):
     monkeypatch.setattr("api.dependencies.get_user_repository", lambda: repo)
     monkeypatch.setattr(users_module, "get_user_repository", lambda: repo)
     monkeypatch.setattr(users_module, "get_audit_repository", lambda: _Audit())
-    monkeypatch.setattr(webhooks_module, "_get_wa_conversations_collection", lambda: None)
+    # An empty, readable inbox (a read that FAILS is a 503 since #1416).
+    inbox_db = mongomock.MongoClient().inbox
+    monkeypatch.setattr(webhooks_module, "_get_db", lambda: inbox_db)
+    monkeypatch.setattr(
+        webhooks_module, "_get_wa_conversations_collection",
+        lambda: inbox_db.whatsapp_conversations,
+    )
     return SimpleNamespace(coll=coll)
 
 

@@ -876,6 +876,38 @@ def test_inbox_role_gate_is_unchanged(client, inbox):
     assert client.get(INBOX).status_code == 401
 
 
+@pytest.mark.parametrize(
+    "down",
+    [
+        {"whatsapp_conversations": {"find"}},
+        {"whatsapp_conversations": {"count_documents"}},
+        {"customers": {"find"}},  # the shop-scope lookup
+    ],
+    ids=["thread_read", "thread_count", "scope_lookup"],
+)
+@pytest.mark.parametrize("roles", [["STORE_MANAGER"], ["ADMIN"]], ids=["shop", "head_office"])
+def test_an_inbox_that_cannot_be_read_says_so_instead_of_showing_no_chats(client, inbox, mongo, down, roles):
+    """A failed read used to answer 200 with an empty inbox: staff were told
+    no customer had written."""
+    mongo.down = down
+    r = client.get(INBOX, headers=_headers(roles, ["ST-A"]))
+    if roles == ["ADMIN"] and "customers" in down:
+        assert r.status_code == 200  # head office never needs the scope lookup
+    else:
+        assert r.status_code == 503, r.text
+    mongo.down = {}
+    assert client.get(INBOX, headers=_headers(roles, ["ST-A"])).status_code == 200
+
+
+def test_an_inbox_with_no_database_says_so(client, inbox, monkeypatch):
+    monkeypatch.setattr(webhooks, "_get_wa_conversations_collection", lambda: None)
+    assert client.get(INBOX, headers=_headers(["ADMIN"], [])).status_code == 503
+    monkeypatch.setattr(webhooks, "_get_wa_conversations_collection",
+                        lambda: inbox.whatsapp_conversations)
+    monkeypatch.setattr(webhooks, "_get_db", lambda: None)  # the scope lookup's database
+    assert client.get(INBOX, headers=_headers(["STORE_MANAGER"], ["ST-A"])).status_code == 503
+
+
 # ===========================================================================
 # L1-F26 -- a failed MSG91 handler stays retryable
 # ===========================================================================
