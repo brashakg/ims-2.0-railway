@@ -197,3 +197,27 @@ def test_a_press_that_put_nothing_back_leaves_the_taken_record_restockable(till,
     first, second = _retry_restock(rid), _retry_restock(rid)
     assert first["restock_applied"] is True and second["message"] == "Already restocked"
     assert restocks == [rid]  # one frame, one stock row
+
+
+def test_a_later_return_of_the_bill_keeps_the_unconfirmed_hold(till, monkeypatch, tasks):
+    """The next counter return on the bill drops every hold whose record
+    counts -- an unconfirmed one too, before: its mark was the only trace that
+    the counter was told not to pay, and Needs completing never asked."""
+    payload, rcoll, _restocks = _cash_press(till, monkeypatch)
+    state = _landed_but_unconfirmed(rcoll, monkeypatch)
+    assert _press(payload, "K-L1").status_code == 503
+    state["done"] = True
+    rid = state["landed"]
+    assert _press(payload, "K-L2").status_code == 201  # the line's other unit, a new press
+    assert _stored(till)["refund_holds"][rid].get(returns_router.UNCONFIRMED_MARK) is True
+    _aged_past_the_timeout_of(till, rid)
+    assert rid in [i["return_id"] for i in _needs_completing()]
+
+
+def _aged_past_the_timeout_of(till, rid):
+    from datetime import datetime, timedelta, timezone
+
+    from api.routers import customers as cust_router
+
+    old = (datetime.now(timezone.utc) - timedelta(seconds=cust_router.PENDING_TIMEOUT_SECONDS + 5)).isoformat()
+    till["db"].get_collection("orders").update_one({"order_id": "ORD-1"}, {"$set": {f"refund_holds.{rid}.at": old}})

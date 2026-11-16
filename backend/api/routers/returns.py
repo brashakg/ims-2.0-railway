@@ -4578,6 +4578,20 @@ def _record_exists(return_id: str) -> bool:
     return coll.find_one({"return_id": return_id}, {"_id": 1}) is not None
 
 
+def _unconfirmed_open_ids(holds: Dict[str, Any]) -> set:
+    """Round 12: the unconfirmed holds whose record nobody has answered yet
+    (_unconfirmed_open) -- their mark is the only trace, so a later return of
+    the bill never drops them. Unreadable: keep every kept hold ("*")."""
+    rids = [rid for rid, h in (holds or {}).items() if (h or {}).get(UNCONFIRMED_MARK)]
+    coll = _returns_coll() if rids else None
+    if coll is None:
+        return set()
+    try:
+        return {d.get("return_id") for d in coll.find({"return_id": {"$in": rids}, "recovered": None})}
+    except Exception:  # noqa: BLE001 -- never drop a trace
+        return {"*"}
+
+
 def _press_record_unconfirmed(doc: Dict[str, Any]) -> bool:
     """Round 12: is this counter record one whose press answered "do not pay"
     and nobody has answered the cash question yet (_unconfirmed_open)? An
@@ -4882,7 +4896,7 @@ def _reserve_order_refund(order_id: Optional[str], net_amount: float, return_id:
         # A kept hold of a nothing-paid return is still there only while its
         # give-backs are unfinished: never counted, never dropped (its marks
         # are the trace).
-        unfinished = _nothing_paid_ids(order_id)
+        unfinished = _nothing_paid_ids(order_id) | _unconfirmed_open_ids(order.get("refund_holds") or {})
         keep = {rid: h for rid, h in (order.get("refund_holds") or {}).items()
                 if rid not in live and (rid in unfinished or "*" in unfinished) and (h or {}).get("kept")}
         # Another door (online refund, admin credit note, advance refund) is
