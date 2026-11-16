@@ -155,6 +155,8 @@ export function NewTaskModal({
   const sentFile = useRef<{ file: File; key: string; att: Record<string, string> } | null>(null);
 
   const [title, setTitle] = useState('');
+  // Why the last save failed, shown inside the form (a toast is covered).
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [desc, setDesc] = useState('');
   const [pri, setPri] = useState<PCode>('P2');
   const [due, setDue] = useState<number>(120);
@@ -224,6 +226,7 @@ export function NewTaskModal({
       requestKey.current = newRequestKey();
       setFile(initialFile);
       setFileError(null);
+      setSaveError(null);
     }
   }, [isOpen, initialFile]);
 
@@ -269,6 +272,7 @@ export function NewTaskModal({
       return;
     }
     inFlight.current = true;
+    setSaveError(null);
     setSubmitting(true);
     try {
       // If a file is attached, upload it first to get a file_id. A failed
@@ -315,7 +319,9 @@ export function NewTaskModal({
       onClose();
       onCreated();
     } catch (e) {
-      toast.error(getErrorMessage(e, 'Failed to create task'));
+      // Shown INSIDE the form: a toast sits under the modal overlay, where
+      // staff cannot read which task was saved (Codex #1431 round 2).
+      setSaveError(getErrorMessage(e, 'Failed to create task'));
       // 409: this form was already saved under its key with the earlier
       // details (the message names that task). Refresh the list so the saved
       // task shows; the form stays open and nothing new is created.
@@ -650,6 +656,23 @@ export function NewTaskModal({
           </aside>
         </div>
 
+        {saveError && (
+          <div
+            role="alert"
+            className="nt-save-error"
+            style={{
+              margin: '0 20px 12px',
+              padding: '10px 12px',
+              border: '1px solid var(--err)',
+              borderRadius: 8,
+              background: 'var(--err-50)',
+              color: 'var(--err)',
+              fontSize: 13,
+            }}
+          >
+            {saveError}
+          </div>
+        )}
         <div className="nt-foot">
           <span>
             <span className="kbd">Esc</span> to cancel

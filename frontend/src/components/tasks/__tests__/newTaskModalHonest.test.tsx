@@ -8,7 +8,7 @@
 // R29  Tab walked out of the open dialog into the covered page.
 // R44  Ctrl+Enter during an in-flight create posted a second task.
 
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../../../services/api', () => ({
@@ -184,7 +184,17 @@ describe('D49 a retry resends the same request; a changed form is told the truth
     fireEvent.click(screen.getByRole('button', { name: /Create task/ }));
     await waitFor(() => expect(onCreated).toHaveBeenCalledTimes(1));
     expect(onClose).not.toHaveBeenCalled();
-    expect(screen.getByRole('dialog', { name: 'New task' })).toBeInTheDocument();
+    const dialog = screen.getByRole('dialog', { name: 'New task' });
+    // The explanation is inside the form, not a toast under the overlay
+    // (Codex #1431 round 2): staff can read which task was saved.
+    const alert = within(dialog).getByRole('alert');
+    expect(alert).toHaveTextContent('already saved as task TASK-R1');
+    expect(alert).toHaveTextContent('NOT saved');
+    // A fresh try clears it.
+    createTask.mockResolvedValueOnce({ task_id: 'TASK-R2' });
+    fireEvent.change(screen.getByPlaceholderText(/Reconcile/), { target: { value: 'Another title' } });
+    fireEvent.click(screen.getByRole('button', { name: /Create task/ }));
+    await waitFor(() => expect(within(dialog).queryByRole('alert')).toBeNull());
   });
 
   it('promises no WhatsApp on create and labels the ladder timings as examples', async () => {
