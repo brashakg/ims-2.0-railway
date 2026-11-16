@@ -828,7 +828,14 @@ async def razorpay_list_payments(db, since_hours: int = 2) -> SyncResult:
 
 async def shiprocket_track_awb(db, awb: str) -> SyncResult:
     """Pull current tracking status for one AWB. Caller iterates over outbound shipments."""
-    cfg = _load_integration_config(db, "shiprocket")
+    # THE Shiprocket credential reader (the adapter's): the same account on
+    # every door, and a saved password that will not decrypt is an error here
+    # too - its ciphertext is never sent as the password (L2-INTEGRATION-F02).
+    from api.services.shiprocket import _resolve_credentials
+
+    cfg = _resolve_credentials(db)
+    if cfg.get("error"):
+        return SyncResult(ok=False, provider="shiprocket", kind="pull", error=cfg["error"])
     email = cfg.get("email")
     password = cfg.get("password")
     if not email or not password:

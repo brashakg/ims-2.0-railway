@@ -159,6 +159,14 @@ def decrypt_value(ciphertext: str) -> str:
     return ciphertext  # Unencrypted legacy value
 
 
+def is_encrypted(value) -> bool:
+    """True if ``value`` is still in an at-rest storage format. Asked of a
+    value that has been through decrypt_value / decrypt_config it means the
+    decrypt FAILED (wrong key or a corrupt token hands the ciphertext back) -
+    a provider must treat that as a configuration error, never as the secret."""
+    return isinstance(value, str) and value.startswith(("fernet:", "enc:"))
+
+
 def encrypt_config(config: dict) -> dict:
     """Encrypt sensitive fields before writing to MongoDB. Idempotent (skips
     values already encrypted under either scheme)."""

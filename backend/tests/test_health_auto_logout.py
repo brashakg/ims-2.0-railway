@@ -21,7 +21,10 @@ import pytest
 def _no_db(put_resp) -> bool:
     """True when a settings PUT ran without a DB (so we can't round-trip)."""
     try:
-        return "(no DB)" in (put_resp.json().get("message", "") or "")
+        # /settings/system answers 503 with no DB (never 200 "updated (no DB)").
+        return put_resp.status_code == 503 or "(no DB)" in (
+            put_resp.json().get("message", "") or ""
+        )
     except Exception:  # noqa: BLE001
         return False
 
@@ -72,9 +75,9 @@ def test_health_auto_logout_reflects_overrides(client, auth_headers):
         },
         headers=auth_headers,
     )
-    assert put.status_code == 200, put.text
     if _no_db(put):
         pytest.skip("system_settings collection unavailable (no DB)")
+    assert put.status_code == 200, put.text
 
     _reset_cache()
     al = client.get("/health").json().get("auto_logout") or {}
@@ -106,9 +109,9 @@ def test_health_auto_logout_clamps_out_of_range(client, auth_headers):
         },
         headers=auth_headers,
     )
-    assert put.status_code == 200, put.text
     if _no_db(put):
         pytest.skip("system_settings collection unavailable (no DB)")
+    assert put.status_code == 200, put.text
 
     _reset_cache()
     al = client.get("/health").json().get("auto_logout") or {}
