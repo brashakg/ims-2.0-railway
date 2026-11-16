@@ -5,6 +5,7 @@
 import { useRef } from 'react';
 import { Printer } from 'lucide-react';
 import { formatPowerOrDash } from '../../utils/rxPowerValue';
+import { formatDateIST } from '../../utils/datetime';
 
 // PATIENT SAFETY: every power here is NULLABLE, and that is the point.
 // These fields used to be plain `number`, which forced the one caller
@@ -28,12 +29,16 @@ export interface PrescriptionData {
     cylinder: number | null;
     axis: number | null;
     add: number | null;
+    /** Monocular PD of this eye, when the exam recorded one. */
+    pd?: number | null;
   };
   leftEye: {
     sphere: number | null;
     cylinder: number | null;
     axis: number | null;
     add: number | null;
+    /** Monocular PD of this eye, when the exam recorded one. */
+    pd?: number | null;
   };
   pd: number | null;
   visualAcuity: string;
@@ -88,13 +93,21 @@ const formatPd = (value: number | null | undefined): string => {
  */
 const formatDate = (dateString: string | null | undefined) => {
   if (!dateString) return '-';
-  const date = new Date(dateString);
-  if (Number.isNaN(date.getTime())) return '-';
-  return new Intl.DateTimeFormat('en-IN', {
-    year: 'numeric',
-    month: 'short',
-    day: '2-digit',
-  }).format(date);
+  // The IST calendar day, whatever timezone this PC is set to (a browser-local
+  // format moved an exam done 00:00-05:30 IST onto the previous day abroad).
+  return formatDateIST(dateString, '-');
+};
+
+/**
+ * D71: the per-eye (monocular) PDs whenever the exam recorded them; the
+ * binocular IPD only when neither eye's PD is recorded. Never derived either
+ * way: a missing measurement prints as a dash.
+ */
+const formatPdLine = (p: PrescriptionData): string => {
+  const r = formatPlain(p.rightEye.pd);
+  const l = formatPlain(p.leftEye.pd);
+  if (r !== '-' || l !== '-') return `R ${formatPd(p.rightEye.pd)} / L ${formatPd(p.leftEye.pd)}`;
+  return formatPd(p.pd);
 };
 
 /** Expired only when a real expiry date is on file and it has passed. An Rx
@@ -219,7 +232,7 @@ export function PrescriptionCard({ prescription }: PrescriptionCardProps) {
         <div style={{ marginBottom: '4mm', display: 'flex', gap: '15mm' }}>
           <div>
             <div style={{ fontSize: '10px', color: '#666' }}>PD:</div>
-            <div>{formatPd(prescription.pd)}</div>
+            <div>{formatPdLine(prescription)}</div>
           </div>
           <div>
             <div style={{ fontSize: '10px', color: '#666' }}>Visual Acuity:</div>
@@ -262,7 +275,7 @@ export function PrescriptionCard({ prescription }: PrescriptionCardProps) {
           <div>
             <p className="text-gray-500 text-sm">Date: {formatDate(prescription.date)}</p>
             <p className="text-gray-500 text-sm">Valid Until: {formatDate(prescription.validUntil)}</p>
-            <p className="text-gray-500 text-sm">PD: {formatPd(prescription.pd)}</p>
+            <p className="text-gray-500 text-sm">PD: {formatPdLine(prescription)}</p>
           </div>
         </div>
 

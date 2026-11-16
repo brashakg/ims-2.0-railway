@@ -14,13 +14,15 @@
 
 type AnyRec = Record<string, any> | null | undefined;
 type Side = 'right' | 'left';
-type Field = 'sphere' | 'cylinder' | 'axis' | 'add';
+type Field = 'sphere' | 'cylinder' | 'axis' | 'add' | 'pd';
 
 const FIELD_ALIASES: Record<Field, string[]> = {
   sphere: ['sphere', 'sph'],
   cylinder: ['cylinder', 'cyl'],
   axis: ['axis'],
   add: ['add', 'addition', 'add_power'],
+  // Monocular PD of the eye (never the binocular IPD, which is not per-eye).
+  pd: ['pd', 'pd_mono', 'pdMono'],
 };
 
 /** Resolve the eye object regardless of nesting / casing. */

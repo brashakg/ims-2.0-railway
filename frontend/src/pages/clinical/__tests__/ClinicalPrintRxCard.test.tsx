@@ -20,6 +20,9 @@
 // tab to ClinicalCompletedPage (/clinical/completed). Same button, same
 // mapping, same requirement.
 
+// Run in a non-IST zone: the card's date must still be the exam's IST day.
+process.env.TZ = 'America/New_York';
+
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -191,6 +194,41 @@ describe('the printed card reflects what the eye test actually recorded', () => 
 
     expect(container.textContent).toContain('62mm');
     expect(container.textContent).toContain('Asha Kumari');
+  }, SLOW);
+
+  it('D71: prints the per-eye PDs the exam recorded, not the IPD alone', async () => {
+    // Codex PR-1430 round 1: the card showed IPD 63.5 but dropped the saved
+    // mono 31 / 32.5. D71: per-eye PD whenever known, IPD only when not.
+    const { container } = await printCardFor({ sphere: 0 }, { sphere: -1 }, {
+      prescription: {
+        ipd: '63.5',
+        rightEye: { sphere: 0, pd: '31' },
+        leftEye: { sphere: -1, pd: '32.5' },
+      },
+    });
+
+    expect(container.textContent).toContain('R 31mm / L 32.5mm');
+    expect(container.textContent).not.toContain('63.5mm');
+  }, SLOW);
+
+  it('dates the card by the IST day of the exam in any PC timezone', async () => {
+    // 20:30 UTC on 13 Nov is 02:00 IST on 14 Nov. The browser-local format
+    // printed 13 Nov on a PC set to another zone (same class as the portal).
+    const { container } = await printCardFor({ sphere: 0 }, { sphere: -1 }, {
+      completedAt: '2026-11-13T20:30:00.000Z',
+    });
+
+    expect(container.textContent).toContain('14 Nov 2026');
+    expect(container.textContent).not.toContain('13 Nov 2026');
+  }, SLOW);
+
+  it('D71: one eye recorded prints that eye and a dash, never a derived value', async () => {
+    const { container } = await printCardFor({ sphere: 0 }, { sphere: -1 }, {
+      prescription: { ipd: '63.5', rightEye: { sphere: 0, pd: '31' }, leftEye: { sphere: -1 } },
+    });
+
+    expect(container.textContent).toContain('R 31mm / L -');
+    expect(container.textContent).not.toContain('32.5');
   }, SLOW);
 });
 

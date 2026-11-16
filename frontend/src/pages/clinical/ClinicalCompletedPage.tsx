@@ -134,11 +134,13 @@ export function ClinicalCompletedPage() {
                       // powers, and each states in its header that it does
                       // not govern the other. Same answer today; one owner
                       // per concept is what keeps it that way.
-                      rightEye: { sphere: powerNumberOrNull(readEyePower(test, 'right', 'sphere')), cylinder: powerNumberOrNull(readEyePower(test, 'right', 'cylinder')), axis: axisOrNull(readEyePower(test, 'right', 'axis')), add: powerNumberOrNull(readEyePower(test, 'right', 'add')) },
-                      leftEye: { sphere: powerNumberOrNull(readEyePower(test, 'left', 'sphere')), cylinder: powerNumberOrNull(readEyePower(test, 'left', 'cylinder')), axis: axisOrNull(readEyePower(test, 'left', 'axis')), add: powerNumberOrNull(readEyePower(test, 'left', 'add')) },
+                      rightEye: { sphere: powerNumberOrNull(readEyePower(test, 'right', 'sphere')), cylinder: powerNumberOrNull(readEyePower(test, 'right', 'cylinder')), axis: axisOrNull(readEyePower(test, 'right', 'axis')), add: powerNumberOrNull(readEyePower(test, 'right', 'add')), pd: powerNumberOrNull(readEyePower(test, 'right', 'pd')) },
+                      leftEye: { sphere: powerNumberOrNull(readEyePower(test, 'left', 'sphere')), cylinder: powerNumberOrNull(readEyePower(test, 'left', 'cylinder')), axis: axisOrNull(readEyePower(test, 'left', 'axis')), add: powerNumberOrNull(readEyePower(test, 'left', 'add')), pd: powerNumberOrNull(readEyePower(test, 'left', 'pd')) },
                       // L2-CLIN-F02: the exam's recorded binocular IPD
                       // (was hard-coded null, so this card never carried it).
-                      // Blank stays blank; nothing is derived from the eyes.
+                      // D71: the card prints the per-eye PDs above when
+                      // recorded, this IPD only when they are not. Blank
+                      // stays blank; nothing is derived either way.
                       pd: powerNumberOrNull(test.prescription?.ipd),
                       visualAcuity: '',
                       notes: '',
