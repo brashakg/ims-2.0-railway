@@ -383,6 +383,31 @@ def test_loyalty_expiry_sweep_compares_expires_at_on_the_utc_clock(monkeypatch):
     assert seen["now"] == UTC_NAIVE
 
 
+def test_loyalty_lot_earned_on_an_ist_host_expires_at_its_utc_instant(monkeypatch):
+    """Writer and reader on one clock: expiry_for_earn stamps expires_at, the
+    sweep reads it with utc_now_naive(). With expires_at on the local clock an
+    IST host kept every lot redeemable 5h30m past its expiry (reviewer B25)."""
+    from api.services import loyalty_engine as eng
+    from database.repositories.loyalty_repository import LoyaltyTransactionRepository
+
+    monkeypatch.setattr(eng, "datetime", IstHostClock)
+    monkeypatch.setattr(et, "utc_now", lambda: INSTANT)
+    exp = eng.expiry_for_earn({"expiry_days": 365})
+    assert exp == UTC_NAIVE + timedelta(days=365)
+
+    # Earn row through the real repository, then sweep at the expiry instant.
+    repo = LoyaltyTransactionRepository(MockCollection("loyalty_transactions"))
+    repo.create({"txn_id": "T1", "customer_id": "C1", "type": "EARN",
+                 "points": 100, "expires_at": exp})
+    at_expiry = UTC_NAIVE + timedelta(days=365)
+    monkeypatch.setattr(et, "utc_now", lambda: at_expiry.replace(tzinfo=timezone.utc))
+    assert [r["txn_id"] for r in repo.find_expired_unprocessed(et.utc_now_naive())] == ["T1"]
+    ledger = repo.find_for_customer("C1", limit=10)
+    assert eng.expirable_points_by_lot(ledger) == {"T1": 100}
+    # One second before the instant the lot is still live.
+    assert repo.find_expired_unprocessed(at_expiry - timedelta(seconds=1)) == []
+
+
 def test_snooze_one_hour_ahead_is_accepted_and_stored_as_the_utc_instant(monkeypatch):
     """The UI sends an aware ISO instant. Its offset was stripped and the UTC
     digits compared with the IST wall clock: a 1-hour snooze was 'in the past'."""

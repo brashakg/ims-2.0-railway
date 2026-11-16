@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from api.services.product_master import resolve_category
+from api.utils.event_time import utc_now_naive
 
 # ============================================================================
 # Tier helpers
@@ -315,7 +316,8 @@ def expiry_for_earn(
     settings: Dict[str, Any], now: Optional[datetime] = None
 ) -> datetime:
     days = int(settings.get("expiry_days", 365) or 365)
-    base = now or datetime.now()
+    # UTC frame, the same clock the sweep and expiring-soon readers use (RUN-02).
+    base = now or utc_now_naive()
     return base + timedelta(days=max(0, days))
 
 
@@ -353,7 +355,7 @@ def expirable_points_by_lot(
     Pure + deterministic; no I/O. Only EARN lots that still have unspent points
     AND are past expiry appear in the result (always > 0).
     """
-    now = now or datetime.now()
+    now = now or utc_now_naive()
     rows = sorted(ledger or [], key=_txn_sort_key)
 
     # Each EARN lot: its remaining (unspent, unexpired) balance, in FIFO order.
