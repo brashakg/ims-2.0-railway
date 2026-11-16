@@ -48,6 +48,7 @@ from ..dependencies import (
     get_audit_repository,
 )
 from ..utils.event_time import parse_event_utc
+from database.repositories.handoff_repository import FORWARD_PENDING
 from ..services.file_store import (
     ANY_KIND,
     get_file_store,
@@ -377,15 +378,24 @@ async def create_handoff(
     return _scrub(saved)
 
 
+def _read_rows(read) -> List[Dict]:
+    """A list read that cannot be done is 503, never a false empty list."""
+    repo = get_handoff_repository()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Handoffs are unavailable right now")
+    try:
+        return read(repo)
+    except Exception:
+        logger.exception("[HANDOFF] list read failed")
+        raise HTTPException(status_code=503, detail="Handoffs are unavailable right now")
+
+
 @router.get("/inbox")
 async def list_inbox(current_user: dict = Depends(get_current_user)):
     """Return handoffs visible on THIS user's Hub (pending or kept,
     not dismissed, not currently snoozed)."""
-    repo = get_handoff_repository()
-    if repo is None:
-        return {"handoffs": [], "total": 0}
     uid = current_user.get("user_id")
-    rows = repo.find_inbox_for_user(uid)
+    rows = _read_rows(lambda repo: repo.find_inbox_for_user(uid))
     now = _now()
     visible: List[Dict] = []
     for h in rows:
@@ -404,10 +414,7 @@ async def list_inbox(current_user: dict = Depends(get_current_user)):
 @router.get("/sent")
 async def list_sent(current_user: dict = Depends(get_current_user)):
     """List handoffs uploaded by the current user."""
-    repo = get_handoff_repository()
-    if repo is None:
-        return {"handoffs": [], "total": 0}
-    rows = repo.find_sent_by_user(current_user.get("user_id"))
+    rows = _read_rows(lambda repo: repo.find_sent_by_user(current_user.get("user_id")))
     return {"handoffs": [_scrub(r) for r in rows], "total": len(rows)}
 
 
@@ -425,11 +432,10 @@ async def list_clinical_inbox(
 
     MUST be registered before GET /{handoff_id} so the literal path wins over the
     {handoff_id} param (FastAPI matches in registration order)."""
-    repo = get_handoff_repository()
-    if repo is None:
-        return {"handoffs": [], "total": 0}
     uid = current_user.get("user_id")
-    rows = repo.find_inbox_for_user(uid, handoff_type=HANDOFF_TYPE_CLINICAL)
+    rows = _read_rows(
+        lambda repo: repo.find_inbox_for_user(uid, handoff_type=HANDOFF_TYPE_CLINICAL)
+    )
     now = _now()
     visible: List[Dict] = []
     for h in rows:
@@ -627,26 +633,47 @@ async def reshare_handoff(
         "expires_at": parent_expires,
         "validity_days": parent.get("validity_days"),
         "parent_handoff_id": parent.get("handoff_id"),
+        # Audit R23 / decision D47: hidden from every read until committed.
+        "forward_state": FORWARD_PENDING,
     }
+    file_id = parent_file.get("file_id")
 
+    # Insert the child FIRST (pending, so nobody can open or forward it), so
+    # any revoke that runs after our commit below sees it as a reference and
+    # keeps the bytes.
     saved = repo.create(new_doc)
     if saved is None:
+        # The insert may still have landed (lost reply): take it back.
+        _abandon_forward(repo, new_handoff_id, file_id)
         raise HTTPException(
             status_code=500, detail="Failed to persist reshared handoff"
         )
-    # Audit R23 / decision D47: the sender may have revoked the original
-    # between our read and the insert above, and revoke frees the bytes when
-    # it sees no other handoff using them. The parent still being there NOW
-    # proves its revoke (and its reference check) comes after our child
-    # exists, so the bytes stay. If it is gone we cannot prove that: take the
-    # copy back and refuse, never a 201 for a copy whose file may be gone.
-    if repo.find_by_id(handoff_id) is None:
-        repo.delete(new_handoff_id)
-        _release_file(repo, parent_file.get("file_id"))
+    # Commit: one write on the parent row proves it is still live. Revoke
+    # deletes that row, so either we commit first (its reference check will see
+    # our child) or the parent is gone and we take the child back. Never a 201
+    # for a copy whose file may be gone.
+    try:
+        committed = repo.commit_reshare(handoff_id)
+    except Exception:
+        _abandon_forward(repo, new_handoff_id, file_id)
+        raise HTTPException(
+            status_code=503,
+            detail="Could not confirm the forward; nothing was forwarded. Try again.",
+        )
+    if not committed:
+        _abandon_forward(repo, new_handoff_id, file_id)
         raise HTTPException(
             status_code=409,
             detail="The sender withdrew this handoff while you were forwarding it; nothing was forwarded",
         )
+    if not _publish_forward(repo, new_handoff_id):
+        # Committed, so its bytes are safe either way; the copy is either live
+        # (visible in Sent) or still pending (invisible). Say so honestly.
+        raise HTTPException(
+            status_code=503,
+            detail="Could not confirm the forward. Check your Sent list before forwarding again.",
+        )
+    saved["forward_state"] = "live"
 
     # Mark the parent recipient's record as 'reshared'
     repo.update_recipient(
@@ -735,13 +762,41 @@ async def revoke_handoff(
     return {"deleted": True, "handoff_id": handoff_id}
 
 
+def _abandon_forward(repo, child_id: str, file_id: Optional[str]) -> None:
+    """Take back a reshare child that was never committed. It is still pending,
+    so even if this delete fails the row stays invisible to every route (the
+    TTL index removes it); its bytes are freed only when nothing uses them."""
+    repo.delete(child_id)
+    _release_file(repo, file_id)
+
+
+def _publish_forward(repo, child_id: str) -> bool:
+    """Flip a committed child to live; on an unclear driver reply read back
+    the real state. Two tries."""
+    for _ in range(2):
+        try:
+            if repo.publish_reshare(child_id):
+                return True
+        except Exception:
+            pass
+        try:
+            row = repo.find_raw(child_id)
+            if row and row.get("forward_state") == "live":
+                return True
+        except Exception:
+            pass
+    return False
+
+
 def _release_file(repo, file_id: Optional[str]) -> None:
     """Free a handoff's bytes once no handoff uses them (audit R23). A
     reshare points its child at the SAME blob, so revoking one handoff never
     breaks the original's (or a forwarded) copy. Runs only AFTER the handoff
-    doc is deleted; reshare re-checks its parent after inserting the child, so
-    a child that answered 201 is always seen here. A failed check keeps the
-    bytes (the orphan sweep is the fallback)."""
+    doc is deleted. Safe against in-flight forwards (D47): a forward inserts
+    its pending child BEFORE committing on its live parent, so a zero count
+    here means every handoff using this file is already gone and any later
+    forward's commit fails; a pending child is counted too. A failed check
+    keeps the bytes (the orphan sweep is the fallback)."""
     if not file_id:
         return
     try:

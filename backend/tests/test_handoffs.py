@@ -680,3 +680,202 @@ def test_r23_d47_every_201_reshare_child_can_open_its_file(client, patched_hando
     assert client.delete(f"/api/v1/handoffs/{parent['handoff_id']}",
                          headers={"Authorization": f"Bearer {cashier}"}).status_code == 200
     assert _download(client, r.json()["handoff_id"], acct).status_code == 200
+
+
+
+# Codex PR-1436 round 2 / decision D47: an unfinished forward is never usable.
+# A reshare child is pending until its live parent is proven by one write on
+# the parent row; pending rows are hidden from every read, so nobody can open
+# or forward them onward, and a failed take-back leaves nothing visible.
+
+def _tokens():
+    return (_token("u-uploader", "Anil", ["SALES_STAFF"]),
+            _token("u-store-mgr", "Smita", ["STORE_MANAGER"]),
+            _token("u-acct", "Asha", ["ACCOUNTANT"]),
+            _token("u-admin", "Akhil", ["ADMIN"]))
+
+
+def _auth(tok):
+    return {"Authorization": f"Bearer {tok}"}
+
+
+def test_r23_d47_unfinished_forward_cannot_be_seen_or_forwarded_onward(client, patched_handoffs):
+    """Codex multihop schedule: while B (A->Accounts) is inserted but not yet
+    committed, Accounts must not see, open or forward B; the sender's revoke
+    then wins, B is taken back and no usable copy is left without its file."""
+    import threading
+    cashier, mgr, acct, admin = _tokens()
+    parent = _upload(client, cashier, recipients=["u-store-mgr"]).json()
+    file_id = parent["file"]["file_id"]
+    coll = patched_handoffs["db"].get_collection("handoffs")
+    real_insert = coll.insert_one
+    inserted, go = threading.Event(), threading.Event()
+    holder = {}
+
+    def paused_insert(doc):
+        out = real_insert(doc)
+        if doc.get("parent_handoff_id") == parent["handoff_id"]:
+            holder["child"] = doc["handoff_id"]
+            inserted.set()
+            assert go.wait(10)
+        return out
+
+    coll.insert_one = paused_insert
+    result = {}
+
+    # Its own client (own event loop): the shared session client would queue
+    # the checks below behind the paused request.
+    from fastapi.testclient import TestClient
+    side = TestClient(client.app)
+
+    def forward():
+        result["r"] = side.post(f"/api/v1/handoffs/{parent['handoff_id']}/reshare",
+                                  headers=_auth(mgr), json={"recipient_user_ids": ["u-acct"]})
+
+    t = threading.Thread(target=forward)
+    t.start()
+    try:
+        assert inserted.wait(10)
+        child = holder["child"]
+        inbox = client.get("/api/v1/handoffs/inbox", headers=_auth(acct)).json()
+        assert all(h["handoff_id"] != child for h in inbox["handoffs"])
+        assert _download(client, child, acct).status_code == 404
+        onward = client.post(f"/api/v1/handoffs/{child}/reshare", headers=_auth(acct),
+                             json={"recipient_user_ids": ["u-admin"]})
+        assert onward.status_code == 404, onward.text
+        assert client.delete(f"/api/v1/handoffs/{parent['handoff_id']}",
+                             headers=_auth(cashier)).status_code == 200
+    finally:
+        go.set()
+        t.join(10)
+    assert result["r"].status_code == 409, result["r"].text
+    assert coll.count_documents({"recipients.user_id": "u-admin"}) == 0
+    assert coll.count_documents({"file.file_id": file_id}) == 0
+    assert file_id not in patched_handoffs["file_store"]._files
+
+
+def test_r23_d47_failed_take_back_leaves_no_visible_or_forwardable_copy(client, patched_handoffs):
+    """Codex rollback schedule: the parent is revoked before the child insert
+    and the take-back delete of the child fails. The 409 'nothing was
+    forwarded' must be true: the leftover row is not in the inbox or Sent,
+    cannot be opened and cannot be forwarded on."""
+    cashier, mgr, acct, admin = _tokens()
+    parent = _upload(client, cashier, recipients=["u-store-mgr"]).json()
+    _race(patched_handoffs, parent, revoke_before_insert=True)
+    coll = patched_handoffs["db"].get_collection("handoffs")
+    real_delete = coll.delete_one
+
+    def failing_delete(filter_):
+        if filter_.get("handoff_id") not in (None, parent["handoff_id"]):
+            raise ConnectionError("synthetic AutoReconnect on take-back")
+        return real_delete(filter_)
+
+    coll.delete_one = failing_delete
+    r = client.post(f"/api/v1/handoffs/{parent['handoff_id']}/reshare", headers=_auth(mgr),
+                    json={"recipient_user_ids": ["u-acct"]})
+    assert r.status_code == 409, r.text
+    left = coll.find_one({"parent_handoff_id": parent["handoff_id"]})
+    assert left is not None
+    inbox = client.get("/api/v1/handoffs/inbox", headers=_auth(acct)).json()
+    assert inbox["handoffs"] == []
+    assert _download(client, left["handoff_id"], acct).status_code == 404
+    assert client.post(f"/api/v1/handoffs/{left['handoff_id']}/reshare", headers=_auth(acct),
+                       json={"recipient_user_ids": ["u-admin"]}).status_code == 404
+    sent = client.get("/api/v1/handoffs/sent", headers=_auth(mgr)).json()
+    assert all(h["handoff_id"] != left["handoff_id"] for h in sent["handoffs"])
+
+
+def test_r23_d47_revoke_after_commit_keeps_the_forwarded_copy_usable(client, patched_handoffs):
+    """The other order: the commit lands, then the sender revokes before the
+    child is published. The child is a reference, so the bytes stay and the
+    201 copy opens."""
+    cashier, mgr, acct, admin = _tokens()
+    parent = _upload(client, cashier, recipients=["u-store-mgr"]).json()
+    file_id = parent["file"]["file_id"]
+    repo = patched_handoffs["handoff_repo"]
+    coll = patched_handoffs["db"].get_collection("handoffs")
+    fs = patched_handoffs["file_store"]
+    real_commit = repo.commit_reshare
+
+    def commit_then_revoke(pid):
+        ok = real_commit(pid)
+        coll.delete_one({"handoff_id": pid})           # what DELETE does ...
+        if coll.count_documents({"file.file_id": file_id}) == 0:
+            fs.delete(file_id)                          # ... then frees unused bytes
+        return ok
+
+    repo.commit_reshare = commit_then_revoke
+    r = client.post(f"/api/v1/handoffs/{parent['handoff_id']}/reshare", headers=_auth(mgr),
+                    json={"recipient_user_ids": ["u-acct"]})
+    assert r.status_code == 201, r.text
+    assert _download(client, r.json()["handoff_id"], acct).status_code == 200
+
+
+def test_r23_d47_lost_commit_reply_takes_the_child_back_and_keeps_the_file(client, patched_handoffs):
+    cashier, mgr, acct, admin = _tokens()
+    parent = _upload(client, cashier, recipients=["u-store-mgr"]).json()
+    repo = patched_handoffs["handoff_repo"]
+    real_commit = repo.commit_reshare
+
+    def landed_but_lost(pid):
+        real_commit(pid)
+        raise ConnectionError("synthetic lost reply")
+
+    repo.commit_reshare = landed_but_lost
+    r = client.post(f"/api/v1/handoffs/{parent['handoff_id']}/reshare", headers=_auth(mgr),
+                    json={"recipient_user_ids": ["u-acct"]})
+    assert r.status_code == 503 and "nothing was forwarded" in r.json()["detail"]
+    coll = patched_handoffs["db"].get_collection("handoffs")
+    assert coll.count_documents({"parent_handoff_id": parent["handoff_id"]}) == 0
+    assert _download(client, parent["handoff_id"], mgr).status_code == 200
+
+
+def test_r23_d47_lost_publish_reply_reads_back_and_answers_201(client, patched_handoffs):
+    cashier, mgr, acct, admin = _tokens()
+    parent = _upload(client, cashier, recipients=["u-store-mgr"]).json()
+    repo = patched_handoffs["handoff_repo"]
+    real_publish = repo.publish_reshare
+    calls = []
+
+    def landed_but_lost(cid):
+        calls.append(cid)
+        real_publish(cid)
+        raise ConnectionError("synthetic lost reply")
+
+    repo.publish_reshare = landed_but_lost
+    r = client.post(f"/api/v1/handoffs/{parent['handoff_id']}/reshare", headers=_auth(mgr),
+                    json={"recipient_user_ids": ["u-acct"]})
+    assert r.status_code == 201, r.text
+    assert len(calls) == 1
+    assert _download(client, r.json()["handoff_id"], acct).status_code == 200
+
+
+def test_r23_d47_publish_that_never_lands_is_503_and_stays_invisible(client, patched_handoffs):
+    cashier, mgr, acct, admin = _tokens()
+    parent = _upload(client, cashier, recipients=["u-store-mgr"]).json()
+    repo = patched_handoffs["handoff_repo"]
+
+    def down(_cid):
+        raise ConnectionError("synthetic outage")
+
+    repo.publish_reshare = down
+    r = client.post(f"/api/v1/handoffs/{parent['handoff_id']}/reshare", headers=_auth(mgr),
+                    json={"recipient_user_ids": ["u-acct"]})
+    assert r.status_code == 503 and "Sent" in r.json()["detail"]
+    inbox = client.get("/api/v1/handoffs/inbox", headers=_auth(acct)).json()
+    assert inbox["handoffs"] == []
+    # The original is untouched and its file still opens.
+    assert _download(client, parent["handoff_id"], mgr).status_code == 200
+
+
+@pytest.mark.parametrize("path", ["/api/v1/handoffs/inbox", "/api/v1/handoffs/sent"])
+def test_r23_failed_list_read_is_503_not_an_empty_list(client, patched_handoffs, path):
+    coll = patched_handoffs["db"].get_collection("handoffs")
+
+    def down(*_a, **_k):
+        raise ConnectionError("synthetic read outage")
+
+    coll.find = down
+    _, mgr, _, _ = _tokens()
+    r = client.get(path, headers=_auth(mgr))
+    assert r.status_code == 503, r.text
