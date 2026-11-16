@@ -194,7 +194,7 @@ class BaseRepository(ABC, Generic[T]):
             print(f"Error finding {self.entity_name}s: {e}")
             return []
 
-    def update(self, id: str, data: Dict) -> bool:
+    def update(self, id: str, data: Dict, expected: Optional[Dict] = None) -> bool:
         """
         Update document by ID
 
@@ -209,7 +209,11 @@ class BaseRepository(ABC, Generic[T]):
             # Add updated timestamp
             data["updated_at"] = datetime.now()
 
-            result = self.collection.update_one({self.id_field: id}, {"$set": data})
+            # ``expected``: extra field values the stored row must still hold
+            # (a compare-and-set); no match -> False, nothing written.
+            result = self.collection.update_one(
+                {self.id_field: id, **(expected or {})}, {"$set": data}
+            )
             return result.modified_count > 0
         except Exception as e:
             print(f"Error updating {self.entity_name}: {e}")

@@ -28,7 +28,7 @@ from ..dependencies import (
     user_store_scope,
     validate_store_access,
 )
-from ..services.role_caps import role_baseline_cap, effective_discount_cap
+from ..services.role_caps import ROLE_DISCOUNT_CAPS, role_baseline_cap, effective_discount_cap
 from ..services.user_roles import (
     BCRYPT_MAX_BYTES,
     can_assign_roles,
@@ -208,6 +208,10 @@ class UserUpdate(BaseModel):
     store_ids: Optional[List[str]] = None
     primary_store_id: Optional[str] = None
     discount_cap: Optional[float] = Field(default=None, ge=0, le=100)
+    # D70: True = "set this person's cap to the role standard" (the editor's
+    # explicit choice on a role change). Never stored; cannot be combined with
+    # discount_cap.
+    discount_cap_follow_role: Optional[bool] = None
     is_active: Optional[bool] = None
     # Deny-only per-user module override (see UserCreate.module_access). Only
     # persisted when explicitly provided on update so an unrelated edit (e.g. a
@@ -410,6 +414,7 @@ _SANITIZED_USER_FIELDS = (
     "store_ids",
     "primary_store_id",
     "discount_cap",
+    "discount_cap_is_role_default",
     "is_active",
     "must_change_password",
     "module_access",
@@ -926,7 +931,8 @@ async def list_users(
         if active_only:
             filter_dict["is_active"] = True
 
-        users = repo.find_many(filter_dict, skip=skip, limit=limit)
+        # Stable order so skip/limit pages neither repeat nor skip anyone.
+        users = repo.find_many(filter_dict, sort=[("_id", 1)], skip=skip, limit=limit)
         return [sanitize_user(u, current_user) for u in users]
 
     return []
@@ -989,6 +995,9 @@ async def create_user(user: UserCreate, current_user: dict = Depends(require_adm
                 if _clamped_cap is not None
                 else role_baseline_cap(user.roles)
             ),
+            # D70: a cap the role standard filled in follows the role on a later
+            # role change; a typed cap is the editor's and is kept.
+            "discount_cap_is_role_default": _clamped_cap is None,
             "is_active": True,
             # Honour the (default-True) flag instead of the old duplicate-key bug
             # that hard-coded True and ignored the request. Cleared on first
@@ -1145,12 +1154,46 @@ async def update_user(
         # LIVE BUG retrofit: clamp any requested discount_cap to the actor's own
         # cap (was stored unguarded on update too).
         _cap_touched = "discount_cap" in update_data
+        _follow = bool(update_data.pop("discount_cap_follow_role", None))
+        if _follow and _cap_touched:
+            raise HTTPException(
+                status_code=422,
+                detail="Send either a discount cap or 'use the role standard', not both.",
+            )
         if _cap_touched:
             update_data["discount_cap"] = _clamp_discount_cap(
                 current_user,
                 update_data.get("discount_cap"),
                 update_data.get("roles", existing.get("roles", [])),
             )
+            # A cap the editor sent is deliberate: kept on later role changes.
+            update_data["discount_cap_is_role_default"] = False
+
+        # D70: on a role change, a cap that the role standard set follows the
+        # new role's standard; an unmarked (typed or legacy) cap is kept unless
+        # the editor explicitly chose the standard. The write is conditional on
+        # the cap still being the one read here, so a concurrent deliberate
+        # edit is never overwritten (409 instead).
+        _expect = None
+        _new_roles = update_data.get("roles", existing.get("roles", []))
+        if _follow or (
+            "roles" in update_data
+            and not _cap_touched
+            and existing.get("discount_cap_is_role_default") is True
+        ):
+            _base = role_baseline_cap(_new_roles)
+            if _base != existing.get("discount_cap") or not existing.get(
+                "discount_cap_is_role_default"
+            ):
+                update_data["discount_cap"] = _base
+                update_data["discount_cap_is_role_default"] = True
+                _cap_touched = True
+                _expect = {
+                    "discount_cap": existing.get("discount_cap"),
+                    "discount_cap_is_role_default": existing.get(
+                        "discount_cap_is_role_default"
+                    ),
+                }
 
         update_data["updated_by"] = current_user.get("user_id")
 
@@ -1177,7 +1220,17 @@ async def update_user(
                     detail="Could not record the permission change; update aborted.",
                 )
 
-        if repo.update(user_id, update_data):
+        _updated = (
+            repo.update(user_id, update_data, expected=_expect)
+            if _expect is not None
+            else repo.update(user_id, update_data)
+        )
+        if not _updated and _expect is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="This person's discount cap was changed meanwhile. Reload and try again.",
+            )
+        if _updated:
             # F18: an edit that flips is_active must take effect immediately for
             # tokens already in the wild (both ways -- a re-activation must not
             # keep 401ing off a stale entry either).
@@ -1752,6 +1805,9 @@ async def get_permission_options(current_user: dict = Depends(require_admin)):
         "schema_version": _cd.DELTA_SCHEMA_VERSION,
         "discount_cap_field": _cd.DISCOUNT_CAP_FIELD,
         "role_deltas": _cd.ROLE_DELTAS,
+        # The role standard discount per role (the ONE table in role_caps). The
+        # editor shows max() over the person's roles -- role_baseline_cap.
+        "role_discount_caps": ROLE_DISCOUNT_CAPS,
         # The capabilities THIS actor may grant (cap their own level). The FE
         # uses this to show ungrantable toggles grayed-with-reason.
         "grantable": sorted(grantable_capabilities_for(current_user.get("roles", []))),
@@ -1842,6 +1898,7 @@ async def revert_user_permissions(
         "discount_cap": _cap
         if _cap is not None
         else role_baseline_cap(existing.get("roles", [])),
+        "discount_cap_is_role_default": _cap is None,
         "updated_by": current_user.get("user_id"),
     }
     after_doc = dict(existing)
