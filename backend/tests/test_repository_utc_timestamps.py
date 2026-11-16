@@ -126,6 +126,9 @@ _TASK_FILES = [
     "api/services/catalog_flags.py",
     "api/routers/walkouts.py",
     "api/routers/vendors/grn_accept.py",
+    # sold_at readers: the unsaved-claim sweep and the stock ledger's GRN join.
+    "api/routers/orders/stock.py",
+    "api/routers/inventory/stock.py",
 ]
 
 
@@ -310,3 +313,35 @@ def test_task_create_accepts_a_due_time_two_hours_ahead_on_an_ist_host(monkeypat
         tasks_mod.TaskCreate(
             title="call back", assigned_to="staff-1", due_at=INSTANT - timedelta(hours=1)
         )
+
+
+def test_unsaved_claim_sweep_reads_sold_at_on_the_utc_clock(monkeypatch):
+    """mark_sold / the claim stamp sold_at in UTC; the sweep that frees claims of
+    bills never saved must age them on the same clock. On an IST host the local
+    clock made a claim seconds old look 5h30m old: an in-flight sale's unit was
+    released to be sold again."""
+    from api.routers.orders import stock as guard
+
+    monkeypatch.setattr(guard, "datetime", IstHostClock)
+    seen = {}
+
+    class _Units:
+        def distinct(self, field, flt):
+            seen["flt"] = flt
+            return []
+
+    class _Orders:
+        def find(self, *a, **k):
+            return []
+
+    class _Repo:
+        def __init__(self, coll):
+            self.collection = coll
+
+    monkeypatch.setattr(guard, "get_stock_repository", lambda: _Repo(_Units()))
+    monkeypatch.setattr(guard, "get_order_repository", lambda: _Repo(_Orders()))
+    monkeypatch.setattr(et, "utc_now", lambda: INSTANT)
+    assert guard.sweep_unsaved_claims() == []
+    bound = seen["flt"]["sold_at"]
+    assert bound["$lt"] == UTC_NAIVE - timedelta(minutes=guard.CLAIM_SWEEP_MINUTES)
+    assert bound["$gt"] == UTC_NAIVE - timedelta(days=1)
