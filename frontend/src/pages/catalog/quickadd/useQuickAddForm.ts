@@ -91,7 +91,7 @@ export function useQuickAddForm() {
   const [searchParams, routerSetSearchParams] = useSearchParams();
   const navigate = useCallback(
     ((...a: Parameters<NavigateFunction>) =>
-      ownNavigation(() => routerNavigate(...(a as [string])))) as NavigateFunction,
+      ownNavigation(() => routerNavigate(...(a as unknown as [string])))) as NavigateFunction,
     [routerNavigate],
   );
   const setSearchParams = useCallback<SetURLSearchParams>(
