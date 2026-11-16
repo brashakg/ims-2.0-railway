@@ -128,3 +128,54 @@ def test_staff_with_no_database_is_still_refused_another_payslip_first(monkeypat
     """Authorization still runs before the database is touched."""
     r = _client(monkeypatch, None, STAFF).get("/api/v1/payroll/payslip/someone-else")
     assert r.status_code == 403, r.text
+
+
+# ---------------------------------------------------------------------------
+# The same staff door on a REAL Mongo database (raw pymongo Database, which
+# refuses a truth test), the read failing inside pymongo itself.
+# ``CI=1 IMS_TEST_MONGO_PORT=27084 IMS_TEST_MONGO_DB=<scratch>``; the test
+# DROPS that database.
+# ---------------------------------------------------------------------------
+REAL_PORT = os.environ.get("IMS_TEST_MONGO_PORT") or ("27017" if os.environ.get("CI") else "")
+REAL_DB = os.environ.get("IMS_TEST_MONGO_DB") or f"ims_test_b27_reads_{os.getpid()}"
+
+
+@pytest.fixture
+def real_db():
+    if not REAL_PORT:
+        pytest.skip("no local Mongo given (IMS_TEST_MONGO_PORT)")
+    import pymongo
+
+    client = pymongo.MongoClient("127.0.0.1", int(REAL_PORT), serverSelectionTimeoutMS=3000)
+    try:
+        client.admin.command("ping")
+    except Exception:  # pragma: no cover - environment
+        pytest.skip("local Mongo not reachable")
+    assert REAL_DB.startswith(("ims_test_", "ims_claude_")), REAL_DB
+    client.drop_database(REAL_DB)
+    db = client[REAL_DB]
+    assert db.name == REAL_DB
+    for name in ("users", "payroll"):
+        db[name].insert_many(list(_db().get_collection(name).find({})))
+    yield db
+    client.drop_database(REAL_DB)
+    client.close()
+
+
+def test_native_staff_payslip_read_failure_is_503(monkeypatch, real_db):
+    from pymongo.collection import Collection
+
+    c = _client(monkeypatch, real_db, STAFF)
+    ok = c.get("/api/v1/hr/me/payslip")
+    assert ok.status_code == 200 and ok.json()["payslip"]["breakdown"]["net_pay"] == 13247.0
+
+    real_find = Collection.find
+
+    def find(self, *a, **k):
+        if self.name == "payroll":
+            raise AutoReconnect("connection reset")
+        return real_find(self, *a, **k)
+
+    monkeypatch.setattr(Collection, "find", find)
+    r = c.get("/api/v1/hr/me/payslip")
+    assert r.status_code == 503, r.text
