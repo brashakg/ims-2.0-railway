@@ -115,7 +115,7 @@ class _Repo:
     def find_by_code(self, code):
         return self.coll.find_one({"store_code": code})
 
-    def create(self, data):
+    def create(self, data, raise_on_duplicate=False):
         self.coll.insert_one(dict(data))
         return self.coll.find_one({"store_id": data["store_id"]})
 

@@ -25,10 +25,10 @@ class _Repo:
     def __init__(self, docs):
         self.docs = docs
 
-    def find_active(self, _filter=None):
+    def find_active(self, _filter=None, strict=False):
         return [d for d in self.docs if d.get("is_active", True)]
 
-    def find_many(self, _filter, sort=None):
+    def find_many(self, _filter, sort=None, strict=False):
         return list(self.docs)
 
 

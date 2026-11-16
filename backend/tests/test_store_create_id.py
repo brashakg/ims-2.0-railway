@@ -64,7 +64,7 @@ class _FakeStoreRepo:
         d = self._docs.get(store_id)
         return dict(d) if d else None
 
-    def create(self, store_data):
+    def create(self, store_data, raise_on_duplicate=False):
         import uuid
 
         doc = dict(store_data)

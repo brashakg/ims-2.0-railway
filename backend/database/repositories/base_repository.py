@@ -166,9 +166,15 @@ class BaseRepository(ABC, Generic[T]):
         sort: List[tuple] = None,
         skip: int = 0,
         limit: int = 100,
+        *,
+        strict: bool = False,
     ) -> List[Dict]:
         """
         Find multiple documents
+
+        ``strict=True`` RE-RAISES a database error instead of answering [] --
+        for callers where an empty list means something (e.g. the store
+        picker offering first-store setup). Default stays fail-soft.
 
         Args:
             filter: MongoDB filter
@@ -191,6 +197,8 @@ class BaseRepository(ABC, Generic[T]):
 
             return [self._clean_id(doc) for doc in cursor]
         except Exception as e:
+            if strict:
+                raise
             print(f"Error finding {self.entity_name}s: {e}")
             return []
 

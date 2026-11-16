@@ -30,11 +30,11 @@ class StoreRepository(BaseRepository):
     def find_hq(self) -> Optional[Dict]:
         return self.find_one({"is_hq": True})
     
-    def find_active(self, filter: Dict = None) -> List[Dict]:
+    def find_active(self, filter: Dict = None, *, strict: bool = False) -> List[Dict]:
         query = {"is_active": True}
         if filter:
             query.update(filter)
-        return self.find_many(query, sort=[("brand", 1), ("store_name", 1)])
+        return self.find_many(query, sort=[("brand", 1), ("store_name", 1)], strict=strict)
     
     def has_category(self, store_id: str, category: str) -> bool:
         store = self.find_by_id(store_id)
