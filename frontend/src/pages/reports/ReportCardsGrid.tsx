@@ -192,6 +192,12 @@ export function ReportCardsGrid({ category }: { category: ReportSection }) {
   /** The table, or null after telling the user why there is nothing. */
   const readyTable = (reportId: string): Table | null => {
     const t = reportTable(reportId);
+    const q = { 'daily-sales': salesQ, 'monthly-sales': salesQ, 'stock-report': stockQ, 'customer-report': acqQ }[reportId];
+    if (!t && q?.isError) {
+      // A failed read is said as such, never exported as an empty report.
+      toast.error('Could not load this report. Please try again.');
+      return null;
+    }
     if (!t) {
       toast.error('Report data is still loading. Try again in a moment.');
       return null;

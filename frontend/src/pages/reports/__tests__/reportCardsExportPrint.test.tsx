@@ -11,7 +11,11 @@ import { fireEvent, render, screen, within } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 
-const { exportToCSV, toastError } = vi.hoisted(() => ({ exportToCSV: vi.fn(), toastError: vi.fn() }));
+const { exportToCSV, toastError, acq } = vi.hoisted(() => ({
+  exportToCSV: vi.fn(),
+  toastError: vi.fn(),
+  acq: { current: null as null | { data?: unknown; isError?: boolean } },
+}));
 
 vi.mock('../../../utils/exportUtils', () => ({ exportToCSV }));
 vi.mock('../../../context/ToastContext', () => ({
@@ -47,9 +51,10 @@ vi.mock('../reportsQueries', async (importOriginal) => ({
       summary: { total_items: 15, total_quantity: 47, total_value: 61100 },
     },
   }),
-  useCustomerAcquisition: () => ({
-    data: { new_customers: 21, returning_customers: 8, total_customers: 29, retention_percent: 27.6 },
-  }),
+  useCustomerAcquisition: () =>
+    acq.current ?? {
+      data: { new_customers: 21, returning_customers: 8, total_customers: 29, retention_percent: 27.6 },
+    },
 }));
 
 import { ReportCardsGrid } from '../ReportCardsGrid';
@@ -69,6 +74,17 @@ function renderSection(category: 'sales' | 'inventory' | 'customers' | 'gst') {
 beforeEach(() => {
   exportToCSV.mockClear();
   toastError.mockClear();
+  acq.current = null;
+});
+
+describe('A report whose read failed', () => {
+  it('says it could not load, and exports nothing (never an empty or zero report)', () => {
+    acq.current = { data: undefined, isError: true };
+    renderSection('customers');
+    fireEvent.click(card('Customer Report').getByRole('button', { name: 'Export CSV' }));
+    expect(exportToCSV).not.toHaveBeenCalled();
+    expect(toastError).toHaveBeenCalledWith('Could not load this report. Please try again.');
+  });
 });
 
 describe('Report card exports are the named report', () => {

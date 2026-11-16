@@ -75,4 +75,68 @@ describe('Customers list paging', () => {
     await waitFor(() => expect(getCustomers).toHaveBeenLastCalledWith(expect.objectContaining({ skip: 50, limit: 50 })));
     expect(await screen.findByRole('button', { name: /Audit Person 0050/ })).toBeInTheDocument();
   });
+
+  // Codex PR-1427 round 1 (P2) / D52: the B2B chip narrowed only the 50 rows
+  // on screen and showed that count as the total, so B2B customers beyond the
+  // first page were unreachable ("No customers yet", no next page).
+  it('B2B chip asks the server for B2B across all pages, from page 1, with the server total', async () => {
+    getCustomers.mockImplementation(async ({ skip = 0, limit = 50, customer_type }: { skip?: number; limit?: number; customer_type?: string }) => {
+      if (customer_type === 'B2B') {
+        const rows = Array.from({ length: limit }, (_, i) => ({ ...person(9000 + skip + i), name: `Firm ${String(skip + i).padStart(4, '0')}`, customer_type: 'B2B', customerType: 'B2B' }));
+        return { customers: rows, data: rows, pagination: { total: 120, page: skip / limit + 1, page_size: limit } };
+      }
+      const rows = Array.from({ length: limit }, (_, i) => person(skip + i));
+      return { customers: rows, data: rows, pagination: { total: 230, page: skip / limit + 1, page_size: limit } };
+    });
+    render(
+      <MemoryRouter>
+        <CustomersPage />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByRole('button', { name: /Audit Person 0000/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByText('page 2'));
+    expect(await screen.findByRole('button', { name: /Audit Person 0050/ })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'B2B' }));
+    await waitFor(() =>
+      expect(getCustomers).toHaveBeenLastCalledWith(expect.objectContaining({ customer_type: 'B2B', skip: 0, limit: 50 })),
+    );
+    expect(await screen.findByRole('button', { name: /Firm 0000/ })).toBeInTheDocument();
+    expect(screen.getByTestId('total').textContent).toBe('120');
+
+    fireEvent.click(screen.getByText('page 2'));
+    await waitFor(() =>
+      expect(getCustomers).toHaveBeenLastCalledWith(expect.objectContaining({ customer_type: 'B2B', skip: 50 })),
+    );
+    expect(await screen.findByRole('button', { name: /Firm 0050/ })).toBeInTheDocument();
+  });
+
+  it('an older page answer landing after the chip change never overwrites the B2B list', async () => {
+    let releaseAll: (() => void) | undefined;
+    getCustomers.mockImplementation(({ skip = 0, limit = 50, customer_type }: { skip?: number; limit?: number; customer_type?: string }) => {
+      if (customer_type === 'B2B') {
+        const rows = [{ ...person(9001), name: 'Firm Only', customer_type: 'B2B', customerType: 'B2B' }];
+        return Promise.resolve({ customers: rows, data: rows, pagination: { total: 1, page: 1, page_size: limit } });
+      }
+      const rows = Array.from({ length: limit }, (_, i) => person(skip + i));
+      const answer = { customers: rows, data: rows, pagination: { total: 230, page: skip / limit + 1, page_size: limit } };
+      if (skip === 50) return new Promise(res => { releaseAll = () => res(answer); });
+      return Promise.resolve(answer);
+    });
+    render(
+      <MemoryRouter>
+        <CustomersPage />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByRole('button', { name: /Audit Person 0000/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByText('page 2')); // held in flight
+    await waitFor(() => expect(releaseAll).toBeDefined());
+    fireEvent.click(screen.getByRole('button', { name: 'B2B' }));
+    expect(await screen.findByRole('button', { name: /Firm Only/ })).toBeInTheDocument();
+    releaseAll!();
+    await new Promise(r => setTimeout(r, 20));
+    expect(screen.getByRole('button', { name: /Firm Only/ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Audit Person 0050/ })).toBeNull();
+    expect(screen.getByTestId('total').textContent).toBe('1');
+  });
 });

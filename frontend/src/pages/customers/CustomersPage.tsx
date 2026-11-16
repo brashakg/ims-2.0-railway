@@ -156,36 +156,46 @@ export function CustomersPage() {
     OwnAccountConflict | HouseholdConflict | null
   >(null);
 
-  // Reset page when filters change
+  // Reset page when the search box changes (a type chip resets it in its
+  // own click, so the chip and the page change load ONCE, together).
   useEffect(() => {
     setCurrentPage(1);
-  }, [searchQuery, filterType]);
+  }, [searchQuery]);
 
-  // Load customers on mount and when page or SELECTED STORE changes.
-  // user?.activeStoreId is load-bearing — without it, topbar store switch
-  // updates AuthContext but the visible customer list stays pinned.
+  // Load customers on mount and when page, type chip or SELECTED STORE
+  // changes. user?.activeStoreId is load-bearing — without it, topbar store
+  // switch updates AuthContext but the visible customer list stays pinned.
   useEffect(() => {
     loadCustomers();
-  }, [currentPage, user?.activeStoreId]);
+  }, [currentPage, filterType, user?.activeStoreId]);
 
+  // Only the latest request may fill the list: an older page's answer that
+  // lands after a chip/page change must not overwrite it.
+  const loadSeq = useRef(0);
   const loadCustomers = async () => {
+    const seq = ++loadSeq.current;
     setIsLoading(true);
     setError(null);
     try {
+      // The type chip filters on the SERVER, across every page, and the
+      // total is the server's count of that filter (audit PR #1427, D52).
       const response = await customerApi.getCustomers({
         storeId: user?.activeStoreId,
         limit: pageSize,
         skip: (currentPage - 1) * pageSize,
+        ...(filterType !== 'ALL' ? { customer_type: filterType } : {}),
       });
+      if (seq !== loadSeq.current) return;
       const list = response.customers || response || [];
       setCustomers(list);
       setServerTotal(response.pagination?.total ?? list.length);
     } catch {
+      if (seq !== loadSeq.current) return;
       setError('Failed to load customers. Please try again.');
       setCustomers([]);
       setServerTotal(0);
     } finally {
-      setIsLoading(false);
+      if (seq === loadSeq.current) setIsLoading(false);
     }
   };
 
@@ -250,15 +260,13 @@ export function CustomersPage() {
       phone.includes(searchQuery) ||
       email.includes(q);
 
-    const matchesType = filterType === 'ALL' || customer.customerType === filterType;
-
-    return matchesSearch && matchesType;
+    return matchesSearch;
   });
 
-  // The page IS the server's page; the search box / type chips only narrow
-  // what is on it.
+  // The page IS the server's page (type chip applied by the server); only
+  // the search box narrows what is on it.
   const paginatedCustomers = filteredCustomers;
-  const narrowed = searchQuery !== '' || filterType !== 'ALL';
+  const narrowed = searchQuery !== '';
 
   const handleSelectCustomer = (customer: Customer) => {
     // API rows come back keyed by customer_id/_id, NOT `id`. Using the raw
@@ -523,7 +531,10 @@ export function CustomersPage() {
               {(['ALL', 'B2C', 'B2B'] as const).map(type => (
                 <button
                   key={type}
-                  onClick={() => setFilterType(type)}
+                  onClick={() => {
+                    setFilterType(type);
+                    setCurrentPage(1);
+                  }}
                   className={clsx(
                     'px-4 py-2 rounded-lg text-sm font-medium transition-colors',
                     filterType === type
@@ -560,8 +571,14 @@ export function CustomersPage() {
           ) : filteredCustomers.length === 0 ? (
             <div className="text-center py-12 text-gray-500">
               <Users className="w-12 h-12 mx-auto mb-2 opacity-50" />
-              <p>{searchQuery ? 'No customers found matching your search' : 'No customers yet'}</p>
-              {canAddCustomer && !searchQuery && (
+              <p>
+                {searchQuery
+                  ? 'No customers found matching your search'
+                  : filterType !== 'ALL'
+                    ? `No ${filterType} customers`
+                    : 'No customers yet'}
+              </p>
+              {canAddCustomer && !searchQuery && filterType === 'ALL' && (
                 <button
                   onClick={() => setShowAddCustomerModal(true)}
                   className="mt-4 text-bv-red-600 hover:text-bv-red-700"
