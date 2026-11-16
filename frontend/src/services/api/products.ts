@@ -420,7 +420,8 @@ export const catalogApi = {
       online_variants?: number;
       published_products?: number;
       draft_products?: number;
-      catalog?: CatalogCounts;
+      /** null: the server could not read the tally (show no figures). */
+      catalog?: CatalogCounts | null;
     };
   },
 };

@@ -363,9 +363,28 @@ def test_online_summary_carries_the_catalog_block():
     assert out["catalog"] == catalog_counts(db)
 
 
-def test_catalog_counts_are_zero_without_a_catalog():
-    assert catalog_counts(None)["in_catalog"] == 0
+def test_catalog_counts_are_zero_for_an_empty_catalog_and_unknown_without_a_db():
     assert catalog_counts(StrictDB())["pending"] == 0
+    # No database at all is not an empty catalogue: no figure, not zero.
+    assert catalog_counts(None) is None
+
+
+def test_a_failed_catalog_read_is_unknown_never_zero():
+    """UI-03 / Codex PR-1435 round 1: a read failure on catalog_products made
+    the counts row say IN CATALOG 0 (HTTP 200). It must come back as no
+    figure, so the screen shows its could-not-load notice and Retry."""
+    db = _seed_counts_db()
+    real = db["catalog_products"].find
+
+    def boom(*a, **k):
+        raise RuntimeError("injected read failure")
+
+    db["catalog_products"].find = boom
+    assert catalog_counts(db) is None
+    out = online_summary(db)
+    assert out["catalog"] is None
+    db["catalog_products"].find = real
+    assert online_summary(db)["catalog"]["in_catalog"] == 4
 
 
 def test_pending_drops_when_the_shopify_writeback_clears_the_flag_and_never_rises():

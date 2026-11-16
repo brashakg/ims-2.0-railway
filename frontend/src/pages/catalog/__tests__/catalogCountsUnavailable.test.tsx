@@ -97,6 +97,15 @@ describe('catalogue figure cards say when they could not be read (UI-03)', () =>
     expect(await screen.findByTestId('catalog-counts-unavailable')).toHaveTextContent('could not be loaded');
   });
 
+  it('the catalogue reads fine but its count tally failed (catalog: null): the notice, never zeros', async () => {
+    // Codex PR-1435 round 1: a native catalog_products read failure used to
+    // come back as reachable + all-zero figures. The server now sends null.
+    getOnlineSummary.mockResolvedValue({ configured: false, reachable: true, catalog: null });
+    renderPage();
+    expect(await screen.findByTestId('catalog-counts-unavailable')).toHaveTextContent('could not be loaded');
+    expect(within(screen.getByTestId('catalog-counts')).queryByText('0')).toBeNull();
+  });
+
   it('positive control: figures read fine -> no notice', async () => {
     getOnlineSummary.mockResolvedValue({ configured: true, reachable: true, catalog: COUNTS });
     renderPage();
