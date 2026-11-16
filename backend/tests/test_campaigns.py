@@ -27,7 +27,7 @@ import os
 import sys
 import copy
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -386,7 +386,7 @@ def test_schedule_sets_scheduled(monkeypatch):
     cid = client.post("/api/v1/marketing/campaigns", json=_create_payload(), headers=_hdr()).json()["campaign"]["campaign_id"]
     r = client.post(
         f"/api/v1/marketing/campaigns/{cid}/schedule",
-        json={"kind": "ONE_TIME", "send_at": (datetime.now() + timedelta(days=1)).isoformat()},
+        json={"kind": "ONE_TIME", "send_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()},
         headers=_hdr(),
     )
     assert r.status_code == 200, r.text
@@ -407,7 +407,7 @@ def test_pause_resume_cycle(monkeypatch):
     cid = client.post("/api/v1/marketing/campaigns", json=_create_payload(), headers=_hdr()).json()["campaign"]["campaign_id"]
     rs = client.post(
         f"/api/v1/marketing/campaigns/{cid}/schedule",
-        json={"kind": "ONE_TIME", "send_at": (datetime.now() + timedelta(days=1)).isoformat()},
+        json={"kind": "ONE_TIME", "send_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()},
         headers=_hdr(),
     )
     assert rs.status_code == 200, rs.text
@@ -590,7 +590,7 @@ def test_one_time_schedule_still_works_at_every_door(monkeypatch):
     """The supported kind is untouched: create with it, edit it, schedule it."""
     db = _FakeDB({"campaigns": _FakeColl()})
     client = _mk_client(db, monkeypatch=monkeypatch)
-    when = (datetime.now() + timedelta(days=1)).isoformat()
+    when = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
     one_time = {"kind": "ONE_TIME", "send_at": when}
 
     r = client.post("/api/v1/marketing/campaigns", json=_create_payload(schedule=one_time), headers=_hdr())
@@ -699,3 +699,24 @@ def test_store_manager_blocked_other_store(monkeypatch):
         headers=h,
     )
     assert r.status_code == 403, r.text
+
+
+def test_schedule_send_at_is_stored_in_utc_and_a_naive_time_is_refused(monkeypatch):
+    """A '+05:30' send_at is stored as the same instant in UTC (the tick
+    compares instants); a time with no zone is refused, never guessed."""
+    db = _FakeDB({"campaigns": _FakeColl()})
+    client = _mk_client(db, monkeypatch=monkeypatch)
+    cid = client.post("/api/v1/marketing/campaigns", json=_create_payload(), headers=_hdr()).json()["campaign"]["campaign_id"]
+    r = client.post(
+        f"/api/v1/marketing/campaigns/{cid}/schedule",
+        json={"kind": "ONE_TIME", "send_at": "2030-11-20T10:00:00+05:30"},
+        headers=_hdr(),
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["campaign"]["schedule"]["send_at"] == "2030-11-20T04:30:00+00:00"
+    r = client.post(
+        f"/api/v1/marketing/campaigns/{cid}/schedule",
+        json={"kind": "ONE_TIME", "send_at": "2030-11-20T10:00:00"},
+        headers=_hdr(),
+    )
+    assert r.status_code == 422, r.text

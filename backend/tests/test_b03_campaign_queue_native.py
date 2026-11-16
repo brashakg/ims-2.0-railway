@@ -358,6 +358,27 @@ def test_dedupe_read_failure_is_a_failed_recipient_not_a_new_message(db, monkeyp
     assert _rows(db) == [] and _caps(db) == []
 
 
+def test_a_stored_ist_offset_send_at_fires_when_due_not_hours_late(db, provider):
+    """Hunt (IST vs UTC): a send_at stored as '+05:30' text was compared with a
+    UTC 'now' string, so a campaign due 10 minutes ago waited 5.5 hours."""
+    from datetime import timedelta, timezone
+
+    doc = _campaign(db)
+    ist = timezone(timedelta(hours=5, minutes=30))
+    due = (datetime.now(timezone.utc) - timedelta(minutes=10)).astimezone(ist).isoformat()
+    db.campaigns.update_one({"campaign_id": doc["campaign_id"]}, {"$set": {"schedule.send_at": due}})
+    assert _tick(db) == 1
+    assert db.campaigns.find_one({"campaign_id": CAMP})["status"] == "COMPLETED"
+    assert len(_rows(db)) == 1
+
+
+def test_a_send_at_without_a_zone_is_never_fired(db):
+    doc = _campaign(db)
+    db.campaigns.update_one({"campaign_id": doc["campaign_id"]}, {"$set": {"schedule.send_at": "2020-01-01T10:00:00"}})
+    assert _tick(db) == 0
+    assert db.campaigns.find_one({"campaign_id": CAMP})["status"] == "SCHEDULED" and _rows(db) == []
+
+
 # --------------------------------------------------------------------------
 # P2-durability: a row that did not reach storage is never "queued"
 # --------------------------------------------------------------------------
