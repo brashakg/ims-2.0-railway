@@ -203,6 +203,11 @@ def rx_binocular_pd(rx: Any) -> Any:
     )
 
 
+# What every print door shows when no issue date was recorded (never the row's
+# created_at: that is when the record was written, not a clinical date).
+RX_DATE_NOT_RECORDED = "Not recorded"
+
+
 def rx_issue_date_value(rx: Any) -> Any:
     """The recorded issue date of an Rx (raw stored value), else None.
 

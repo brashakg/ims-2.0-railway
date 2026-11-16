@@ -13,7 +13,7 @@ from typing import Optional
 from typing_extensions import Literal
 from datetime import date, datetime, timedelta
 
-from ..utils.ist import now_ist_naive
+from ..utils.ist import IST, now_ist_naive
 import uuid
 
 from .auth import get_current_user
@@ -22,6 +22,7 @@ from ..services.rx_print_values import (
     is_absent_rx_value,
     rx_axis_or,
     rx_binocular_pd,
+    RX_DATE_NOT_RECORDED,
     rx_date_ymd,
     rx_issue_date_value,
     rx_power_or,
@@ -1117,6 +1118,22 @@ def _rx_validity(rx: dict):
         raw = rx.get("created_at") or rx.get("createdAt")
         from_stored_instant = True
     td = _parse_dt(raw)
+    # L2-CLIN-F02 round 1: a date stored WITH an offset (the clinical exam's
+    # test_date '...+00:00' without a fraction, or an aware created_at) parsed
+    # to an AWARE datetime, and comparing it with the naive IST clock below
+    # raised TypeError -- one such row 500'd the whole family history. An
+    # offset-bearing value is an instant: move it onto the IST wall clock.
+    # (_parse_dt drops the offset of a fractional-second string; re-read it.)
+    if isinstance(raw, str):
+        try:
+            aware = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+            if aware.tzinfo is not None:
+                td = aware
+        except ValueError:
+            pass
+    if td is not None and td.tzinfo is not None:
+        td = td.astimezone(IST).replace(tzinfo=None)
+        from_stored_instant = False  # already on the IST wall clock
     months = rx.get("validity_months") or rx.get("validityMonths") or 12
     try:
         months = int(months)
@@ -1152,17 +1169,14 @@ async def family_prescriptions(
     under an 'Unlinked patient' group (legacy/imported data)."""
     repo = get_prescription_repository()
     customer_repo = get_customer_repository()
-    if repo is None:
-        return {
-            "customer_id": customer_id,
-            "members": [],
-            "member_count": 0,
-            "total_prescriptions": 0,
-        }
+    # A missing store is not "this family has no prescriptions" (nor "no such
+    # customer"): 503, never a false empty history or a false 404.
+    if repo is None or customer_repo is None:
+        raise HTTPException(
+            status_code=503, detail="Prescription history is temporarily unavailable"
+        )
 
-    customer = (
-        customer_repo.find_by_id(customer_id) if customer_repo is not None else None
-    )
+    customer = customer_repo.find_by_id(customer_id)
     if customer is None:
         raise HTTPException(status_code=404, detail="Customer not found")
     # BUG-062 tail: the Rx below are store-filtered, but the customer ROSTER
@@ -1888,7 +1902,7 @@ def _rx_card_date(prescription: dict) -> str:
     """The recorded issue date (shared rule: prescription_date, else the
     clinical exam's test_date), YYYY-MM-DD. A clinical exam Rx carries only
     test_date, so reading prescription_date alone printed a blank date."""
-    return rx_date_ymd(rx_issue_date_value(prescription))
+    return rx_date_ymd(rx_issue_date_value(prescription)) or RX_DATE_NOT_RECORDED
 
 
 def _patient_line_html(patient: Optional[dict]) -> str:

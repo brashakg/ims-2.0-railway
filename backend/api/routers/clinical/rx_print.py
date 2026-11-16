@@ -24,6 +24,7 @@ from ...services.rx_print_values import (
     format_axis_value,
     format_rx_value,
     rx_binocular_pd,
+    RX_DATE_NOT_RECORDED,
     rx_date_ymd,
     rx_issue_date_value,
     rx_text_or,
@@ -56,22 +57,18 @@ def _eye_block(rx: dict, key: str) -> dict:
 
 
 def _rx_date(rx: dict) -> str:
-    """Best-effort human date for the Rx (prescription_date / test_date / created_at).
+    """The recorded issue date printed on the Rx card, as its IST calendar day.
 
-    BUG-104, VALUE rule, on the legacy created_at fallback leg: this date is
-    PRINTED on the patient's Rx card. prescription_date / test_date are IST
-    business-date strings (frame-less -- their parse lands on midnight, which
-    the +5:30 shift leaves on the same day). created_at is a stored instant
-    on the UTC wall clock (BSON datetime, or an aware 'Z' string on imported
-    rows), so formatting it raw printed YESTERDAY's date on a card for an eye
-    test recorded 00:00-05:30 IST. ist_date_str shifts datetimes to the IST
-    calendar day; a NAIVE ISO string still passes through unshifted by
-    documented design (no reliable frame), matching the old behaviour.
+    The SHARED rule (services.rx_print_values): prescription_date, else the
+    exam's test_date, shifted onto the IST day when stored as an instant
+    (BUG-104). L2-CLIN-F02 round 1: this door used to fall back to created_at
+    -- when the ROW was written, not a date a clinician recorded -- so an
+    undated legacy Rx printed '01 Nov 2026' here while the canonical print and
+    the portal showed no date. Unknown stays unknown, on every door.
     """
-    raw = rx_issue_date_value(rx)
-    if raw is None:
-        raw = rx.get("created_at")
-    ymd = rx_date_ymd(raw)
+    ymd = rx_date_ymd(rx_issue_date_value(rx))
+    if not ymd:
+        return RX_DATE_NOT_RECORDED
     try:
         return datetime.strptime(ymd, "%Y-%m-%d").strftime("%d %b %Y")
     except ValueError:

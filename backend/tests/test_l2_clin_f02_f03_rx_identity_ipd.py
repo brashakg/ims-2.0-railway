@@ -187,7 +187,7 @@ def test_canonical_print_escapes_the_patient_name(monkeypatch):
 # ---------------------------------------------------------------- F03 portal
 def test_portal_projection_carries_the_exam_issue_date_and_ipd():
     view = portal._safe_prescription_view(_exam_rx())
-    assert view["prescription_date"] == "2026-11-12T05:00:00Z"
+    assert view["prescription_date"] == "2026-11-12"  # its IST calendar day
     assert view["pd"] == "63.5"
 
 
@@ -195,7 +195,7 @@ def test_portal_projection_carries_the_exam_issue_date_and_ipd():
     "stored, expected",
     [
         ({"prescription_date": "2026-01-02", "test_date": "2026-01-02"}, "2026-01-02"),
-        ({"test_date": "2026-03-04T00:00:00"}, "2026-03-04T00:00:00"),
+        ({"test_date": "2026-03-04T00:00:00"}, "2026-03-04"),
         ({"created_at": "2026-05-06T00:00:00"}, None),  # not a recorded issue date
     ],
 )
@@ -222,3 +222,119 @@ def test_canonical_print_date_is_the_ist_day_of_the_exam(monkeypatch):
     a [:10] slice printed the UTC (previous) day (BUG-104 rule)."""
     html = _canonical_html(_client(monkeypatch, _exam_rx(test_date="2026-11-11T20:30:00+00:00")))
     assert "Date: 2026-11-12" in html
+
+
+# ======================================================= Codex PR-1430 round 1
+# (1) portal issued date must not move with the viewer's timezone: the server
+#     sends the IST calendar day, never the raw stored instant.
+def test_portal_issue_date_is_the_ist_day_not_the_raw_instant():
+    view = portal._safe_prescription_view(_exam_rx(test_date="2026-11-13T20:30:00+00:00"))
+    assert view["prescription_date"] == "2026-11-14"
+
+
+# (2) an undated legacy Rx: both print doors say "Not recorded"; created_at (when
+#     the row was written) is never printed as the issue date.
+UNDATED = {"test_date": None, "created_at": "2026-11-01T08:00:00+00:00"}
+
+
+def test_undated_rx_clinical_print_never_prints_created_at(monkeypatch):
+    html = _clinical_html(_client(monkeypatch, _exam_rx(**UNDATED)))
+    assert "<b>Date:</b> Not recorded" in html
+    assert "01 Nov 2026" not in html
+
+
+def test_undated_rx_canonical_print_agrees(monkeypatch):
+    html = _canonical_html(_client(monkeypatch, _exam_rx(**UNDATED)))
+    assert "Date: Not recorded" in html
+
+
+# (3) an offset-aware stored date 500'd the WHOLE family history (naive IST now
+#     compared with an aware expiry).
+AWARE_ROWS = [
+    _exam_rx(prescription_id="rx-mid", test_date="2026-11-13T20:30:00+00:00"),
+    _exam_rx(prescription_id="rx-undated", patient_id="p-ravi", test_date=None,
+             created_at="2026-11-01T08:00:00+00:00"),
+    _exam_rx(prescription_id="rx-frac", test_date="2026-11-14T05:30:35.811187+00:00"),
+]
+
+
+@pytest.mark.parametrize("rx", AWARE_ROWS, ids=lambda r: r["prescription_id"])
+def test_rx_validity_handles_an_offset_aware_date_on_the_ist_clock(rx):
+    from datetime import datetime
+
+    expiry, valid = prescriptions._rx_validity(rx)
+    assert expiry.tzinfo is None
+    want = {
+        "rx-mid": datetime(2027, 11, 14, 2, 0),  # 20:30 UTC = 02:00 IST next day
+        "rx-undated": datetime(2027, 11, 1, 13, 30),
+        "rx-frac": datetime(2027, 11, 14, 11, 0, 35, 811187),
+    }[rx["prescription_id"]]
+    assert expiry == want
+    assert isinstance(valid, bool)
+
+
+class _FamRxRepo:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def find_by_customer(self, cid):
+        return [dict(r) for r in self._rows if r.get("customer_id") == cid]
+
+
+def _family_client(monkeypatch, rx_repo, cust_repo):
+    monkeypatch.setattr(prescriptions, "get_prescription_repository", lambda: rx_repo)
+    monkeypatch.setattr(prescriptions, "get_customer_repository", lambda: cust_repo)
+    return _client(monkeypatch, _exam_rx())
+
+
+def test_family_history_survives_offset_aware_dates(monkeypatch):
+    for r in AWARE_ROWS:
+        r["store_id"] = STORE
+    c = _family_client(monkeypatch, _FamRxRepo(AWARE_ROWS), _Repo(ACCOUNT, key="customer_id"))
+    monkeypatch.setattr(prescriptions, "get_prescription_repository", lambda: _FamRxRepo(AWARE_ROWS))
+    r = c.get("/prescriptions/family/cust-1")
+    assert r.status_code == 200, r.text
+    ids = {p["prescription_id"] for m in r.json()["members"] for p in m["prescriptions"]}
+    assert ids == {"rx-mid", "rx-undated", "rx-frac"}
+
+
+def test_family_history_missing_store_is_503_not_an_empty_history(monkeypatch):
+    c = _family_client(monkeypatch, None, _Repo(ACCOUNT, key="customer_id"))
+    monkeypatch.setattr(prescriptions, "get_prescription_repository", lambda: None)
+    assert c.get("/prescriptions/family/cust-1").status_code == 503
+    monkeypatch.setattr(prescriptions, "get_prescription_repository", lambda: _FamRxRepo([]))
+    monkeypatch.setattr(prescriptions, "get_customer_repository", lambda: None)
+    assert c.get("/prescriptions/family/cust-1").status_code == 503
+
+
+# (4) D71: every portal card names the family member examined.
+def _portal_get(monkeypatch, rows, cust_repo):
+    monkeypatch.setattr(deps, "get_prescription_repository", lambda: _FamRxRepo(rows) if rows is not None else None)
+    monkeypatch.setattr(deps, "get_customer_repository", lambda: cust_repo)
+    app = FastAPI()
+    app.include_router(portal.router, prefix="/portal")
+    tok = portal._issue_view_token("cust-1")
+    return TestClient(app).get("/portal/rx", headers={"Authorization": "Bearer " + tok})
+
+
+def test_portal_labels_every_member(monkeypatch):
+    rows = [
+        _exam_rx(prescription_id="rx-a"),  # dependent
+        _exam_rx(prescription_id="rx-h", patient_id="p-ravi"),  # holder
+        _exam_rx(prescription_id="rx-x", patient_id="p-nobody"),  # unknown member
+    ]
+    r = _portal_get(monkeypatch, rows, _Repo(ACCOUNT, key="customer_id"))
+    assert r.status_code == 200, r.text
+    names = {p["prescription_id"]: p["patient_name"] for p in r.json()["prescriptions"]}
+    assert names == {"rx-a": "Asha Daughter", "rx-h": "Ravi Holder", "rx-x": None}
+
+
+class _Boom:
+    def find_by_id(self, _id):
+        raise RuntimeError("mongo down")
+
+
+def test_portal_read_failures_are_503_never_a_false_empty_or_unnamed_list(monkeypatch):
+    assert _portal_get(monkeypatch, None, _Repo(ACCOUNT, key="customer_id")).status_code == 503
+    assert _portal_get(monkeypatch, [_exam_rx()], _Boom()).status_code == 503
+    assert _portal_get(monkeypatch, [_exam_rx()], None).status_code == 503
