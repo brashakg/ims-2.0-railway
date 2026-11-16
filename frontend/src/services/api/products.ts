@@ -806,6 +806,14 @@ export interface BulkScope {
   brand?: string;
   store_id?: string;
   limit?: number;
+  // L1-F47: an Apply names every previewed row and the prices it showed.
+  expected?: BulkReviewedRow[];
+}
+
+export interface BulkReviewedRow {
+  product_id: string;
+  mrp: number;
+  offer_price: number;
 }
 
 export interface BulkRowResult {
@@ -828,6 +836,8 @@ export interface BulkRowResult {
   message: string | null;
   changed: boolean;
   applied?: boolean;
+  // An earlier Apply of the same preview already saved this row.
+  already_applied?: boolean;
   // Applied rows only: false = billing price saved, website copy not updated.
   website_synced?: boolean;
 }
@@ -839,7 +849,7 @@ export interface BulkSummary {
   brand?: string | null;
   reason?: string | null;
   applied: boolean;
-  counts: { total: number; valid: number; violations: number; unchanged: number };
+  counts: { total: number; valid: number; violations: number; unchanged: number; already_applied?: number };
   committed: number;
   website_failed?: number;
   [k: string]: unknown;

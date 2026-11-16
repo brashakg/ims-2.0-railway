@@ -18,6 +18,7 @@ import {
   pricingApi,
   productApi,
   type BulkResponse,
+  type BulkReviewedRow,
   type BulkRowResult,
 } from '../../services/api/products';
 import { storeApi } from '../../services/api/stores';
@@ -236,18 +237,25 @@ function PreviewTable({ rows, kind }: { rows: BulkRowResult[]; kind: 'price' | '
 // NEW scope against the OLD preview's count. Now the shown preview carries the
 // exact inputs it was made for (`key`); Apply is allowed only while the current
 // inputs still equal them, and a late answer for older inputs is dropped.
-// ponytail: the server re-selects rows at apply time, so a product edited
-// between preview and apply can still differ; bind a server version if needed.
+// The Apply also sends the reviewed rows and their prices, so the server
+// refuses (409) a scope that grew or a price that moved since the preview, and
+// never moves a row twice. An Apply that FAILED may still have saved (a lost
+// reply), so its preview is held: Apply stays off until a fresh Preview shows
+// the prices as they are now.
+const reviewedRowsOf = (rows: BulkRowResult[]): BulkReviewedRow[] =>
+  rows.map((r) => ({ product_id: r.product_id, mrp: r.old_mrp ?? r.mrp ?? 0, offer_price: r.old_offer_price }));
+
 function useReviewedBulk(
   inputKey: string,
-  call: (apply: boolean) => Promise<BulkResponse>,
+  call: (apply: boolean, reviewed?: BulkReviewedRow[]) => Promise<BulkResponse>,
   onApplied: (res: BulkResponse) => void,
 ) {
-  const [shown, setShown] = useState<{ key: string; res: BulkResponse; applied: boolean } | null>(null);
+  const [shown, setShown] = useState<{ key: string; res: BulkResponse; applied: boolean; uncertain?: boolean } | null>(null);
   const [busy, setBusy] = useState(false);
   const latest = useRef(0);
   const inFlight = useRef(0);
   const result = shown && shown.key === inputKey ? shown.res : null;
+  const uncertain = !!(result && shown?.uncertain);
   // After an apply the shown table is the RESULT, not a preview: a second
   // Apply needs a fresh Preview (no double +10 from a stray second click).
   const canApply = !!result && !shown?.applied && result.summary.counts.valid > 0 && !busy;
@@ -259,18 +267,30 @@ function useReviewedBulk(
     inFlight.current += 1;
     setBusy(true);
     try {
-      const res = await call(apply);
+      const res = await call(apply, apply && result ? reviewedRowsOf(result.rows) : undefined);
       if (apply) onApplied(res);
       if (seq === latest.current) setShown({ key, res, applied: apply });
     } catch (e) {
+      // Saved or not is unknown: hold this preview until a fresh one.
+      if (apply) setShown((s) => (s && s.key === key ? { ...s, applied: true, uncertain: true } : s));
       if (apply || seq === latest.current) fail(e);
     } finally {
       inFlight.current -= 1;
       if (inFlight.current === 0) setBusy(false);
     }
-  }, [inputKey, call, onApplied, canApply]);
+  }, [inputKey, call, onApplied, canApply, result]);
 
-  return { result, busy, canApply, run };
+  return { result, busy, canApply, uncertain, run };
+}
+
+function UncertainApplyNote({ show }: { show: boolean }) {
+  if (!show) return null;
+  return (
+    <div role="alert" className="mb-3 flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-[12.5px] text-amber-800">
+      <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+      <span>The last Apply did not confirm, so it may already have saved. Press Preview to see the prices as they are now before applying again.</span>
+    </div>
+  );
 }
 
 // ----------------------------------------------------------------------------
@@ -285,7 +305,7 @@ function BulkPriceTab({ categories, brands, stores }: { categories: string[]; br
   const [target, setTarget] = useState<'OFFER' | 'MRP' | 'BOTH'>('OFFER');
   const [amount, setAmount] = useState<number>(-5);
   const inputKey = JSON.stringify([scope, mode, target, amount]);
-  const call = useCallback((apply: boolean) => pricingApi.bulkPrice({
+  const call = useCallback((apply: boolean, expected?: BulkReviewedRow[]) => pricingApi.bulkPrice({
     category: scope.category || undefined,
     brand: scope.brand || undefined,
     store_id: scope.storeId || undefined,
@@ -294,15 +314,17 @@ function BulkPriceTab({ categories, brands, stores }: { categories: string[]; br
     amount,
     apply,
     reason: apply ? `Bulk price ${mode} ${amount} to ${target} by ${user?.name || 'user'}` : undefined,
+    expected,
   }), [scope, mode, target, amount, user]);
   const onApplied = useCallback((res: BulkResponse) => {
     toast.success(`Applied ${res.summary.committed} price change${res.summary.committed === 1 ? '' : 's'}` +
-      (res.summary.counts.violations ? ` · ${res.summary.counts.violations} skipped (cap)` : ''));
+      (res.summary.counts.violations ? ` · ${res.summary.counts.violations} skipped (cap)` : '') +
+      (res.summary.counts.already_applied ? ` · ${res.summary.counts.already_applied} already saved by an earlier Apply` : ''));
     if (res.summary.website_failed) {
       toast.warning(`${res.summary.website_failed} saved for billing but not on the website yet: save those products again`);
     }
   }, [toast]);
-  const { result, busy, canApply, run: gateRun } = useReviewedBulk(inputKey, call, onApplied);
+  const { result, busy, canApply, uncertain, run: gateRun } = useReviewedBulk(inputKey, call, onApplied);
   const validCount = result?.summary.counts.valid ?? 0;
   const run = useCallback((apply: boolean) => gateRun(apply, (e) =>
     toast.error(e instanceof Error ? e.message : 'Bulk price operation failed')), [gateRun, toast]);
@@ -323,6 +345,7 @@ function BulkPriceTab({ categories, brands, stores }: { categories: string[]; br
 
   return (
     <>
+      <UncertainApplyNote show={uncertain} />
       <StatStrip result={result} />
 
       {/* Dark bulk-action bar (high contrast on purpose — destructive operation) */}
@@ -385,7 +408,7 @@ function BulkOfferTab({ categories, brands, stores }: { categories: string[]; br
   const [discountPct, setDiscountPct] = useState<number>(10);
   const [flatPrice, setFlatPrice] = useState<number>(0);
   const inputKey = JSON.stringify([scope, action, valueMode, discountPct, flatPrice]);
-  const call = useCallback((apply: boolean) => pricingApi.bulkOffer({
+  const call = useCallback((apply: boolean, expected?: BulkReviewedRow[]) => pricingApi.bulkOffer({
     category: scope.category || undefined,
     brand: scope.brand || undefined,
     store_id: scope.storeId || undefined,
@@ -394,15 +417,17 @@ function BulkOfferTab({ categories, brands, stores }: { categories: string[]; br
     offer_price: action === 'SET' && valueMode === 'FLAT' ? flatPrice : undefined,
     apply,
     reason: apply ? `Bulk offer ${action} by ${user?.name || 'user'}` : undefined,
+    expected,
   }), [scope, action, valueMode, discountPct, flatPrice, user]);
   const onApplied = useCallback((res: BulkResponse) => {
     toast.success(`Applied ${res.summary.committed} offer change${res.summary.committed === 1 ? '' : 's'}` +
-      (res.summary.counts.violations ? ` · ${res.summary.counts.violations} skipped (cap)` : ''));
+      (res.summary.counts.violations ? ` · ${res.summary.counts.violations} skipped (cap)` : '') +
+      (res.summary.counts.already_applied ? ` · ${res.summary.counts.already_applied} already saved by an earlier Apply` : ''));
     if (res.summary.website_failed) {
       toast.warning(`${res.summary.website_failed} saved for billing but not on the website yet: save those products again`);
     }
   }, [toast]);
-  const { result, busy, canApply, run: gateRun } = useReviewedBulk(inputKey, call, onApplied);
+  const { result, busy, canApply, uncertain, run: gateRun } = useReviewedBulk(inputKey, call, onApplied);
   const validCount = result?.summary.counts.valid ?? 0;
   const run = useCallback((apply: boolean) => gateRun(apply, (e) =>
     toast.error(e instanceof Error ? e.message : 'Bulk offer operation failed')), [gateRun, toast]);
@@ -420,6 +445,7 @@ function BulkOfferTab({ categories, brands, stores }: { categories: string[]; br
 
   return (
     <>
+      <UncertainApplyNote show={uncertain} />
       <StatStrip result={result} />
 
       {/* Offer builder card */}

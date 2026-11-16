@@ -31,12 +31,12 @@ const resp = (valid: number) => ({
 });
 
 type Call = { brand?: string; apply: boolean };
-const pending: Array<{ args: Call; resolve: (v: unknown) => void }> = [];
+const pending: Array<{ args: Call; resolve: (v: unknown) => void; reject: (e: unknown) => void }> = [];
 
 beforeEach(() => {
   vi.clearAllMocks();
   pending.length = 0;
-  const impl = (args: Call) => new Promise((resolve) => pending.push({ args, resolve }));
+  const impl = (args: Call) => new Promise((resolve, reject) => pending.push({ args, resolve, reject }));
   bulkPrice.mockImplementation(impl);
   bulkOffer.mockImplementation(impl);
 });
@@ -86,5 +86,53 @@ describe.each([
     await waitFor(() => expect(fn.mock.calls.some((c) => (c[0] as Call).apply)).toBe(true));
     const applied = fn.mock.calls.find((c) => (c[0] as Call).apply)![0] as Call;
     expect(applied.brand).toBe('BRAND B');
+  });
+});
+
+// Codex PR-1429 round 1: the Apply landed but its reply was lost; the same
+// "Apply 1 valid row" stayed enabled and a second click moved 1010 -> 1020.
+// The Apply now names the reviewed rows (the server refuses or reconciles a
+// replay), and a failed Apply holds its preview until a fresh Preview.
+describe.each([
+  ['price', 'Bulk price update', bulkPrice, { old_mrp: 1000 }],
+  ['offer', 'Bulk offer update', bulkOffer, { mrp: 1000 }],
+])('%s tab: lost acknowledgement', (_k, tabLabel, fn, mrpField) => {
+  const row = { product_id: 'P-1', sku: 'S-1', old_offer_price: 1000, new_offer_price: 1010, ok: true, changed: true, ...mrpField };
+  const withRow = { rows: [row], summary: { counts: { valid: 1, violations: 0, total: 1, unchanged: 0 }, committed: 0 } };
+
+  it('sends the reviewed rows, and a failed Apply cannot be clicked again until a fresh preview', async () => {
+    render(<PricingOffersPage />);
+    fireEvent.click(await screen.findByRole('button', { name: tabLabel }));
+    fireEvent.change(brandSelect(), { target: { value: 'BRAND A' } });
+    await waitFor(() => expect(asked('BRAND A')).toBe(true), { timeout: 2000 });
+    await act(async () => {
+      pending.filter((p) => !p.args.apply).forEach((p) => p.resolve(withRow));
+    });
+    const apply = await screen.findByRole('button', { name: 'Apply 1 valid row' });
+    fireEvent.click(apply);
+    await waitFor(() => expect(pending.some((p) => p.args.apply)).toBe(true));
+    const sent = pending.find((p) => p.args.apply)!;
+    expect((sent.args as unknown as { expected: unknown }).expected).toEqual([
+      { product_id: 'P-1', mrp: 1000, offer_price: 1000 },
+    ]);
+    // The write landed, the reply did not.
+    await act(async () => {
+      sent.reject(new Error('Network Error'));
+    });
+    await screen.findByRole('alert');
+    const held = screen.getByRole('button', { name: /^Apply/ });
+    expect(held).toBeDisabled();
+    fireEvent.click(held);
+    expect(pending.filter((p) => p.args.apply)).toHaveLength(1);
+
+    // A fresh preview shows today's prices and is a new review.
+    fireEvent.click(screen.getByRole('button', { name: /Preview/ }));
+    await waitFor(() => expect(pending.filter((p) => !p.args.apply).length).toBeGreaterThan(1));
+    await act(async () => {
+      pending.filter((p) => !p.args.apply).forEach((p) => p.resolve(withRow));
+    });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Apply 1 valid row' })).toBeEnabled());
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(fn).toHaveBeenCalled();
   });
 });
