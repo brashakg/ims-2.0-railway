@@ -242,6 +242,101 @@ def test_nothing_paid_before_the_press_numbers_its_note_leaves_the_press_nothing
     assert len(released) == 1 and written_off == ["TST01/C2627/0002"]
 
 
+def _all_points(monkeypatch):
+    """The whole return was paid in points (pays 0): its credit line moves no
+    balance -- the credit note reverses the tax, the points go back."""
+    monkeypatch.setattr(returns_router, "_points_paid_share", lambda order, oid, net, **k: round(float(net), 2))
+
+
+def test_a_points_paid_credit_note_taken_over_during_the_press_issues_nothing(till, monkeypatch, tasks):
+    """Review of b1341e22: a line that moves no balance was a plain insert (a
+    fresh ObjectId), so the FENCED row on '<rid>:credit' never met it -- the
+    press filed a credit note (tax reversed) beside the NOTHING_PAID record."""
+    payload = _credit_note_return(till, monkeypatch)
+    _all_points(monkeypatch)
+    released, written_off = _counted(monkeypatch)
+    real, out = returns_router._issue_store_credit, {}
+
+    def stalled(*a, **k):
+        if "takeover" not in out:
+            _takeover_now(till, out)
+        return real(*a, **k)
+
+    monkeypatch.setattr(returns_router, "_issue_store_credit", stalled)
+    r = _advance_client().post("/api/v1/returns", json=payload, headers=_hdr("STORE_MANAGER"))
+    assert isinstance(out["takeover"], dict) and out["takeover"]["status"] == "NOTHING_PAID", out
+    assert r.status_code == 409 and "NOTHING was issued" in r.text, r.text
+    assert [x.get("type") for x in _ledger(till).docs] == [scl.FENCED], _ledger(till).docs
+    assert _docs(till) == ["NOTHING_PAID"] and _balance(till) == 0.0
+    assert len(released) == 1 and written_off == ["TST01/C2627/0001"]
+
+
+def test_a_points_paid_credit_note_whose_acknowledgement_was_lost_keeps_its_claims(till, monkeypatch, tasks):
+    """The line landed, its acknowledgement was lost: before, the press read
+    'not written', gave its claims back and wrote its number off beside an
+    ISSUED credit note. Now it is unconfirmed; Nothing was paid is refused."""
+    from pymongo.errors import AutoReconnect
+
+    payload = _credit_note_return(till, monkeypatch)
+    _all_points(monkeypatch)
+    released, written_off = _counted(monkeypatch)
+    ledger = _ledger(till)
+    real_insert, lost = ledger.insert_one, []
+
+    def insert(doc):
+        real_insert(doc)
+        if doc.get("type") == scl.ISSUED and not lost:
+            lost.append(doc["_id"])
+            raise AutoReconnect("landed, acknowledgement lost")
+
+    monkeypatch.setattr(ledger, "insert_one", insert)
+    r = _advance_client().post("/api/v1/returns", json=payload, headers=_hdr("STORE_MANAGER"))
+    assert lost and r.status_code == 503, r.text
+    assert released == [] and written_off == []
+    assert [x.get("type") for x in ledger.docs] == [scl.ISSUED]
+    rid = _aged_past_the_timeout(till)
+    with pytest.raises(HTTPException) as exc:
+        _complete(rid, nothing_paid=True)
+    assert exc.value.status_code == 409
+    assert [x.get("type") for x in ledger.docs] == [scl.ISSUED] and _docs(till) == []
+
+
+def test_a_zero_balance_line_is_written_on_its_own_id(till, monkeypatch):
+    """Both orders on the one key: the line first -> the fence's insert meets it;
+    the fence first -> the line is refused (nothing issued, nothing written)."""
+    _customer(till)
+    ledger = _ledger(till)
+    kw = dict(reason="r", ref="RET-Z", current_user={"user_id": "u1"}, store_id="TST01", order_id="ORD-1",
+              note_number="TST01/C2627/0009", balance_delta=0.0, entry_id="RET-Z:credit", tax=47.62)
+    entry = returns_router._issue_store_credit("CUST-1", 1000.0, **kw)
+    assert entry and entry["delta"] == 0.0
+    assert ledger.find_one({"_id": "RET-Z:credit"})["type"] == scl.ISSUED
+    again = returns_router._issue_store_credit("CUST-1", 1000.0, **kw)  # a lost acknowledgement replays it
+    assert again["note_number"] == "TST01/C2627/0009" and len(ledger.docs) == 1
+
+    ledger.insert_one({"_id": "RET-F:credit", "entry_id": "RET-F:credit", "type": scl.FENCED})
+    outcome = {}
+    kw.update(ref="RET-F", entry_id="RET-F:credit")
+    assert returns_router._issue_store_credit("CUST-1", 1000.0, outcome=outcome, **kw) is None
+    assert outcome.get("fenced") is True and outcome.get("not_written") is True
+    assert [x["type"] for x in ledger.docs if x["entry_id"] == "RET-F:credit"] == [scl.FENCED]
+
+    from pymongo.errors import AutoReconnect
+    real_insert = ledger.insert_one
+
+    def lands_ack_lost(doc):
+        real_insert(doc)
+        raise AutoReconnect("landed, acknowledgement lost")
+
+    monkeypatch.setattr(ledger, "insert_one", lands_ack_lost)
+    outcome = {}
+    kw.update(ref="RET-L", entry_id="RET-L:credit")
+    with pytest.raises(returns_router.CreditNotConfirmed):  # landed: never "not issued"
+        returns_router._issue_store_credit("CUST-1", 1000.0, outcome=outcome, **kw)
+    assert outcome.get("not_written") is False
+    assert [x["type"] for x in ledger.docs if x["entry_id"] == "RET-L:credit"] == [scl.ISSUED]
+
+
 # --- D85(1): the takeover's own writes ----------------------------------------------
 
 
@@ -431,3 +526,18 @@ def test_a_credit_note_door_that_stopped_before_its_record_tells_a_superadmin_to
     _door_bill(till, "credit-note:ORD-1:sacn:10000:90000")
     assert returns_router.sweep_stuck_return_holds() == 1
     assert "SAME correction again" in tasks[0]["description"] and "IMS team" not in tasks[0]["description"]
+
+
+# --- Needs completing "Cash paid" on a press that may have restocked -------------------
+
+
+def test_a_cash_paid_record_never_tells_a_person_to_add_a_unit_already_in_stock(till, tasks):
+    """The press's money-out mark landed, then it stalled; its restock may
+    already have run. The recovered record used to say 'Put its units back in
+    stock by hand' -- a person following it doubled the stock."""
+    _bill_with_hold(till, "RET-CP", money_out=True, net_amount=1800.0, return_type="RETURN",
+                    gst_view={"taxable": 1525.42, "tax": 274.58, "gross": 1800.0, "gst_rate": 18.0},
+                    tenders=[{"method": "CASH", "amount": 1800.0}])
+    doc = _complete("RET-CP", cash_leg_paid=True)
+    assert doc["status"] == "COMPLETED"
+    assert "already shows in stock" in doc["message"] and "do not add it again" in doc["message"]
