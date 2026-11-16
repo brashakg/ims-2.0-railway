@@ -101,6 +101,8 @@ export interface NeedsCompletingItem {
   credit_line: { type: string; amount?: number; note_number?: string } | null;
   cash_leg: number;
   record_not_saved: boolean;
+  /** Saved at the counter, but the counter was told not to pay (round 12). */
+  record_unconfirmed?: boolean;
   /** IMS knows money moved (a credit landed, or the counter recorded it). */
   money_known: boolean;
 }

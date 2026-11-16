@@ -195,6 +195,8 @@ function ReturnsDesk({ canComplete }: { canComplete: boolean }) {
   const [resultDrawerNetted, setResultDrawerNetted] = useState<boolean | null>(null);
   const [resultCashRefunded, setResultCashRefunded] = useState(0);
   const [resultCreditAmount, setResultCreditAmount] = useState(0);
+  // The server's note when the returned units were NOT put back in stock.
+  const [resultStockNote, setResultStockNote] = useState('');
   const [resultCollectAmount, setResultCollectAmount] = useState(0);
   const [resultCollectMethod, setResultCollectMethod] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -601,6 +603,7 @@ function ReturnsDesk({ canComplete }: { canComplete: boolean }) {
     setResultCreditAmount(Number(result?.credit_amount) || 0);
     setResultCollectAmount(Number(result?.collect_amount) || 0);
     setResultCollectMethod(String(result?.collect_method || ''));
+    setResultStockNote(String(result?.stock_note || ''));
     setStep('complete');
     return true;
   };
@@ -1159,6 +1162,11 @@ function ReturnsDesk({ canComplete }: { canComplete: boolean }) {
                   : 'Even exchange — no balance due')
                 : 'Refund recorded against the tender(s) you selected'}
           </p>
+          {resultStockNote && (
+            <p role="alert" className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mt-3 max-w-md mx-auto">
+              {resultStockNote}
+            </p>
+          )}
           {/* Store credit actually ISSUED for the non-drawer portion. */}
           {returnType === 'RETURN' && resultCreditAmount > 0 && (
             <p className="text-xs text-gray-600 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 mt-3 max-w-md mx-auto">
@@ -1195,7 +1203,7 @@ function ReturnsDesk({ canComplete }: { canComplete: boolean }) {
             </p>
           )}
           <div className="flex gap-3 justify-center mt-6">
-            <button onClick={() => { setStep('search'); setSelectedOrder(null); setReturnItems([]); setResultId(null); setReplacementItems([]); setProductResults([]); setProductQuery(''); setRestockingFee(0); setRefundTenders([]); setCollectMethod(''); setQuote(null); setQuoteError(null); setResultDrawerNetted(null); setResultCashRefunded(0); setResultCreditAmount(0); setResultCollectAmount(0); setResultCollectMethod(''); }}
+            <button onClick={() => { setStep('search'); setSelectedOrder(null); setReturnItems([]); setResultId(null); setReplacementItems([]); setProductResults([]); setProductQuery(''); setRestockingFee(0); setRefundTenders([]); setCollectMethod(''); setQuote(null); setQuoteError(null); setResultDrawerNetted(null); setResultCashRefunded(0); setResultCreditAmount(0); setResultCollectAmount(0); setResultCollectMethod(''); setResultStockNote(''); }}
               className="px-6 py-2.5 bg-bv-red-600 text-white rounded-lg text-sm font-semibold">New Return</button>
           </div>
         </div>
