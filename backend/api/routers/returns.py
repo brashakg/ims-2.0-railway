@@ -4032,7 +4032,13 @@ def _restock_good_items(
             _credit_landed(row, result, landed_stores, taken.holder, return_id)
             continue
         except _ClaimLost:
-            raise  # taken over: this stale retry writes nothing more (D79)
+            # Taken over (D79): this stale retry writes nothing more, but the
+            # pieces it already landed are reported -- a Shopify door's booking
+            # of them (_restock_booked) must stay; the caller answers 409.
+            result["claim_lost"] = True
+            all_ok = False
+            row["applied"] = False
+            break
         except Exception as exc:  # noqa: BLE001
             # A stock read or write that failed is no answer: never a mint
             # beside a unit that may still be SOLD (a phantom). Not applied,
@@ -4068,7 +4074,18 @@ def _restock_good_items(
         # fresh return-unit has NO connection back to the reversed sale. It
         # carries NO order_id / sold_at (it is unsold shelf stock); a later sale
         # stamps the new order_id cleanly.
-        _check_restock_fence()
+        try:
+            _check_restock_fence()
+        except _ClaimLost:
+            result["claim_lost"] = True  # as above: stop, the landed pieces reported
+            all_ok = False
+            row["applied"] = False
+            break
+        except Exception as exc:  # noqa: BLE001 -- the renew failed: no mint unfenced
+            logger.warning("[RETURNS] restock claim not renewed, unit not minted: %s", exc)
+            all_ok = False
+            row["applied"] = False
+            continue
         try:
             created = stock_repo.create(
                 {
@@ -7453,6 +7470,10 @@ def _retry_claimed(coll: Any, mine: Dict[str, Any], claim: Dict[str, Any], curre
                     moved_ids=aside_ids | back_ids if blind else aside_ids)
             restock_result = _restock(lines, _back_since_record(
                 return_id, claim, _landed_units(claim.get("restocked")), moved_back, back_ids), back_ids)
+        if restock_result.get("claim_lost"):
+            # Taken over mid-loop (D79): the pieces it landed stayed booked
+            # (_restock_booked read them); it stops here with 409.
+            raise _ClaimLost(return_id)
     except Exception as exc:  # noqa: BLE001
         # Even on failure we MUST release the in-progress flag so a future
         # retry isn't deadlocked.

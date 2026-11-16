@@ -283,6 +283,65 @@ def test_a_shopify_retry_never_reads_a_stale_booking_that_failed_as_applied(nati
     assert doc["restock_in_progress"] is False
 
 
+@pytest.mark.parametrize("how", ["takeover", "renew_error"])
+def test_a_shopify_retry_stopped_mid_loop_keeps_the_booking_of_the_unit_it_landed(native, monkeypatch, how):
+    """#1413 review (D79 fence): a Shopify refund's retry A puts its first
+    piece back, then stops before the second -- taken over (B finds A's
+    booking) between two flips, or its claim renewal fails right before a
+    mint (the returned line's pieces were never stock rows; the bill's two
+    SOLD units are named by its OTHER lines, D43). The landed piece must stay
+    booked: the Shopify doors read only the booking, so a released piece is
+    put back again by the next retry (a second unit flipped or a phantom
+    minted). The next retry puts back the second piece alone, the refund's
+    mark ends at 2."""
+    _seed(native, units=["U1", "U2"], qty=2)
+    native.returns.update_one({"return_id": RID}, {"$set": {"shopify_refund_id": "RF-1",
+                                                             "items.0.return_qty": 2}})
+    if how == "renew_error":  # li1's pieces mint: U1 / U2 are li2's and li3's
+        native.orders.update_one({"order_id": OID}, {"$push": {"items": {"$each": [
+            {"item_id": f"li{n}", "product_id": PID, "sku": "F1", "product_name": "Frame",
+             "quantity": 1, "unit_price": 1000.0, "stock_id": f"U{n - 1}"} for n in (2, 3)]}}})
+    real, seen = R._audit_stock_transition, {}
+
+    def landed(*a, **k):
+        out = real(*a, **k)
+        if not seen:  # A's first piece is back: it stalls before the second
+            seen["b"] = "running"
+            if how == "takeover":
+                native.returns.update_one({"return_id": RID}, {"$set": {
+                    "restock_started_at": (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()}})
+                seen["b"] = R._retry_restock(RID, USER, STORE)
+            else:
+                fence = R._RESTOCK_FENCE.get()
+
+                def renew_fails():
+                    R._RESTOCK_FENCE.set(fence)
+                    raise RuntimeError("socket reset on the renew")
+
+                R._RESTOCK_FENCE.set(renew_fails)
+        return out
+
+    monkeypatch.setattr(R, "_audit_stock_transition", landed)
+    try:
+        R._retry_restock(RID, USER, STORE)
+    except Exception:  # noqa: BLE001 -- A answers 409 / 500
+        pass
+    monkeypatch.setattr(R, "_audit_stock_transition", real)
+    assert native.stock_units.count_documents({"status": "AVAILABLE"}) == 1
+    line = native.orders.find_one({"order_id": OID})["items"][0]
+    assert float(line["restocked_refunds"]["RF-1"]) == 1, "the landed piece was un-booked"
+    doc = native.returns.find_one({"return_id": RID})
+    assert doc["restock_applied"] is False and doc["restock_in_progress"] is False
+    again = R._retry_restock(RID, USER, STORE)
+    assert again["restock_applied"] is True
+    assert native.stock_units.count_documents({}) == (2 if how == "takeover" else 4), (
+        "a second record was added for a piece")
+    assert native.stock_units.count_documents({"status": "AVAILABLE"}) == 2
+    line = native.orders.find_one({"order_id": OID})["items"][0]
+    assert float(line["restocked_refunds"]["RF-1"]) == 2
+    assert R._retry_restock(RID, USER, STORE)["message"] == "Already restocked"
+
+
 def test_the_return_slot_backstop_is_in_the_apps_index_set(native):
     idx = native.stock_units.index_information()["uniq_stock_unit_return_slot"]
     assert idx["unique"] is True and idx["key"] == [("return_slot", 1)]
