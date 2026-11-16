@@ -32,7 +32,7 @@ import logging
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Path, Query
 from pydantic import BaseModel, Field
@@ -1773,15 +1773,24 @@ class CreditNotConfirmed(Exception):
     landed but could not be confirmed): its ledger line stays ISSUING and the
     reconciler settles it. Never reported as 'nothing was recorded'."""
 
-    def __init__(self, entry_id: str):
+    def __init__(self, entry_id: str, moves_balance: bool = True):
         super().__init__(entry_id)
         self.entry_id = entry_id
+        # False: a line that moves no balance (paid in points) -- the balance
+        # never changes and a person finishes it (round 12 wording).
+        self.moves_balance = moves_balance
 
 
 CREDIT_UNCONFIRMED_MESSAGE = (
     "The store credit could not be confirmed just now - it may already be on the customer's "
     "balance. Do NOT redo this return: it settles by itself within 10 minutes. Check the "
     "customer's store-credit balance then; if the credit is not there, ask an admin."
+)
+# Round 12: a points-paid credit line (no balance moves) whose save could not
+# be confirmed waits for a person; it never settles by itself.
+LINE_UNCONFIRMED_MESSAGE = (
+    "This return's credit note could not be confirmed as saved. Do NOT redo this return and give "
+    "nothing at the counter: an admin or Accounts finish it in Returns > Needs completing."
 )
 
 
@@ -2640,7 +2649,7 @@ def _issue_store_credit(
                 logger.error("[RETURNS] credit line %s: insert failed (%s) and its read-back failed (%s)",
                              entry["entry_id"], exc, read_exc)
                 outcome["not_written"] = False
-                raise CreditNotConfirmed(entry["entry_id"]) from read_exc
+                raise CreditNotConfirmed(entry["entry_id"], moves_balance=False) from read_exc
             kind = (stored or {}).get("type")
             if kind == scl.FENCED:
                 outcome["fenced"] = True
@@ -2655,7 +2664,7 @@ def _issue_store_credit(
             if note_number and stored.get("note_number") != note_number:
                 _record_unused_credit_note(note_number, {"order_id": order_id, "store_id": entry.get("store_id")},
                                            ref, current_user, "another press issued this credit note")
-            raise CreditNotConfirmed(entry["entry_id"])
+            raise CreditNotConfirmed(entry["entry_id"], moves_balance=False)
         outcome["not_written"] = False
     entry.pop("_id", None)
     return entry
@@ -3276,7 +3285,7 @@ def _raise_restock_blocked_task(
     must never break the return."""
     try:
         from ..dependencies import get_task_repository
-        from ..services.task_triggers import create_system_task
+        from ..services.task_triggers import active_tasks, create_system_task
 
         lines = ", ".join(
             sorted(
@@ -3321,8 +3330,9 @@ def _raise_restock_blocked_task(
                       "returns (ONLINE_FULFILLMENT_STORE_ID) and retry the restock "
                       "of this return")
         ref = order_number or order_id
-        create_system_task(
-            get_task_repository(),
+        repo, task_ref = get_task_repository(), f"return_restock_blocked:{return_id}"
+        created = create_system_task(
+            repo,
             title=f"Return {return_id} (order {ref}): {len(units)} unit(s) NOT back in stock",
             description=(
                 f"The refund for return {return_id} (order {ref}) is "
@@ -3333,13 +3343,15 @@ def _raise_restock_blocked_task(
             priority="P1",
             category="Inventory",
             store_id=processing_store_id,
-            dedupe_ref=f"return_restock_blocked:{return_id}",
+            dedupe_ref=task_ref,
             extra={
                 "link": "/returns",
                 "payload": {"return_id": return_id, "order_id": order_id},
             },
         )
-        return True
+        # create_system_task answers None when the insert failed as well as
+        # when a task was already open: True only when one really is (round 12).
+        return bool(created) or bool(active_tasks(repo, task_ref))
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "[RETURNS] restock-blocked task could not be raised for %s: %s",
@@ -4545,6 +4557,15 @@ RECORD_TAKEN_MESSAGE = "This return was completed from Needs completing. Do not 
 RECORD_UNCONFIRMED_MESSAGE = ("This return could not be confirmed as saved. Do not pay at the counter and do "
                               "not redo it: Accounts finish it in Returns > Needs completing (a task was raised).")
 _UNREAD = object()
+UNCONFIRMED_MARK = "unconfirmed"
+
+
+def _unconfirmed_open(hold: Optional[Dict[str, Any]], doc: Optional[Dict[str, Any]]) -> bool:
+    """Round 12: a press answered 503 "do not pay" while its own record may
+    have landed. Until a person answers the cash question (Needs completing
+    stamps ``recovered`` on that record) the record's cash leg is not known
+    to have been paid -- listed, asked, and never replayed as paid."""
+    return bool((hold or {}).get(UNCONFIRMED_MARK)) and doc is not None and not doc.get("recovered")
 
 
 def _record_exists(return_id: str) -> bool:
@@ -4557,11 +4578,31 @@ def _record_exists(return_id: str) -> bool:
     return coll.find_one({"return_id": return_id}, {"_id": 1}) is not None
 
 
-def _record_taken_by_needs_completing(return_id: str, quarantined: List[Dict[str, Any]]) -> None:
+def _press_record_unconfirmed(doc: Dict[str, Any]) -> bool:
+    """Round 12: is this counter record one whose press answered "do not pay"
+    and nobody has answered the cash question yet (_unconfirmed_open)? An
+    unreadable bill raises 503: the replay never guesses "paid"."""
+    rid = doc.get("return_id")
+    try:
+        orders = _orders_coll()
+        order = orders.find_one({"order_id": doc.get("order_id")}) if orders is not None else None
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[RETURNS] bill of %s unreadable on a replay: %s", rid, exc)
+        raise HTTPException(status_code=503, detail="Could not check this return just now - try again.") from exc
+    return _unconfirmed_open(((order or {}).get("refund_holds") or {}).get(rid), doc)
+
+
+def _record_taken_by_needs_completing(return_id: str, quarantined: List[Dict[str, Any]],
+                                      put_nothing_back: Optional[Callable[[], bool]] = None) -> None:
     """D92(4): Returns > Needs completing ("Cash paid") already wrote this
     return's record while the press stalled. The press writes no record and
     answers 409 -- never 201, so the cash is never handed over twice. A
-    DAMAGED unit it set aside (D92(2)) is noted on that record (fail-soft)."""
+    DAMAGED unit it set aside (D92(2)) is noted on that record (fail-soft).
+    ``put_nothing_back`` (round 12): this press could not check its bill and
+    put no unit back (RESTOCK_UNKNOWN). Its fence's own "restocking" stamp
+    may have landed unacknowledged, so the record says "left to the counter":
+    that is cleared (the counter put nothing back) and the blocked-restock
+    task is raised, so the record's Restock puts each unit back once."""
     logger.error("[RETURNS] return %s was completed from Needs completing while its press ran: 409", return_id)
     if quarantined:
         try:
@@ -4569,6 +4610,14 @@ def _record_taken_by_needs_completing(return_id: str, quarantined: List[Dict[str
                 "quarantined_stock_ids": [u["stock_id"] for u in quarantined]}})
         except Exception as exc:  # noqa: BLE001
             logger.warning("[RETURNS] quarantined units of %s not noted on its record: %s", return_id, exc)
+    if put_nothing_back is not None:
+        try:
+            _returns_coll().update_one(
+                {"return_id": return_id, "restock_left_to_counter": True, "restock_applied": {"$ne": True}},
+                {"$unset": {"restock_left_to_counter": ""}})
+        except Exception as exc:  # noqa: BLE001 -- its Restock then says "check each unit"
+            logger.warning("[RETURNS] record %s still says left to the counter: %s", return_id, exc)
+        put_nothing_back()
     raise HTTPException(status_code=409, detail=RECORD_TAKEN_MESSAGE)
 
 
@@ -5116,6 +5165,12 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
                     # A known key from another shop replays nothing and names
                     # nothing: the same 404 as GET /returns/{id}.
                     in_reach_or_404(existing, current_user, "Return not found")
+                    # Round 12: a record Needs completing wrote (or answered)
+                    # is never replayed as a success: the counter pays nothing.
+                    if existing.get("recovered"):
+                        raise HTTPException(status_code=409, detail=RECORD_TAKEN_MESSAGE)
+                    if existing.get("status") == "COMPLETED" and _press_record_unconfirmed(existing):
+                        raise HTTPException(status_code=503, detail=RECORD_UNCONFIRMED_MESSAGE)
                 if existing and not _replay_matches(existing, body):
                     raise HTTPException(status_code=409, detail=(
                         f"This press already recorded return {existing.get('return_id')} with different "
@@ -5601,6 +5656,10 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
             "gst_view": gst_view,
             "order_number": body.order_number or (order or {}).get("order_number"),
             "customer_id": customer_id,
+            # Round 12: the record Needs completing writes carries the press's
+            # key, so an identical re-press is refused (409), never a new return.
+            "idempotency_key": idem_key or None,
+            "idempotency_fingerprint": _return_fingerprint(body) if idem_key else None,
         }
 
     def _issue_credit_or_fail(
@@ -5696,14 +5755,15 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
                 },
                 outcome=_outcome,
             )
-        except CreditNotConfirmed:
+        except CreditNotConfirmed as unconfirmed:
             # It may already be on the balance: keep the unit claims and the
             # refund hold (a redo is refused), keep the number (the line owns
             # it), and the reconciler settles the line -- undoing the claims
             # if it never landed. Never 'nothing was recorded'.
             held["unclear"] = True
             _keep_order_refund_hold(resolved_order_id, held.get("return_id"))
-            raise HTTPException(status_code=503, detail=CREDIT_UNCONFIRMED_MESSAGE)
+            raise HTTPException(status_code=503, detail=(
+                CREDIT_UNCONFIRMED_MESSAGE if unconfirmed.moves_balance else LINE_UNCONFIRMED_MESSAGE))
         except Exception as exc:  # noqa: BLE001 -- one owner per outcome
             # An unexpected error: if no line was written, the claims are this
             # press's to give back (as a refusal); if a line exists (or that
@@ -5891,6 +5951,20 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
     # D85/D92: Cash paid may have taken this return's record while it stalled.
     stock_fence = _fence_restock(resolved_order_id, return_id)
     stock_ok = stock_fence is True
+    _left = [ln for ln in active_lines if ln.restock and ln.condition == "GOOD"]
+
+    def _unplaced_task() -> bool:
+        """D92(1): the bill could not be checked, so no unit went back here;
+        one P1 Inventory task carries the real step (its record's Restock)."""
+        return _raise_restock_blocked_task(
+            return_id, resolved_order_id, store_id,
+            [{"product_id": ln.product_id, "sku": getattr(ln, "sku", "") or "",
+              "product_name": getattr(ln, "product_name", "") or ""} for ln in _left],
+            current_user.get("active_store_id") or store_id, unread="the bill",
+            historical=bool(order.get("historical")) if order is not None else None,
+            order_number=(order or {}).get("order_number"))
+
+    _on_taken = _unplaced_task if stock_fence == RESTOCK_UNKNOWN and _left else None
     try:
         if stock_ok:
             restock_result = _restock_good_items(
@@ -6066,18 +6140,23 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
             # record of this return id (uniq_returns_return_id) -- the one
             # Needs completing wrote: 409, never 201, with no read to fail.
             if isinstance(exc, DuplicateKeyError):
-                _record_taken_by_needs_completing(return_id, quarantined)
+                _record_taken_by_needs_completing(return_id, quarantined, _on_taken)
             try:
                 _taken = (coll.find_one({"return_id": return_id}) or {}).get("recovered")
             except Exception:  # noqa: BLE001 -- unknown: never "Refund recorded"
                 _taken = _UNREAD
             if _taken and _taken is not _UNREAD:
-                _record_taken_by_needs_completing(return_id, quarantined)
+                _record_taken_by_needs_completing(return_id, quarantined, _on_taken)
             # The money already went out: the KEPT hold keeps this refund in the
             # bill's refunded total (Rs 2,000 rule, cap) -- loud, for the admin:
             # the doc rides on the hold and on a P1 task, for Complete record.
             logger.error("[RETURNS] return %s money recorded but its doc was NOT saved: %s", return_id, exc)
-            _keep_order_refund_hold(resolved_order_id, return_id, extra={"doc": dict(doc)})
+            # Round 12: unknown = the doc may have landed (only its ack lost):
+            # "unconfirmed" makes Needs completing ask the cash question even
+            # when this very doc exists (_unconfirmed_open), so a counter told
+            # "do not pay" never leaves a record that says it paid.
+            _keep_order_refund_hold(resolved_order_id, return_id, extra={
+                "doc": dict(doc), **({UNCONFIRMED_MARK: True} if _taken is _UNREAD else {})})
             _task_return_doc_missing(doc)
             if _taken is _UNREAD:
                 # Needs completing may have taken it: nothing is paid here.
@@ -6129,20 +6208,13 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         "CREDIT_NOTE": f"Store credit of Rs {pays} issued{fee_note}{points_note}",
         "EXCHANGE": "Exchange recorded",
     }[body.return_type]
-    _left = [ln for ln in active_lines if ln.restock and ln.condition == "GOOD"]
-    if stock_fence == RESTOCK_UNKNOWN and _left:
-        # D92(1): the bill could not be checked, so no unit went back here;
-        # one P1 Inventory task carries the real step (its record's Restock).
-        _raised = _raise_restock_blocked_task(
-            return_id, resolved_order_id, store_id,
-            [{"product_id": ln.product_id, "sku": getattr(ln, "sku", "") or "",
-              "product_name": getattr(ln, "product_name", "") or ""} for ln in _left],
-            current_user.get("active_store_id") or store_id, unread="the bill",
-            historical=bool(order.get("historical")) if order is not None else None,
-            order_number=(order or {}).get("order_number"))
-        message += (". Its units were NOT put back in stock (the bill could not be checked just now): "
-                    + ("a task was raised to put them back - do not add them by hand" if _raised
-                       else "tell the store manager - do not add them by hand"))
+    stock_note = None  # round 12: shown on the till's done screen when set
+    if _on_taken is not None:
+        _raised = _unplaced_task()
+        stock_note = ("Its units were NOT put back in stock (the bill could not be checked just now): "
+                      + ("a task was raised to put them back - do not add them by hand" if _raised
+                         else "tell the store manager - do not add them by hand"))
+        message += ". " + stock_note
 
     return {
         "return_id": return_id,
@@ -6181,6 +6253,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         # cannot tell "routed by the fulfilment breakdown" from "fell back to
         # the counter". The persisted doc and the retry response both carry it.
         "restock_store_reason": restock_result.get("restock_store_reason"),
+        "stock_note": stock_note,
         "message": message,
     }
 
@@ -6209,7 +6282,8 @@ async def needs_completing(current_user: dict = Depends(require_roles(*_COMPLETE
                     continue
                 # A nothing-paid return whose hold is still kept has a
                 # give-back to finish: listed (the hold goes once it is done).
-                if coll.find_one({"return_id": rid, "status": "COMPLETED"}):
+                done = coll.find_one({"return_id": rid, "status": "COMPLETED"})
+                if done and not _unconfirmed_open(hold, done):
                     continue
                 state = _unfinished_return(rid)
                 line = state["line"]
@@ -6230,6 +6304,8 @@ async def needs_completing(current_user: dict = Depends(require_roles(*_COMPLETE
                                     if line is not None else None),
                     "cash_leg": round(sum(float(t.get("amount") or 0) for t in _drawer(tenders)), 2),
                     "record_not_saved": bool(doc),
+                    # Round 12: saved, but the counter was told not to pay.
+                    "record_unconfirmed": bool(done),
                     "money_known": bool((line is not None and line.get("type") != "VOID") or doc
                                         or hold.get("money_out")),
                 })
@@ -6477,6 +6553,12 @@ async def complete_return_record(
         existing.pop("_id", None)
         if existing.get("status") == "NOTHING_PAID":
             _nothing_paid_steps(return_id, line, existing, current_user)
+        if _unconfirmed_open(hold, existing):
+            return _settle_unconfirmed(coll, existing, hold, line, body, current_user, store_id)
+        if (existing.get("recovered") and float(existing.get("owed_amount") or 0) > 0
+                and not existing.get("owed_paid_at")):
+            # A lost answer above may have stamped OWED without its task: deduped.
+            _task_cash_owed(return_id, float(existing["owed_amount"]), store_id, existing.get("order_id"))
         return {**existing, "replayed": True, "message": "This return's record already exists."}
     if line is not None and line.get("type") == "ISSUING":
         raise HTTPException(status_code=409, detail=(
@@ -6590,6 +6672,8 @@ async def complete_return_record(
             "restock_applied": False,
             "restock_stock_ids": [],
             "created_by": current_user.get("user_id"),
+            "idempotency_key": facts.get("idempotency_key"),
+            "idempotency_fingerprint": facts.get("idempotency_fingerprint"),
             # Nothing kept says whether the press reached its loyalty reversal,
             # so the sweep (reconcile_loyalty_reversals) settles it: the engine
             # is idempotent on the return, and a reversal already made moves
@@ -6622,6 +6706,45 @@ async def complete_return_record(
     return {**doc, "message": "Return record completed. Before putting any of its units back in stock by hand, "
                               "check that unit first: if it already shows in stock, the counter put it back - "
                               "do not add it again."
+            + (f" The customer is owed Rs {owed:.2f} - a task was raised." if owed else "")}
+
+
+def _settle_unconfirmed(coll, doc: Dict[str, Any], hold: Dict[str, Any], line: Optional[Dict[str, Any]],
+                       body: "CompleteRecordBody", current_user: dict, store_id: Optional[str]) -> Dict[str, Any]:
+    """Round 12: the counter was told "do not pay" (503) but its own record
+    landed (only the acknowledgement was lost). The person's cash answer is
+    stamped on THAT record, once (one compare-and-set on ``recovered``):
+    "not paid" moves its drawer legs off refund_tenders to OWED -- never
+    netted at Day-End -- with the pay-the-customer task, as every Needs
+    completing record does."""
+    return_id = doc.get("return_id")
+    if body.nothing_paid:
+        raise HTTPException(status_code=409, detail=_MONEY_MOVED)
+    if not _hold_actionable(hold, line):
+        raise HTTPException(status_code=409, detail=HOLD_STILL_RUNNING)
+    now = utc_now_iso()
+    tenders = doc.get("refund_tenders") or []
+    owed_legs = [] if body.cash_leg_paid else [{**t, "status": "OWED"} for t in _drawer(tenders)]
+    owed = round(sum(float(t.get("amount") or 0) for t in owed_legs), 2)
+    upd: Dict[str, Any] = {"recovered": {"by": current_user.get("user_id"), "at": now, "note": body.note or "",
+                                         "cash_leg_paid": body.cash_leg_paid, "nothing_paid": False,
+                                         "source": "unconfirmed counter record"}}
+    if owed:
+        paid = [t for t in tenders if str(t.get("method") or "") in _REFUND_NON_DRAWER]
+        upd.update(refund_tenders=paid, owed_tenders=owed_legs, owed_amount=owed, drawer_auto_netted=bool(_drawer(paid)))
+    try:
+        stored = coll.find_one_and_update({"return_id": return_id, "status": "COMPLETED", "recovered": None},
+                                          {"$set": upd}, return_document=ReturnDocument.AFTER)
+    except Exception as exc:  # noqa: BLE001 -- a re-press reads what landed
+        raise HTTPException(status_code=503, detail="Could not save the answer just now - press again.") from exc
+    if stored is None:  # another person answered first: theirs stands
+        return _replay_or_503(coll, return_id, RuntimeError("already answered"))
+    if owed:
+        _task_cash_owed(return_id, owed, store_id, doc.get("order_id"))
+    _audit_complete(return_id, store_id, current_user, upd["recovered"], now)
+    stored = dict(stored)
+    stored.pop("_id", None)
+    return {**stored, "message": "Return record completed."
             + (f" The customer is owed Rs {owed:.2f} - a task was raised." if owed else "")}
 
 

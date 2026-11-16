@@ -272,7 +272,8 @@ def test_a_points_paid_line_whose_insert_and_read_back_both_fail_is_unknown(till
     monkeypatch.setattr(ledger, "find_one", find_one)
     r = _advance_client().post("/api/v1/returns", json=payload, headers=_hdr("STORE_MANAGER"))
     assert state.get("read") and r.status_code == 503, r.text
-    assert r.json()["detail"] == returns_router.CREDIT_UNCONFIRMED_MESSAGE
+    # Round 12: no balance moves on this line and it never settles by itself.
+    assert r.json()["detail"] == returns_router.LINE_UNCONFIRMED_MESSAGE
     assert released == [] and written_off == []  # claims and the number kept
     hold = next(iter(_stored(till)["refund_holds"].values()))
     assert hold.get("kept") is True
