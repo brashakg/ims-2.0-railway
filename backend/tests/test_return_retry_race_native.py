@@ -697,7 +697,7 @@ def press(native, ctx, gst_numbers, monkeypatch):  # noqa: F811
 
     repo = StockRepository(native.stock_units)
     monkeypatch.setattr(R, "get_stock_repository", lambda: repo)
-    monkeypatch.setattr(R.barcode_svc, "mint_unit_barcode", lambda *a, **k: f"BC-{uuid.uuid4().hex[:10]}")
+    monkeypatch.setattr(R.barcode_svc, "mint_unit_barcode", lambda *a, **k: "BC-" + uuid.uuid4().hex)
     import agents.registry as registry
     from api.services import item_events as ie
 
