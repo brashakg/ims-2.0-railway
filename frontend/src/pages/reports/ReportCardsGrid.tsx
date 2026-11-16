@@ -193,8 +193,9 @@ export function ReportCardsGrid({ category }: { category: ReportSection }) {
   const readyTable = (reportId: string): Table | null => {
     const t = reportTable(reportId);
     const q = { 'daily-sales': salesQ, 'monthly-sales': salesQ, 'stock-report': stockQ, 'customer-report': acqQ }[reportId];
-    if (!t && q?.isError) {
-      // A failed read is said as such, never exported as an empty report.
+    if (q?.isError) {
+      // A failed read is said as such, never exported as an empty report --
+      // nor as the last good figures a failed refetch left behind.
       toast.error('Could not load this report. Please try again.');
       return null;
     }

@@ -85,6 +85,17 @@ describe('A report whose read failed', () => {
     expect(exportToCSV).not.toHaveBeenCalled();
     expect(toastError).toHaveBeenCalledWith('Could not load this report. Please try again.');
   });
+
+  it('a failed refetch does not export the last good figures it left behind', () => {
+    acq.current = {
+      data: { new_customers: 21, returning_customers: 8, total_customers: 29, retention_percent: 27.6 },
+      isError: true,
+    };
+    renderSection('customers');
+    fireEvent.click(card('Customer Report').getByRole('button', { name: 'Export CSV' }));
+    expect(exportToCSV).not.toHaveBeenCalled();
+    expect(toastError).toHaveBeenCalledWith('Could not load this report. Please try again.');
+  });
 });
 
 describe('Report card exports are the named report', () => {
