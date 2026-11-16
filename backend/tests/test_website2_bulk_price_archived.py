@@ -353,6 +353,33 @@ def test_unlinking_an_archived_colour_does_not_queue_it(db):
 # ===========================================================================
 
 
+def test_a_retried_apply_carries_the_website_copy_but_never_the_price_twice(db, monkeypatch):
+    """L1-F47 crash between two writes: the first Apply saved the billing
+    price but not the website copy (it stopped / its reply was lost). The
+    same reviewed Apply again: the billing price is NOT moved a second time
+    (5500, never 6050) and the website copy now follows."""
+    _seed(db)
+    body = products_mod.BulkPriceRequest(target="BOTH", mode="PERCENT", amount=10)
+    pre = _run(products_mod.bulk_price_update(body, ADMIN))
+    exp = [
+        products_mod.BulkReviewedRow(product_id=r["product_id"], mrp=r["old_mrp"], offer_price=r["old_offer_price"])
+        for r in pre["rows"]
+    ]
+    apply = body.model_copy(update={"apply": True, "expected": exp})
+    real_mirror = pm.mirror_update_to_catalog_twin
+    monkeypatch.setattr(pm, "mirror_update_to_catalog_twin", lambda **kw: False)
+    first = _run(products_mod.bulk_price_update(apply, ADMIN))
+    assert first["summary"]["committed"] == 1 and first["summary"]["website_failed"] == 1
+    assert _twin(db)["mrp"] == 5000.0
+    monkeypatch.setattr(pm, "mirror_update_to_catalog_twin", real_mirror)
+    again = _run(products_mod.bulk_price_update(apply, ADMIN))
+    assert again["summary"]["committed"] == 0
+    assert again["rows"][0]["already_applied"] is True and again["rows"][0]["website_synced"] is True
+    spine = db["products"].find_one({"product_id": "P1"})
+    assert (spine["mrp"], spine["offer_price"]) == (5500.0, 4950.0)
+    assert (_twin(db)["mrp"], _twin(db)["offer_price"]) == (5500.0, 4950.0)
+
+
 def test_a_failed_website_copy_is_reported_per_row_and_in_the_summary(db, monkeypatch):
     """The billing price saved but the website copy did not: the operator is
     told which row, so it can be saved again (the price change is not lost

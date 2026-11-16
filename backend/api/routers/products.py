@@ -1769,6 +1769,16 @@ async def bulk_price_update(
             row["applied"] = False
             row["already_applied"] = True
             counts["already_applied"] += 1
+            # See bulk_price_update: re-carry the website copy only.
+            if not _price_reaches_website(row, pid, p, {"offer_price": _round_money(new_offer)}):
+                website_failed += 1
+            # The earlier Apply may have stopped between the billing write and
+            # the website copy: carry the copy again (the same price, so it
+            # is idempotent); the billing price is never written twice.
+            if not _price_reaches_website(
+                row, pid, p, {"mrp": _round_money(new_mrp), "offer_price": _round_money(new_offer)}
+            ):
+                website_failed += 1
         elif body.apply and verdict["ok"] and changed and repo is not None and pid:
             try:
                 price_patch = {
