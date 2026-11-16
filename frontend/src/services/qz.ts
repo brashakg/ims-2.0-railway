@@ -16,6 +16,7 @@
 
 import apiClient, { getSecureApiUrl } from './api/client';
 import { printHtmlFallback, type PrintResult } from './printWindow';
+import { QZ_HOST, QZ_SECURE_PORTS } from './qzEndpoint';
 
 export type { PrintResult };
 
@@ -105,14 +106,17 @@ async function configureSecurity(qz: any): Promise<boolean> {
 }
 
 /**
- * Attempt to connect to QZ Tray. Memoised so concurrent print calls share a
- * single connection attempt. Returns false (never throws) when QZ is not
- * reachable or not configured for signing.
+ * Make sure QZ Tray is connected. Concurrent print calls share ONE attempt;
+ * nothing is remembered once it settles, so every later call looks at the
+ * socket again. (Audit R36: the promise of a successful connection was kept
+ * forever, so after QZ Tray dropped no label reached it again until the page
+ * was reloaded.) Returns false (never throws) when QZ is not reachable or not
+ * configured for signing.
  */
 export async function connectQz(): Promise<boolean> {
   if (connectPromise) return connectPromise;
 
-  connectPromise = (async () => {
+  const attempt = (async () => {
     const qz = await loadQz();
     if (!qz) return false;
 
@@ -121,17 +125,20 @@ export async function connectQz(): Promise<boolean> {
       if (!ok) return false;
 
       if (qz.websocket.isActive && qz.websocket.isActive()) return true;
-      await qz.websocket.connect();
+      // Only where qzEndpoint.ts says: the same list the deployed CSP allows.
+      await qz.websocket.connect({ host: [QZ_HOST], port: { secure: [...QZ_SECURE_PORTS] } });
       return true;
     } catch {
       return false;
     }
   })();
 
-  // Don't cache a failed attempt forever -- allow a later retry.
-  const result = await connectPromise;
-  if (!result) connectPromise = null;
-  return result;
+  connectPromise = attempt;
+  try {
+    return await attempt;
+  } finally {
+    connectPromise = null;
+  }
 }
 
 /**
