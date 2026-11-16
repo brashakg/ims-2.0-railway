@@ -1107,6 +1107,7 @@ def test_d68_racing_posts_and_repairs_write_one_event(mongo_db):
     # D84: four reads of the journal at once (the screen's list/detail),
     # mixed with two Post retries, each finding the event missing.
     db.get_collection("audit_logs").delete_many({"action": "je_posted"})
+    _aged(db, j["je_id"])
     turn = iter(range(6))
     got = _together(6, lambda: (je_service.repair_posted_events(db, [_je(db, j["je_id"])])
                                 if next(turn) >= 2 else _post(db, j["je_id"])))
@@ -1221,6 +1222,9 @@ def test_d84_reading_a_posted_journal_writes_its_missing_event_once(db, monkeypa
     assert _posted_rows(db, j["je_id"]) == []
 
     assert _read_journal(db, monkeypatch, route, j["je_id"], reader) == 200
+    assert _posted_rows(db, j["je_id"]) == []                   # within the grace: its poster's
+    _aged(db, j["je_id"])
+    assert _read_journal(db, monkeypatch, route, j["je_id"], reader) == 200
     rows = _posted_rows(db, j["je_id"])
     assert len(rows) == 1                                       # was 0, for good
     assert rows[0]["log_id"] == f"AUD-JE-POSTED-{j['je_id']}"
@@ -1277,6 +1281,7 @@ def test_d84_a_journal_posted_before_d68_never_gets_a_second_event(db, monkeypat
     coll = db.get_collection("audit_logs")
     legacy = _posted_rows(db, j["je_id"])[0]
     assert legacy["log_id"] != fixed_id(j["je_id"])
+    _aged(db, j["je_id"])                                       # past the grace: the check guards
 
     def _one_legacy_event():
         rows = _posted_rows(db, j["je_id"])
@@ -1296,6 +1301,109 @@ def test_d84_a_journal_posted_before_d68_never_gets_a_second_event(db, monkeypat
     monkeypatch.setattr(db, "get_collection", real_get)
     _one_legacy_event()
     assert verify_chain(coll)["intact"] is True
+
+
+def _aged(db, je_id: str) -> None:
+    """The read comes later than the posting's grace (its poster is done)."""
+    db.get_collection("journal_entries").update_one(
+        {"je_id": je_id}, {"$set": {"posted_at": datetime.now() - timedelta(minutes=10)}})
+
+
+def _read_inside_audit(monkeypatch, action: str, read):
+    """Run ``read`` when ``action``'s audit row is about to be written: a read
+    landing between a journal's POSTED write and that write. Once: the
+    read's own repair goes through _audit too."""
+    real_audit, fired = je_service._audit, []
+
+    def _audit(d, act, je, **k):
+        if act == action and not fired:
+            fired.append(act)
+            read(je)
+        return real_audit(d, act, je, **k)
+    monkeypatch.setattr(je_service, "_audit", _audit)
+
+
+def test_d84_a_read_during_a_reversal_leaves_the_mirror_one_posted_event(db, monkeypatch):
+    """reverse_je inserts the mirror journal already POSTED, then writes
+    je_reversed and the mirror's je_posted. A list read landing in between
+    repaired the mirror under the fixed id, and the reversal's own je_posted
+    (random id) landed too: two events for one posting. The reversal now
+    writes under the fixed id, so exactly one survives, naming the reverser."""
+    _user(db, "checker", ["ADMIN"])
+    reader = _user(db, "accounts", ["ACCOUNTANT"])
+    j = _submitted_journal(db, "maker")
+    assert _journal_approve(db, j["je_id"]).get("ok") is True
+    assert _post(db, j["je_id"]).get("ok") is True
+    _aged(db, j["je_id"])
+    monkeypatch.setattr(je_service, "_READ_REPAIR_GRACE", timedelta(0), raising=False)
+    _read_inside_audit(monkeypatch, "je_reversed", lambda je: (
+        _read_journal(db, monkeypatch, "list", je["reversed_by"], reader),
+        _read_journal(db, monkeypatch, "detail", je["reversed_by"], reader)))
+    res = je_service.reverse_je(db, je_id=j["je_id"], actor_id="checker")
+    assert res.get("ok") is True, res
+    mirror = res["reversal_je_id"]
+    rows = _posted_rows(db, mirror)
+    assert [r["log_id"] for r in rows] == [f"AUD-JE-POSTED-{mirror}"]   # was two
+    assert rows[0]["user_id"] == "checker"                      # the reverser, not 'unrecorded'
+    for route in ("list", "detail"):
+        assert _read_journal(db, monkeypatch, route, mirror, reader) == 200
+    assert len(_posted_rows(db, mirror)) == 1
+    assert len(_posted_rows(db, j["je_id"])) == 1
+    assert verify_chain(db.get_collection("audit_logs"))["intact"] is True
+
+
+def test_d84_a_read_while_an_older_worker_posts_leaves_one_event(db, monkeypatch):
+    """Rolling deploy: a previous-version worker writes POSTED, then its
+    je_posted under a RANDOM log id. A new-version read landing in between
+    wrote the fixed-id event and the old worker's row landed too: two events.
+    A read now leaves a journal posted within the grace to its poster; a read
+    after the grace finds the old worker's event and writes nothing."""
+    _user(db, "checker", ["ADMIN"])
+    reader = _user(db, "accounts", ["ACCOUNTANT"])
+    j = _submitted_journal(db, "maker")
+    assert _journal_approve(db, j["je_id"]).get("ok") is True
+    fixed_id = je_service._posted_event_id
+    monkeypatch.setattr(je_service, "_posted_event_id",          # the previous version's Post
+                        lambda _je_id: f"AUD-{uuid.uuid4().hex[:12]}")
+    _read_inside_audit(monkeypatch, "je_posted", lambda je: [
+        _read_journal(db, monkeypatch, route, j["je_id"], reader)
+        for route in ("list", "detail", "export")])
+    assert _post(db, j["je_id"]).get("ok") is True
+    monkeypatch.setattr(je_service, "_posted_event_id", fixed_id)
+    rows = _posted_rows(db, j["je_id"])
+    assert len(rows) == 1                                       # was two
+    assert rows[0]["log_id"] != fixed_id(j["je_id"])            # the old worker's own
+    _aged(db, j["je_id"])
+    for route in ("list", "detail", "export"):
+        assert _read_journal(db, monkeypatch, route, j["je_id"], reader) == 200
+    assert len(_posted_rows(db, j["je_id"])) == 1
+
+
+def test_d84_a_reversed_journal_missing_its_posted_event_is_repaired(db, monkeypatch):
+    """A journal whose Post audit was lost and which was reversed before any
+    read became REVERSED, and the repair only looked at POSTED journals: it
+    never got its je_posted. A REVERSED journal was posted, so a read writes
+    the event once (fixed id, the poster, recording the posting)."""
+    _user(db, "checker", ["ADMIN"])
+    reader = _user(db, "accounts", ["ACCOUNTANT"])
+    j = _submitted_journal(db, "maker")
+    assert _journal_approve(db, j["je_id"]).get("ok") is True
+    real_audit = je_service._audit
+    monkeypatch.setattr(je_service, "_audit", lambda *a, **k: None)
+    assert _post(db, j["je_id"]).get("ok") is True
+    monkeypatch.setattr(je_service, "_audit", real_audit)
+    assert je_service.reverse_je(db, je_id=j["je_id"], actor_id="reverser").get("ok") is True
+    assert _je(db, j["je_id"])["status"] == "REVERSED"
+    assert _posted_rows(db, j["je_id"]) == []
+    _aged(db, j["je_id"])
+    for route in ("list", "detail"):
+        assert _read_journal(db, monkeypatch, route, j["je_id"], reader) == 200
+    rows = _posted_rows(db, j["je_id"])
+    assert len(rows) == 1                                       # was 0, for good
+    assert rows[0]["log_id"] == f"AUD-JE-POSTED-{j['je_id']}"
+    assert rows[0]["user_id"] == "checker"
+    assert rows[0]["after_state"]["status"] == "POSTED"
+    assert verify_chain(db.get_collection("audit_logs"))["intact"] is True
 
 
 class _JournalsUnreadable:

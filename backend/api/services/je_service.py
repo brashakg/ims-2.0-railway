@@ -35,7 +35,7 @@ from __future__ import annotations
 import logging
 import os
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..utils.ist import now_ist, fy_start_year_ist
@@ -976,8 +976,15 @@ def _posted_event_id(je_id: str) -> str:
     return f"AUD-JE-POSTED-{je_id}"
 
 
+# A read leaves a journal posted this recently to its poster: during a rolling
+# deploy an older worker writes the event under a random log id moments after
+# the POSTED write, which the fixed id cannot refuse. The next read repairs it.
+_READ_REPAIR_GRACE = timedelta(minutes=2)
+
+
 def repair_posted_events(db, rows: List[Dict[str, Any]], *, poster_id: Optional[str] = None,
-                         reason: str = "recorded_on_read") -> List[Dict[str, Any]]:
+                         reason: str = "recorded_on_read",
+                         skip_fresh: bool = True) -> List[Dict[str, Any]]:
     """Write the je_posted event, once, for every POSTED journal of ``rows``
     that has none (D68/D84): Post answered but its audit insert failed, the
     process died between the POSTED write and the audit, or the POSTED write's
@@ -990,9 +997,21 @@ def repair_posted_events(db, rows: List[Dict[str, Any]], *, poster_id: Optional[
     random log id, which the fixed id cannot refuse: only the existence check
     guards it, so a check that fails writes nothing (the next read repairs).
     The event names the journal's poster (posted_by); a journal posted before
-    posted_by was recorded names ``poster_id`` (a Post retry) or nobody."""
+    posted_by was recorded names ``poster_id`` (a Post retry) or nobody.
+
+    A REVERSED journal was POSTED first, so it is repaired too (its event
+    records the posting). A read (``skip_fresh``) leaves a journal posted
+    within _READ_REPAIR_GRACE alone: its poster may still be writing the
+    event, under a random id if it runs the previous version."""
+    fresh_after = _now() - _READ_REPAIR_GRACE
+
+    def _fresh(r):
+        at = r.get("posted_at")
+        return skip_fresh and isinstance(at, datetime) and at > fresh_after
+
     posted = {r.get("je_id"): r for r in rows
-              if r.get("status") == STATUS_POSTED and r.get("je_id")}
+              if r.get("status") in (STATUS_POSTED, STATUS_REVERSED) and r.get("je_id")
+              and not _fresh(r)}
     if not posted:
         return rows
     try:
@@ -1003,6 +1022,7 @@ def repair_posted_events(db, rows: List[Dict[str, Any]], *, poster_id: Optional[
         return rows
     for je_id in posted.keys() - have:
         snapshot = {k: v for k, v in posted[je_id].items() if k != "_id"}
+        snapshot["status"] = STATUS_POSTED                       # the event records the posting
         _audit(db, "je_posted", snapshot,
                actor=snapshot.get("posted_by") or poster_id or "unrecorded",
                reason=reason, log_id=_posted_event_id(je_id))
@@ -1013,7 +1033,8 @@ def _already_posted(db, je: Dict[str, Any], poster_id: str) -> Dict[str, Any]:
     """A Post that finds the journal POSTED (a retry, a racing poster, or this
     Post's own write whose reply was lost) first writes its missing je_posted
     event (repair_posted_events), then answers already_posted."""
-    repair_posted_events(db, [je], poster_id=poster_id, reason="recorded_on_retry")
+    repair_posted_events(db, [je], poster_id=poster_id, reason="recorded_on_retry",
+                         skip_fresh=False)
     return {"ok": False, "http": 409, "error": "already_posted"}
 
 
@@ -1135,6 +1156,7 @@ def reverse_je(db, *, je_id: str, actor_id: str, actor_name: Optional[str] = Non
         "submitted_at": today,
         "checked_at": today,
         "posted_at": today,
+        "posted_by": actor_id,
         "updated_at": today,
     }
     # CLAIM-FIRST (adversarial P3): atomically flip the original POSTED -> REVERSED
@@ -1182,7 +1204,10 @@ def reverse_je(db, *, je_id: str, actor_id: str, actor_name: Optional[str] = Non
     rev.pop("_id", None)
     updated.pop("_id", None)
     _audit(db, "je_reversed", updated, actor=actor_id, reason=f"reversed_by={rev['je_id']}")
-    _audit(db, "je_posted", rev, actor=actor_id, reason=f"reversal_of={je_id}")
+    # The fixed id, as post_je: a read repairing the mirror between its insert
+    # and this write must not leave it two je_posted events (D84).
+    _audit(db, "je_posted", rev, actor=actor_id, reason=f"reversal_of={je_id}",
+           log_id=_posted_event_id(rev["je_id"]))
     return {"ok": True, "reversal_je_id": rev["je_id"], "je": _jsonable(rev),
             "original": _jsonable(updated)}
 
