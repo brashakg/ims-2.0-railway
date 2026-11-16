@@ -8058,6 +8058,9 @@ def _retry_claimed(coll: Any, mine: Dict[str, Any], claim: Dict[str, Any], curre
         except Exception as exc:  # noqa: BLE001
             logger.debug("[RETURNS] retry write-back skipped: %s", exc)
 
+    if update["restock_applied"]:
+        # The step the blocked-restock task asked for is done.
+        _close_task(f"return_restock_blocked:{return_id}", current_user, "Restocked: the units are back in stock.")
     booked_earlier = False
     if refund_id and retry_order is not None and retry_order.get("historical"):
         from ..services.shopify_refund import _booked_for
