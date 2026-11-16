@@ -473,7 +473,7 @@ function RowGroup({
           <SourceChip source={row.source} blind={row.blind} />
         </td>
         <td className="px-3 py-2 text-right text-gray-600">{inr(row.opening_float)}</td>
-        <td className="px-3 py-2 text-right text-gray-600">{inr(row.cash_sales)}</td>
+        <td className="px-3 py-2 text-right text-gray-600">{row.cash_sales == null ? 'Not available' : inr(row.cash_sales)}</td>
         <td className="px-3 py-2 text-right text-gray-700">{row.expected_cash == null ? '—' : inr(row.expected_cash)}</td>
         <td className="px-3 py-2 text-right text-gray-900 font-medium">
           {row.counted_cash == null ? (
@@ -522,11 +522,11 @@ function RowGroup({
                 </h3>
                 <dl className="text-sm space-y-1.5">
                   <DRow label="Opening float" value={inr(row.opening_float)} />
-                  <DRow label="+ Cash sales" value={inr(row.cash_sales)} tone="good" />
-                  {row.cash_refunds > 0 && (
+                  <DRow label="+ Cash sales" value={row.cash_sales == null ? 'Not available' : inr(row.cash_sales)} tone="good" />
+                  {(row.cash_refunds ?? 0) > 0 && (
                     <DRow label="− Cash refunds" value={inr(row.cash_refunds)} tone="bad" />
                   )}
-                  {row.cash_expenses > 0 && (
+                  {(row.cash_expenses ?? 0) > 0 && (
                     <DRow label="− Cash expenses / payouts" value={inr(row.cash_expenses)} tone="bad" />
                   )}
                   {row.bank_deposit > 0 && (

@@ -196,6 +196,7 @@ async def cash_reconciliation_summary(
             cash_register.COMPARISON_UNAVAILABLE,
         )
         several = withheld
+        no_figures = s.get("variance_status") == cash_register.COMPARISON_UNAVAILABLE
         variance = (
             None if (counted is None or several) else round(counted - expected, 2)
         )
@@ -212,11 +213,14 @@ async def cash_reconciliation_summary(
                 "session_date": sess_day,
                 "shift": s.get("shift"),
                 "opening_float": round(float(s.get("opening_float", 0) or 0), 2),
-                "cash_sales": round(float(s.get("cash_sales", 0) or 0), 2),
-                "cash_refunds": round(float(s.get("cash_refunds", 0) or 0), 2),
-                "cash_expenses": round(float(s.get("cash_expenses", 0) or 0), 2),
+                # D86(3): a close that could not read the day's drawers covers
+                # an unknown set of them -- its cash figures are not available
+                # and stay out of the totals (they would add a drawer twice).
+                "cash_sales": None if no_figures else round(float(s.get("cash_sales", 0) or 0), 2),
+                "cash_refunds": None if no_figures else round(float(s.get("cash_refunds", 0) or 0), 2),
+                "cash_expenses": None if no_figures else round(float(s.get("cash_expenses", 0) or 0), 2),
                 "bank_deposit": round(float(s.get("bank_deposit", 0) or 0), 2),
-                "expected_cash": expected,
+                "expected_cash": None if no_figures else expected,
                 "counted_cash": counted,
                 "blind": False,
                 "variance": variance,
@@ -238,7 +242,7 @@ async def cash_reconciliation_summary(
                     )
                 ),
                 "tolerance": round(abs(tol), 2),
-                "by_mode": _norm_by_mode(s.get("by_mode_breakdown")),
+                "by_mode": {} if no_figures else _norm_by_mode(s.get("by_mode_breakdown")),
                 # Both row kinds are now on ONE basis so the grid's tender
                 # column means the same thing in every row. Legacy sessions
                 # closed before the change carry a payments-only breakdown.
@@ -315,9 +319,11 @@ async def cash_reconciliation_summary(
                 # cash refunds auto-deducted (distinct from the manual cash
                 # payouts in cash_expenses) so this row is comparable to the
                 # cash-register rows above and no sales silently vanish.
-                "cash_sales": _p2r(s.get("cash_sales_paisa")),
-                "cash_refunds": _p2r(s.get("cash_refunds_paisa")),
-                "cash_expenses": _p2r(s.get("cash_payouts_paisa")),
+                # D86(3): no comparison -> no cash figures of its own (not
+                # available, left out of the totals), never the whole day's.
+                "cash_sales": None if no_comparison else _p2r(s.get("cash_sales_paisa")),
+                "cash_refunds": None if no_comparison else _p2r(s.get("cash_refunds_paisa")),
+                "cash_expenses": None if no_comparison else _p2r(s.get("cash_payouts_paisa")),
                 "bank_deposit": 0.0,
                 "expected_cash": expected,
                 "counted_cash": counted,
@@ -331,7 +337,7 @@ async def cash_reconciliation_summary(
                     else s.get("variance_status") or _recon_status(variance, tol)
                 ),
                 "tolerance": tol,
-                "by_mode": _norm_by_mode(s.get("by_mode")),
+                "by_mode": {} if no_comparison else _norm_by_mode(s.get("by_mode")),
                 "by_mode_basis": "NET_OF_RECORDED_REFUNDS",
                 "refund_double_entry_advisory": (
                     {"reason": "CO_OCCURRENCE"}

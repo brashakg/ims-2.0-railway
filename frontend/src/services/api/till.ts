@@ -90,9 +90,10 @@ export interface ZRead {
   // Z-Read identity: opening + cash_sales - cash_refunds - cash_payouts.
   // cash_sales_paisa is GROSS collected; cash_refunds_paisa is the recorded
   // customer cash refunds already auto-deducted from the expected drawer.
-  cash_sales_paisa: number;
+  // NULL (D86) on a COMPARISON_UNAVAILABLE drawer: not available.
+  cash_sales_paisa: number | null;
   cash_refunds_paisa?: number | null;
-  cash_payouts_paisa: number;
+  cash_payouts_paisa: number | null;
   refund_double_entry_advisory?: boolean | null;
   negative_expected_advisory?: boolean | null;
   negative_expected_message?: string | null;

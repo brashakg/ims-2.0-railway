@@ -1095,6 +1095,16 @@ def blind_submit(
         expected_cash_paisa = variance_paisa = None
         negative_expected = False
         vstatus = COMPARISON_UNAVAILABLE
+        # D86(3): the figures above are the WHOLE day's, not this drawer's.
+        # Stored as not available, so no screen or total shows them as its own.
+        exp = {
+            **exp,
+            "cash_sales_paisa": None,
+            "cash_refunds_paisa": None,
+            "refund_double_entry_advisory": False,
+            "by_mode": None,
+        }
+        payouts = None
     else:
         expected_cash_paisa = exp["expected_cash_paisa"]
         variance_paisa = counted - expected_cash_paisa
@@ -1838,27 +1848,59 @@ def redact_for_cashier(session: Optional[Dict[str, Any]]) -> Optional[Dict[str, 
 
 
 def _own_face_ledger(db, session: Dict[str, Any]) -> Dict[str, Any]:
-    """The per-face tally over THIS drawer's shift (D60): from the last other
-    drawer counted before it (else the start of the day) to its own count when
-    a later drawer was counted after it (else the end of the day). A one-drawer
-    day keeps the whole day, exactly as before. On a several-drawer day each
-    cash payment is placed by when its cash moved (received_at), so a balance
-    paid in a later shift on an earlier order counts in the later drawer, as
-    the rupee figures do. Drawers unreadable -> the whole day, marked read_ok
-    False."""
+    """The per-face tally over THIS drawer's shift. The shop-day's drawers
+    (counted or not) in D53 order split the day: a drawer's window ends where
+    the NEXT drawer opened (D86), or at its own count if that came first --
+    cash taken between a count and the next opening belongs to the next drawer,
+    as in the rupee figures (D60). A one-drawer day keeps the whole day,
+    exactly as before. On a several-drawer day each cash payment is placed by
+    when its cash moved (received_at), so a balance paid in a later shift on
+    an earlier order counts in the later drawer. Drawers unreadable -> the
+    whole day, marked read_ok False."""
     from .tender_reconciliation import _to_dt
 
     ws, we = _session_day_window(session)
     read_ok = True
+    day: List[Dict[str, Any]] = []
     try:
-        others = _counted_drawers(db, session)
+        coll = _sessions_coll(db)
+        if coll is None:
+            raise RuntimeError("till sessions unavailable")
+        day = sorted(
+            (
+                s
+                for s in coll.find(
+                    {"store_id": session.get("store_id"), "session_date": session.get("session_date")}
+                )
+                if s.get("status") in (STATUS_OPEN, STATUS_BLIND_SUBMITTED, STATUS_LOCKED)
+            ),
+            key=_drawer_order,
+        )
     except Exception:  # noqa: BLE001
-        others, read_ok = [], False
-    mine = _to_dt(session.get("blind_submitted_at"))
-    stamps = [t for t in (_to_dt(o.get("blind_submitted_at")) for o in others) if t is not None]
-    before = [t for t in stamps if mine is None or t < mine]
-    start = max([ws] + before)
-    end = mine if mine is not None and any(t > mine for t in stamps) else we
+        day, read_ok = [], False
+
+    def _sid(s: Dict[str, Any]) -> Any:
+        return s.get("_id") or s.get("session_id")
+
+    def _edge(prev: Dict[str, Any], nxt: Dict[str, Any]) -> Any:
+        stamps = [
+            t
+            for t in (
+                _to_dt(prev.get("blind_submitted_at")),
+                _to_dt(nxt.get("opened_at") or nxt.get("created_at")),
+            )
+            if t is not None
+        ]
+        return min(stamps) if stamps else None
+
+    ids = [_sid(s) for s in day]
+    start, end = ws, we
+    if _sid(session) in ids:
+        i = ids.index(_sid(session))
+        if i > 0:
+            start = max(ws, _edge(day[i - 1], day[i]) or ws)
+        if i + 1 < len(day):
+            end = min(we, _edge(day[i], day[i + 1]) or we)
     ledger = compute_face_ledger(
         db,
         session.get("store_id"),
@@ -1883,9 +1925,16 @@ def build_zread(db, session_id: str) -> Dict[str, Any]:
         return {"ok": False, "error": "not_found", "http": 404}
 
     opening = int(session.get("opening_float_paisa", 0) or 0)
-    cash_sales = int(session.get("cash_sales_paisa", 0) or 0)
-    cash_refunds = int(session.get("cash_refunds_paisa", 0) or 0)
-    payouts = int(session.get("cash_payouts_paisa", 0) or 0)
+    # D86(3): a drawer with no comparison has no cash figures of its own (None,
+    # not available); every other drawer reads exactly as before.
+    unavailable = session.get("variance_status") == COMPARISON_UNAVAILABLE
+
+    def _cash(key: str) -> Optional[int]:
+        return None if unavailable else int(session.get(key, 0) or 0)
+
+    cash_sales = _cash("cash_sales_paisa")
+    cash_refunds = _cash("cash_refunds_paisa")
+    payouts = _cash("cash_payouts_paisa")
     expected = session.get("expected_cash_paisa")
     counted = session.get("blind_count_paisa")
     variance = session.get("variance_paisa")

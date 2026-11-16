@@ -2215,6 +2215,28 @@ class TestR8AReadFaultNeverInventsAShortage:
         assert (out["variance"], out["variance_status"]) == (None, "COMPARISON_UNAVAILABLE")
         assert out["till_link_ok"] is False and alerts == []
 
+    def test_d86_uncompared_register_close_is_left_out_of_recon_cash_sales(self, db, monkeypatch):
+        """D86(3): the uncompared close's cash sales cover an unknown set of
+        drawers. Once B is counted on the till the day's drawers are A 1,000
+        and B 3,000; the close row added its own window's cash on top."""
+        a, b = _drawer_a_then_b(db, a_sales=[1000], b_sales=[3000])
+        restore = _fail_till_reads(db.get_collection("till_sessions"), counted_only=False)
+        try:
+            out = _cr_close_b(db, monkeypatch, 6)
+        finally:
+            restore()
+        assert out["variance_status"] == "COMPARISON_UNAVAILABLE"
+        assert till.blind_submit(
+            db, b, blind_denominations=[{"face": 500, "kind": "note", "pieces": 6}], actor=CASHIER)["ok"]
+        assert till.lock_session(db, b, actor=MANAGER)["ok"]
+        monkeypatch.setattr(finance_router.cash_recon, "_get_db", lambda: db)
+        res = asyncio.run(finance_router.cash_recon.cash_reconciliation_summary(
+            from_date=DATE, to_date=DATE, store_id=STORE, current_user=MANAGER))
+        cr = [r for r in res["rows"] if r["source"] == "CASH_REGISTER"]
+        assert cr and cr[0]["variance_status"] == "COMPARISON_UNAVAILABLE"
+        assert (cr[0]["cash_sales"], cr[0]["expected_cash"]) == (None, None)
+        assert res["totals"]["cash_sales"] == 4000.0
+
     def test_day_end_door_during_the_fault_stores_no_whole_day_variance(self, db, day_end):
         _drawer_a_then_b(db, a_sales=[1000], b_sales=[3000])
         restore = _fail_till_reads(db.get_collection("till_sessions"), counted_only=True)
@@ -2349,6 +2371,45 @@ def _face_cash(rupees, at):
             "cash_tendered_count": block}
 
 
+def _tally_while_b_is_open(db, ts):
+    """D86(1) fixture: ``ts(hour)`` is the stored time form (a string for the
+    in-memory fake, a datetime on native Mongo)."""
+    orders = db.get_collection("orders")
+    orders.insert_one({"_id": "O-A", "store_id": STORE, "created_at": ts(5),
+                       "payments": [_face_cash(1000, ts(5))]})
+    orders.insert_one({"_id": "O-LATER", "store_id": STORE, "created_at": ts(5), "payments": []})
+    coll = db.get_collection("till_sessions")
+    a = till.open_session(db, store_id=STORE, session_date=DATE, opening_float_paisa=0,
+                          actor=CASHIER)["session"]["session_id"]
+    coll.update_one({"_id": a}, {"$set": {"opened_at": datetime(2026, 11, 4, 3, 0)}})
+    assert till.blind_submit(db, a, blind_denominations=[{"face": 500, "kind": "note", "pieces": 2}],
+                             actor=CASHIER)["ok"]
+    coll.update_one({"_id": a}, {"$set": {"blind_submitted_at": datetime(2026, 11, 4, 8, 0)}})
+    assert till.lock_session(db, a, actor=MANAGER)["ok"]
+    b = till.open_session(db, store_id=STORE, session_date=DATE, opening_float_paisa=0,
+                          shift="PM", actor=CASHIER)["session"]["session_id"]
+    coll.update_one({"_id": b}, {"$set": {"opened_at": datetime(2026, 11, 4, 9, 0)}})
+    orders.update_one({"_id": "O-LATER"}, {"$push": {"payments": _face_cash(2000, ts(10))}})
+    assert coll.find_one({"_id": b})["status"] == till.STATUS_OPEN  # B not counted
+
+    fa = till.build_zread(db, a)["face_ledger"]
+    assert fa["read_ok"]
+    assert fa["coverage"]["cash_sale_legs"] == 1
+    assert fa["difference_paisa"] == 0
+    fb = till.build_zread(db, b)["face_ledger"]  # B's open-drawer tally has it
+    assert fb["coverage"]["cash_sale_legs"] == 1
+
+
+def test_d86_tally_while_the_next_drawer_is_open_on_real_mongo():
+    client, real_db, name = _real_till_db()
+    try:
+        till.ensure_till_indexes(real_db)
+        _tally_while_b_is_open(real_db, lambda h: datetime(2026, 11, 4, h, 0))
+    finally:
+        client.drop_database(name)
+        client.close()
+
+
 class TestR8CFaceLedgerFollowsTheCash:
     """F-1421-R2-C: an order opened in drawer A's shift and paid (Rs 2,000 in
     four Rs 500 notes) in drawer B's shift. Both drawers balance in rupees,
@@ -2382,6 +2443,13 @@ class TestR8CFaceLedgerFollowsTheCash:
         assert (fa["difference_paisa"], fb["difference_paisa"]) == (0, 0)
         assert (fa["coverage"]["cash_sale_legs"], fb["coverage"]["cash_sale_legs"]) == (1, 1)
         assert fa["read_ok"] and fb["read_ok"]
+
+    def test_d86_earlier_drawer_tally_ends_where_the_next_drawer_opened(self, db):
+        """D86(1): A is counted and printed while B is OPEN and not yet
+        counted, and B has taken a Rs 2,000 balance on an order opened in A's
+        shift. A's window used to run to the end of the day (only COUNTED
+        drawers bounded it), so A's tally expected B's four notes."""
+        _tally_while_b_is_open(db, lambda h: f"2026-11-04T{h:02d}:00:00")
 
     def test_control_one_drawer_day_keeps_every_payment_of_the_day(self, db):
         db.get_collection("orders").insert_one(
@@ -2453,6 +2521,32 @@ class TestR8D76OlderCodeDrawers:
         rows = [r for r in _recon(db, monkeypatch) if r["session_id"] == c]
         assert rows and rows[0]["variance"] is None and rows[0]["expected_cash"] is None
         assert rows[0]["variance_status"] == till.COMPARISON_UNAVAILABLE
+
+    def test_d86_uncompared_drawer_cash_sales_not_available_and_out_of_totals(self, db, monkeypatch):
+        """D86(3): the uncompared drawer stored the WHOLE day's cash (Rs 4,500)
+        as its cash sales; the Z-Read showed it and the reconciliation totals
+        added it to the old drawers' Rs 5,000."""
+        for rupees, at in ((1000, "2026-11-04T03:00:00"), (3000, "2026-11-04T06:00:00"),
+                           (500, "2026-11-04T11:00:00")):
+            _cash_sale(db, rupees, at)
+        self._old_drawer(db, "OLD-A", 100000, 100000, "2026-11-04T02:00:00")
+        self._old_drawer(db, "OLD-B", 400000, 300000, "2026-11-04T05:00:00")
+        c = till.open_session(db, store_id=STORE, session_date=DATE, opening_float_paisa=0,
+                              actor=CASHIER)["session"]["session_id"]
+        assert till.blind_submit(db, c, blind_denominations=[{"face": 500, "kind": "note", "pieces": 1}],
+                                 actor=CASHIER)["ok"]
+        assert till.lock_session(db, c, actor=MANAGER)["ok"]
+        z = till.build_zread(db, c)
+        assert (z["cash_sales_paisa"], z["cash_refunds_paisa"], z["cash_payouts_paisa"]) == (None, None, None)
+        assert z["counted_cash_paisa"] == 50000
+        monkeypatch.setattr(finance_router.cash_recon, "_get_db", lambda: db)
+        res = asyncio.run(finance_router.cash_recon.cash_reconciliation_summary(
+            from_date=DATE, to_date=DATE, store_id=STORE, current_user=MANAGER))
+        row = [r for r in res["rows"] if r["session_id"] == c][0]
+        assert (row["cash_sales"], row["cash_refunds"], row["cash_expenses"]) == (None, None, None)
+        assert row["counted_cash"] == 500.0
+        assert res["totals"]["cash_sales"] == 5000.0
+        assert res["totals"]["counted_cash"] == 4500.0
 
     def test_an_uncompared_count_gives_the_manager_a_check_by_hand_task(self, db, monkeypatch):
         """No comparison means no automatic alert, so a drawer that may be

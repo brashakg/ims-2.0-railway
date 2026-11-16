@@ -58,6 +58,12 @@ function CAN_LOCK(roles: string[]): boolean {
   return roles.some((r) => ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'].includes(r));
 }
 
+// D86(3): a drawer with no comparison has no cash figures of its own (the
+// server stores them as not available), never the whole day's.
+function drawerCash(s: { variance_status?: VarianceStatus }, paisa?: number | null): string {
+  return s.variance_status === 'COMPARISON_UNAVAILABLE' ? 'Not available' : paisaToInr(paisa);
+}
+
 function varianceTone(status: VarianceStatus): string {
   if (status === 'BALANCED') return 'text-emerald-700';
   return 'text-red-700';
@@ -434,9 +440,9 @@ export default function BlindEodTallyPage() {
                     their OWN line, never merged into the manual payout figure. */}
                 <div className="grid grid-cols-3 tablet:grid-cols-6 gap-3 mt-3 text-sm">
                   <Figure label="Opening float" value={paisaToInr(s.opening_float_paisa)} />
-                  <Figure label="Cash sales (gross)" value={paisaToInr(s.cash_sales_paisa)} />
-                  <Figure label="Cash refunds (recorded)" value={paisaToInr(s.cash_refunds_paisa)} />
-                  <Figure label="Cash payouts (auto)" value={paisaToInr(s.cash_payouts_paisa)} />
+                  <Figure label="Cash sales (gross)" value={drawerCash(s, s.cash_sales_paisa)} />
+                  <Figure label="Cash refunds (recorded)" value={drawerCash(s, s.cash_refunds_paisa)} />
+                  <Figure label="Cash payouts (auto)" value={drawerCash(s, s.cash_payouts_paisa)} />
                   <Figure label="Expected" value={s.expected_cash_paisa == null ? '—' : paisaToInr(s.expected_cash_paisa)} />
                   <Figure label="Counted" value={paisaToInr(s.blind_count_paisa)} />
                 </div>
@@ -504,9 +510,9 @@ export default function BlindEodTallyPage() {
                     their OWN line, never merged into the manual payout figure. */}
                 <div className="grid grid-cols-3 tablet:grid-cols-6 gap-3 mt-3 text-sm">
                   <Figure label="Opening float" value={paisaToInr(s.opening_float_paisa)} />
-                  <Figure label="Cash sales (gross)" value={paisaToInr(s.cash_sales_paisa)} />
-                  <Figure label="Cash refunds (recorded)" value={paisaToInr(s.cash_refunds_paisa)} />
-                  <Figure label="Cash payouts (auto)" value={paisaToInr(s.cash_payouts_paisa)} />
+                  <Figure label="Cash sales (gross)" value={drawerCash(s, s.cash_sales_paisa)} />
+                  <Figure label="Cash refunds (recorded)" value={drawerCash(s, s.cash_refunds_paisa)} />
+                  <Figure label="Cash payouts (auto)" value={drawerCash(s, s.cash_payouts_paisa)} />
                   <Figure label="Expected" value={s.expected_cash_paisa == null ? '—' : paisaToInr(s.expected_cash_paisa)} />
                   <Figure label="Counted" value={paisaToInr(s.blind_count_paisa)} />
                 </div>

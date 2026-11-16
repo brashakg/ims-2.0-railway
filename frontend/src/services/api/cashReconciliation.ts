@@ -48,9 +48,11 @@ export interface ReconRow {
   session_date: string;
   shift?: string | null;
   opening_float: number;
-  cash_sales: number;
-  cash_refunds: number;
-  cash_expenses: number;
+  // NULL (D86): COMPARISON_UNAVAILABLE -- no cash figures of its own; the
+  // totals leave it out. Never render a null as zero.
+  cash_sales: number | null;
+  cash_refunds: number | null;
+  cash_expenses: number | null;
   bank_deposit: number;
   // NULL: no comparison is made for this drawer (COMPARISON_UNAVAILABLE).
   expected_cash: number | null;
