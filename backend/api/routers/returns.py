@@ -6341,7 +6341,16 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
             # the doc rides on the hold and on a P1 task, for Complete record.
             logger.error("[RETURNS] return %s money recorded but its doc was NOT saved: %s", return_id, exc)
             _keep_order_refund_hold(resolved_order_id, return_id, extra={"doc": dict(doc)})
-            _task_return_doc_missing(doc)
+            # A record of this return that is there after all (its own insert,
+            # the reply lost; or Accounts rebuilt it in Needs completing while
+            # this press stalled) needs no "record not saved" alarm. Unread:
+            # the alarm stands.
+            try:
+                exists = coll.find_one({"return_id": return_id}, {"_id": 1}) is not None
+            except Exception:  # noqa: BLE001
+                exists = False
+            if not exists:
+                _task_return_doc_missing(doc)
 
     # Audit log (optional, fail-soft).
     try:
