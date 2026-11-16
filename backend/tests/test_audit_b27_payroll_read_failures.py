@@ -113,6 +113,10 @@ def test_staff_payslip_with_no_database_is_503_not_no_payslip(monkeypatch):
         # D83: the screen showed the built-in slabs as if they were stored.
         "/api/v1/payroll/pt-slabs",
         "/api/v1/payroll/pt-slabs/MH",
+        # Salary Setup and Payroll Run: zeros / no rows read as "nothing saved".
+        "/api/v1/payroll/config",
+        "/api/v1/payroll/run/rows?month=9&year=2026",
+        "/api/v1/payroll/registers/summary?month=9&year=2026",
     ],
 )
 def test_admin_payroll_reads_with_no_database_are_503_not_empty(monkeypatch, path):

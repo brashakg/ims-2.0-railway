@@ -604,8 +604,8 @@ async def list_salary_configs(
     """
     _assert_salary_admin(current_user)
     db = _get_db()
-    if db is None:
-        return {"configs": [], "total": 0}
+    if db is None:  # an unreadable register is not an empty month
+        raise HTTPException(status_code=503, detail="Database not available")
     # BUG-062 tail: salary configs carry bank/PAN/UAN PII -- a store-scoped role
     # must not read another store's by passing ?store_id (validate), nor all
     # stores by omitting it (pinned to own store; HQ roles still get all).
@@ -1910,8 +1910,8 @@ async def list_payroll_rows(
     """
     _assert_salary_admin(current_user)
     db = _get_db()
-    if db is None:
-        return {"rows": [], "total": 0, "totals": {}}
+    if db is None:  # an unreadable register is not an empty month
+        raise HTTPException(status_code=503, detail="Database not available")
     # BUG-062 tail: scope the salary register to the caller's store reach.
     store_id = resolve_store_scope(store_id, current_user)
     # A stalled run's draft that landed behind a lock is gone before anyone
@@ -2374,13 +2374,8 @@ async def payroll_statutory_summary(
     """
     _assert_salary_admin(current_user)
     db = _get_db()
-    if db is None:
-        return {
-            "summary": statutory_summary([]),
-            "month": month,
-            "year": year,
-            "count": 0,
-        }
+    if db is None:  # an unreadable register is not an empty month
+        raise HTTPException(status_code=503, detail="Database not available")
     # BUG-062 tail: scope statutory totals to the caller's store reach.
     store_id = resolve_store_scope(store_id, current_user)
     try:
