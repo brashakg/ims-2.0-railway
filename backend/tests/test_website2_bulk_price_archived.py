@@ -633,8 +633,10 @@ def test_a_write_that_cannot_be_confirmed_answers_503_and_the_retry_finishes_it_
     assert ei.value.status_code == 503 and "Retry the same Apply" in ei.value.detail
     restore()
     monkeypatch.setattr(products_mod, "_stored_doc", real_read, raising=False)
-    # D94(2): P2 was confirmed, so it is audited before the 503 for P1.
-    assert _named(db, action) == ["P2"]
+    # D94(2): P2 was confirmed, so it is audited before the 503 for P1 --
+    # and so is P1: its write landed, and the record that write left on it
+    # is found by the end-of-Apply read (D84), even though its own read-back failed.
+    assert _named(db, action) == ["P1", "P2"]
     again = _run(fn(apply, ADMIN))
     assert again["summary"]["committed"] == 0 and again["summary"]["counts"]["already_applied"] == 2
     assert _named(db, action) == ["P1", "P2"]
@@ -808,3 +810,90 @@ def test_a_retry_with_changed_content_never_moves_a_landed_row_again(db, monkeyp
     assert rows["P2"]["applied"] is True
     assert _prices(db, "P1") == (5010.0, 4510.0) and _prices(db, "P2") == (5020.0, 4520.0)
     assert _named(db, action) == ["P1", "P2"]
+
+
+# ===========================================================================
+# D84 / D94(2)(3) (PR-1429, head 9883bfce): every row an Apply landed keeps
+# its audit entry -- when the row is edited again before the retry, when the
+# retry is refused 409 for a changed scope, and when staff press Preview
+# instead of the retry (read repair). The entry comes from the record the
+# Apply's own write left on the product.
+# ===========================================================================
+
+
+def _apply_whose_audit_fails(db, monkeypatch, fn, body, action):
+    from fastapi import HTTPException
+
+    apply = _reviewed_apply(db, fn, body)
+    real_create = AuditRepository.create
+    monkeypatch.setattr(AuditRepository, "create", lambda self, data: None)
+    with pytest.raises(HTTPException) as ei:
+        _run(fn(apply, ADMIN))
+    assert ei.value.status_code == 503
+    monkeypatch.setattr(AuditRepository, "create", real_create)
+    assert _audits(db, action) == []
+    return apply
+
+
+def _entry(db, action, pid):
+    (a,) = [a for a in _audits(db, action) if a["entity_id"] == pid]
+    return a
+
+
+@pytest.mark.parametrize("fn,body,action,want", _BOTH_DOORS)
+def test_a_landed_row_edited_before_the_retry_is_still_audited(db, monkeypatch, fn, body, action, want):
+    """X lands P1 and P2, its audit cannot be written (503 'press again'),
+    then P2 is edited through the ordinary edit door. The identical retry
+    leaves P2 alone (never moved again) and still writes X's entry for P2,
+    with the change X made (was -> X's price), not today's price."""
+    apply = _apply_whose_audit_fails(db, monkeypatch, fn, body, action)
+    assert products_mod.get_product_repository().update("P2", {"mrp": 6000.0, "offer_price": 5500.0})
+    again = _run(fn(apply, ADMIN))
+    assert {r["product_id"]: r.get("reason") for r in again["rows"]}["P2"] == "CHANGED_SINCE_PREVIEW"
+    assert _prices(db, "P2") == (6000.0, 5500.0) and _prices(db, "P1") == want
+    assert _named(db, action) == ["P1", "P2"]
+    p2 = _entry(db, action, "P2")
+    assert p2["details"]["changes"][0]["offer_price"] == [_WAS[1], want[1]]
+    assert p2["user_id"] == ADMIN["user_id"] and p2["log_id"].startswith(action + ":")
+
+
+@pytest.mark.parametrize("fn,body,action,want", _BOTH_DOORS)
+@pytest.mark.parametrize("drift", ["added", "gone"])
+def test_a_retry_refused_for_a_changed_scope_still_audits_the_landed_rows(
+    db, monkeypatch, fn, body, action, want, drift
+):
+    """X lands P1 and P2, its audit cannot be written; then a product joins
+    the scope (or P2 leaves it). The identical retry is refused 409 and
+    writes nothing -- but X's landed rows are audited before the refusal,
+    the one that left the scope included."""
+    from fastapi import HTTPException
+
+    apply = _apply_whose_audit_fails(db, monkeypatch, fn, body, action)
+    if drift == "added":
+        _seed(db, "P3")
+    else:
+        db["products"].update_one({"product_id": "P2"}, {"$set": {"is_active": False}})
+    with pytest.raises(HTTPException) as ei:
+        _run(fn(apply, ADMIN))
+    assert ei.value.status_code == 409
+    assert _named(db, action) == ["P1", "P2"]
+    assert _prices(db, "P1") == want and _prices(db, "P2") == want
+
+
+@pytest.mark.parametrize("fn,body,action,want", _BOTH_DOORS)
+def test_a_preview_instead_of_the_retry_audits_the_landed_rows_once(db, monkeypatch, fn, body, action, want):
+    """D84 read repair on the D94(4) path: X lands P1 and P2, its audit
+    cannot be written, and staff press Preview instead of the retry. That
+    read writes X's entries (under X's id and X's user), once; a product
+    that merely carries a copy of another product's record gets none."""
+    _apply_whose_audit_fails(db, monkeypatch, fn, body, action)
+    p1 = db["products"].find_one({"product_id": "P1"})
+    _seed(db, "P3")
+    db["products"].update_one(
+        {"product_id": "P3"}, {"$set": {"bulk_write_id": p1["bulk_write_id"], "bulk_write": p1["bulk_write"]}}
+    )
+    for _ in range(2):
+        _run(fn(body, ADMIN))
+        assert _named(db, action) == ["P1", "P2"]
+    assert {a["details"]["apply_id"] for a in _audits(db, action)} == {p1["bulk_write_id"]}
+    assert {a["user_id"] for a in _audits(db, action)} == {ADMIN["user_id"]}
