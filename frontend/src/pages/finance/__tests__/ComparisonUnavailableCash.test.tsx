@@ -144,3 +144,27 @@ describe('Cash reconciliation - D88(1)', () => {
     expect(screen.queryByText(/not added/)).toBeNull();
   });
 });
+
+describe('Cash reconciliation - D88(1) CSV export', () => {
+  it('the export says which rows are not in the totals', async () => {
+    let blob: Blob | null = null;
+    const create = vi.fn((b: Blob) => { blob = b; return 'blob:x'; });
+    Object.assign(URL, { createObjectURL: create, revokeObjectURL: vi.fn() });
+    recon.summary.mockResolvedValue({
+      rows: [
+        row({ session_id: 'TILL-B', counted_cash: 3000 }),
+        row({ session_id: 'CR-1', source: 'CASH_REGISTER', blind: false, also_counted_on_till: true }),
+      ],
+      totals: { sessions: 1, also_counted_on_till: 1, cash_sales: 3000 },
+    });
+    render(<CashReconciliationPage />);
+    await screen.findByText('Also counted on the till');
+    fireEvent.click(screen.getByText('Export CSV'));
+    expect(create).toHaveBeenCalled();
+    const text = await (blob as unknown as Blob).text();
+    const [head, ...lines] = text.split('\n');
+    expect(head.endsWith(',In Totals')).toBe(true);
+    expect(lines.filter((l) => l.endsWith(',NO - also counted on the till'))).toHaveLength(1);
+    expect(lines.filter((l) => l.endsWith(',YES'))).toHaveLength(1);
+  });
+});

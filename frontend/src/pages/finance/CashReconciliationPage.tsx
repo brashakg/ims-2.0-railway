@@ -221,6 +221,9 @@ export default function CashReconciliationPage() {
       'Closed At',
       'Z-Read',
       'Reviewed',
+      // D88: a close also counted on the till is not in the totals; say so
+      // in the file too, so a sum of the column does not add it twice.
+      'In Totals',
     ];
     const esc = (v: unknown) => {
       const s = v === null || v === undefined ? '' : String(v);
@@ -245,6 +248,7 @@ export default function CashReconciliationPage() {
         r.closed_at || '',
         r.zread_number || '',
         r.signoff?.reviewed ? 'YES' : 'NO',
+        r.also_counted_on_till ? 'NO - also counted on the till' : 'YES',
       ]
         .map(esc)
         .join(','),
