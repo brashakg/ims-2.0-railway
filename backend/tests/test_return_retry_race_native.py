@@ -749,3 +749,38 @@ def test_a_press_resuming_after_its_rebuilt_record_was_retried_adds_no_second_re
     saved = ctx["returns_coll"].docs[-1]  # the press's own record (Accounts' rebuilt one is elsewhere)
     key = "restock_stock_ids" if condition == "GOOD" else "quarantined_stock_ids"
     assert saved["restock_applied"] is True and saved[key] == moved, saved
+
+
+@pytest.mark.parametrize("field", ["return_slot", "return_slots"])
+@pytest.mark.parametrize("condition,status", [("GOOD", "AVAILABLE"), ("DAMAGED", "QUARANTINED")])
+def test_the_counter_press_refuses_when_a_return_slot_index_is_missing(press, field, condition, status):
+    """D82: the slot guarantee IS the index, for the counter press as for the
+    Retry stock step. Without it the press refuses (503) before it writes
+    anything -- no stock, no credit, no record, no hold or claim left on the
+    bill -- and the identical press, once the index is back, returns the
+    piece once."""
+    from tests.test_returns_restock import _hdr, _payload
+
+    ctx, db = press
+    db.stock_units.insert_one({"_id": "STK-1", "stock_id": "STK-1", "product_id": "PRD-1",
+                               "store_id": "BV-PUN-01", "status": "SOLD", "order_id": "ORD-1", "quantity": 1})
+    name = "uniq_stock_unit_" + field
+    db.stock_units.drop_index(name)
+    body = _payload()
+    body["items"][0]["condition"] = condition
+    r = ctx["client"].post("/api/v1/returns", json=body, headers=_hdr(["ADMIN"]))
+    assert r.status_code == 503, r.text
+    assert "Nothing was changed" in r.json()["detail"]
+    assert db.stock_units.find_one({"_id": "STK-1"})["status"] == "SOLD"
+    assert db.stock_units.count_documents({}) == 1
+    assert ctx["returns_coll"].docs == [] and ctx["ledger_coll"].docs == []
+    bill = ctx["order_repo"]._order
+    assert not bill.get("refund_holds"), bill.get("refund_holds")
+    assert not any(li.get("claim_tokens") or li.get("returned_qty") for li in bill["items"]), bill["items"]
+
+    db.stock_units.create_index(field, unique=True, name=name,
+                                partialFilterExpression={field: {"$type": "string"}})
+    again = ctx["client"].post("/api/v1/returns", json=body, headers=_hdr(["ADMIN"]))
+    assert again.status_code == 201, again.text
+    assert [u["stock_id"] for u in db.stock_units.find({"status": status})] == ["STK-1"]
+    assert db.stock_units.count_documents({}) == 1

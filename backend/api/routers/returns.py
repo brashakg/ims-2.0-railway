@@ -5796,6 +5796,14 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
     # only AFTER every 400/422 input check passes (so a validation error never
     # leaves a phantom reservation).
     resolved_lines = _returnable_lines(active_lines, order, resolved_order_id)
+    # D82: the unique return-slot indexes ARE the guarantee that one returned
+    # piece becomes one stock record (D45a) -- for this press as for the Retry
+    # stock step. Missing or unreadable: refuse BEFORE anything is written
+    # (hold, claim, credit, stock), never run unguarded.
+    if not _return_slot_index_ok():
+        raise HTTPException(status_code=503, detail=(
+            "Returns are paused: the database check that keeps one returned piece to one stock record "
+            "is not installed. Nothing was changed. Tell head office."))
 
     # 0b. SERIAL-MISMATCH HARD-BLOCK (E3 acceptance #8, return half). Runs after
     #     the quantity guard and BEFORE any money math / atomic claim, so a
@@ -7493,8 +7501,9 @@ def _return_slot_index_ok() -> bool:
     """Is uniq_stock_unit_return_slot on the stock? It IS the D45(a)
     guarantee (_return_slot_keys): without it a stalled retry and its taker
     can both move one piece. ensure_indexes builds it fail-soft, so the
-    Retry stock step checks before every claim and refuses when it is
-    missing or cannot be read. An in-memory double (no pymongo collection)
+    Retry stock step checks before every claim, and the counter press
+    before its first write (D82), and both refuse when it is missing or
+    cannot be read. An in-memory double (no pymongo collection)
     runs in one process and has no index to check."""
     from pymongo.collection import Collection
 
@@ -7508,7 +7517,7 @@ def _return_slot_index_ok() -> bool:
     except Exception:  # noqa: BLE001
         ok = False
     if not ok:
-        logger.critical("[RETURNS] Retry stock step REFUSED: a unique index of %s "
+        logger.critical("[RETURNS] return stock write REFUSED: a unique index of %s "
                         "is missing (or unreadable) on stock_units -- rebuild it (ensure_indexes)",
                         ", ".join(_RETURN_SLOT_INDEXES))
     return ok
