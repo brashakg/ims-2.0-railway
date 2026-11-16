@@ -14,6 +14,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useNow } from '../../hooks/useNow';
 import { toDate } from '../../utils/datetime';
 import { handoffsApi, type ClinicalHandover } from '../../services/api/handoffs';
+import HandoffsUnavailable from './HandoffsUnavailable';
 // PATIENT SAFETY: one power formatter, and a recorded 0 is not a blank.
 import { formatPowerOrDash, hasRecordedPower } from '../../utils/rxPowerValue';
 
@@ -106,8 +107,11 @@ export function ClinicalHandoverCard({ refreshKey }: ClinicalHandoverCardProps) 
     }
   };
 
-  // Hide entirely when there's nothing (and during the silent load / error).
-  if (loading || error || items.length === 0) return null;
+  // Hide during the silent load and when there's nothing; a failed read is
+  // never shown as "nothing" (an Rx sent to the floor must not vanish).
+  if (loading) return null;
+  if (error) return <HandoffsUnavailable what="Clinical handovers" onRetry={refetch} />;
+  if (items.length === 0) return null;
 
   return (
     <section style={sectionStyle}>

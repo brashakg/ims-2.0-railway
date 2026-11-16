@@ -26,6 +26,7 @@ import {
 } from '../../services/api/handoffs';
 import HandoffResponseModal from './HandoffResponseModal';
 import HandoffDismissModal from './HandoffDismissModal';
+import HandoffsUnavailable from './HandoffsUnavailable';
 
 // 30 s tick — fine enough for "2 m ago" / "in 1 d" without being chatty.
 const TICK_MS = 30 * 1000;
@@ -164,7 +165,8 @@ export function HandoffInboxCard({ refreshKey }: HandoffInboxCardProps) {
   // Hide the entire section when there's nothing to show (loading state
   // is silent — the user shouldn't see a "loading" hub block).
   if (loading) return null;
-  if (error) return null;
+  // Review R23 follow-up: a failed read is never shown as an empty inbox.
+  if (error) return <HandoffsUnavailable what="Handoffs" onRetry={refetch} />;
   if (total === 0 || items.length === 0) return null;
 
   const handleResponded = (
