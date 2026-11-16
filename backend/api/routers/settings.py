@@ -139,48 +139,56 @@ def _get_settings_collection(collection_name: str):
     return None
 
 
-def _get_business_settings_from_db() -> Optional[dict]:
-    """Fetch business settings from database"""
-    collection = _get_settings_collection("business_settings")
-    if collection is not None:
-        settings = collection.find_one({"_id": "default"})
-        if settings:
-            settings.pop("_id", None)
-            return settings
-    return None
+def _require_settings_collection(collection_name: str):
+    """The collection, or 503. For the settings singletons an unreachable
+    database is NOT "nothing saved yet": answering the model defaults on read
+    (or "updated (no DB)" on save) let the screen show 18% / 365 days / 80mm as
+    the saved values and then write them over the real record (audit L1-F05)."""
+    collection = _get_settings_collection(collection_name)
+    if collection is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Settings store unavailable. Nothing was read or saved - try again.",
+        )
+    return collection
 
 
-def _get_tax_settings_from_db() -> Optional[dict]:
-    """Fetch tax settings from database"""
-    collection = _get_settings_collection("tax_settings")
-    if collection is not None:
-        settings = collection.find_one({"_id": "default"})
-        if settings:
-            settings.pop("_id", None)
-            return settings
-    return None
+def _read_singleton_settings(collection_name: str, model: type) -> dict:
+    """The stored singleton; the model defaults only when the database was
+    REACHED and holds no record yet (the clean first run)."""
+    stored = _require_settings_collection(collection_name).find_one({"_id": "default"})
+    if not stored:
+        return model().model_dump()
+    stored.pop("_id", None)
+    return stored
 
 
-def _get_invoice_settings_from_db() -> Optional[dict]:
-    """Fetch invoice settings from database"""
-    collection = _get_settings_collection("invoice_settings")
-    if collection is not None:
-        settings = collection.find_one({"_id": "default"})
-        if settings:
-            settings.pop("_id", None)
-            return settings
-    return None
+def _save_singleton_settings(collection_name: str, settings: BaseModel, label: str) -> dict:
+    """Save one settings singleton as a PARTIAL update (audit L1-F05).
 
-
-def _get_printer_settings_from_db() -> Optional[dict]:
-    """Fetch printer settings from database"""
-    collection = _get_settings_collection("printer_settings")
-    if collection is not None:
-        settings = collection.find_one({"_id": "default"})
-        if settings:
-            settings.pop("_id", None)
-            return settings
-    return None
+    Only the fields the caller actually sent are written. The handlers used to
+    write `settings.model_dump()`, so a body that left a field out (the Tax,
+    Invoice and Printer screens sent `{}` after a failed read; the logo upload
+    sends only `logo_url`) replaced every other STORED value with the model
+    default. Model defaults now land only when the record is first created
+    ($setOnInsert), never over a value that is already saved. A body with no
+    known field is refused: nothing would be saved, so it must not say it was.
+    """
+    sent = settings.model_dump(exclude_unset=True)
+    if not sent:
+        raise HTTPException(
+            status_code=400,
+            detail=f"No {label.lower()} settings were sent, so nothing was saved.",
+        )
+    first_time = {k: v for k, v in type(settings)().model_dump().items() if k not in sent}
+    collection = _require_settings_collection(collection_name)
+    update: Dict[str, Any] = {"$set": sent}
+    if first_time:
+        update["$setOnInsert"] = first_time
+    collection.update_one({"_id": "default"}, update, upsert=True)
+    stored = collection.find_one({"_id": "default"}) or {}
+    stored.pop("_id", None)
+    return {"message": f"{label} settings updated", "settings": stored}
 
 
 def _get_notification_templates_from_db() -> List[dict]:
@@ -876,11 +884,7 @@ async def update_preferences(
 @router.get("/business")
 async def get_business_settings(current_user: dict = Depends(get_current_user)):
     """Get business/company settings"""
-    db_settings = _get_business_settings_from_db()
-    if db_settings:
-        return db_settings
-    # Return default empty settings
-    return BusinessSettings().model_dump()
+    return _read_singleton_settings("business_settings", BusinessSettings)
 
 
 @router.put("/business")
@@ -890,12 +894,7 @@ async def update_business_settings(
     """Update business settings (SUPERADMIN/ADMIN only)"""
     if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN"]):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
-    payload = settings.model_dump()
-    collection = _get_settings_collection("business_settings")
-    if collection is not None:
-        collection.update_one({"_id": "default"}, {"$set": payload}, upsert=True)
-        return {"message": "Business settings updated", "settings": payload}
-    return {"message": "Business settings updated (no DB)", "settings": payload}
+    return _save_singleton_settings("business_settings", settings, "Business")
 
 
 # Company logo upload constraints. Images only (no PDF) and a modest cap --
@@ -1042,11 +1041,7 @@ async def get_logo(
 @router.get("/tax")
 async def get_tax_settings(current_user: dict = Depends(get_current_user)):
     """Get tax and compliance settings"""
-    db_settings = _get_tax_settings_from_db()
-    if db_settings:
-        return db_settings
-    # Return default settings
-    return TaxSettings().model_dump()
+    return _read_singleton_settings("tax_settings", TaxSettings)
 
 
 @router.put("/tax")
@@ -1058,12 +1053,7 @@ async def update_tax_settings(
         role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN", "ACCOUNTANT"]
     ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
-    payload = settings.model_dump()
-    collection = _get_settings_collection("tax_settings")
-    if collection is not None:
-        collection.update_one({"_id": "default"}, {"$set": payload}, upsert=True)
-        return {"message": "Tax settings updated", "settings": payload}
-    return {"message": "Tax settings updated (no DB)", "settings": payload}
+    return _save_singleton_settings("tax_settings", settings, "Tax")
 
 
 # ============================================================================
@@ -1074,11 +1064,7 @@ async def update_tax_settings(
 @router.get("/invoice")
 async def get_invoice_settings(current_user: dict = Depends(get_current_user)):
     """Get invoice settings"""
-    db_settings = _get_invoice_settings_from_db()
-    if db_settings:
-        return db_settings
-    # Return default settings
-    return InvoiceSettings().model_dump()
+    return _read_singleton_settings("invoice_settings", InvoiceSettings)
 
 
 @router.put("/invoice")
@@ -1090,12 +1076,7 @@ async def update_invoice_settings(
         role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN", "ACCOUNTANT"]
     ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
-    payload = settings.model_dump()
-    collection = _get_settings_collection("invoice_settings")
-    if collection is not None:
-        collection.update_one({"_id": "default"}, {"$set": payload}, upsert=True)
-        return {"message": "Invoice settings updated", "settings": payload}
-    return {"message": "Invoice settings updated (no DB)", "settings": payload}
+    return _save_singleton_settings("invoice_settings", settings, "Invoice")
 
 
 # ============================================================================
@@ -1426,11 +1407,7 @@ async def test_notification(
 @router.get("/printers")
 async def get_printer_settings(current_user: dict = Depends(get_current_user)):
     """Get printer settings"""
-    db_settings = _get_printer_settings_from_db()
-    if db_settings:
-        return db_settings
-    # Return default settings
-    return PrinterSettings().model_dump()
+    return _read_singleton_settings("printer_settings", PrinterSettings)
 
 
 @router.put("/printers")
@@ -1449,12 +1426,7 @@ async def update_printer_settings(
         for role in ["SUPERADMIN", "ADMIN", "STORE_MANAGER"]
     ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
-    payload = settings.model_dump()
-    collection = _get_settings_collection("printer_settings")
-    if collection is not None:
-        collection.update_one({"_id": "default"}, {"$set": payload}, upsert=True)
-        return {"message": "Printer settings updated", "settings": payload}
-    return {"message": "Printer settings updated (no DB)", "settings": payload}
+    return _save_singleton_settings("printer_settings", settings, "Printer")
 
 
 @router.get("/printers/available")
@@ -2072,13 +2044,13 @@ async def get_system_settings(current_user: dict = Depends(get_current_user)):
     """Get system settings (SUPERADMIN/ADMIN only)"""
     if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN"]):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
-    collection = _get_settings_collection("system_settings")
-    if collection is not None:
-        settings = collection.find_one({"_id": "default"})
-        if settings:
-            settings.pop("_id", None)
-            return settings
-    # Return default empty settings
+    # 503 when unreachable: the Auto-logout and Website page types cards save
+    # their own keys back, so defaults must never pass for the saved values.
+    settings = _require_settings_collection("system_settings").find_one({"_id": "default"})
+    if settings:
+        settings.pop("_id", None)
+        return settings
+    # Reached, no record yet: the defaults
     return {
         "maintenance_mode": False,
         "allow_registrations": False,
@@ -2127,23 +2099,21 @@ async def update_system_settings(
         raise HTTPException(status_code=403, detail="Superadmin access required")
     # Strip any attempt to pass internal Mongo _id
     settings_clean = {k: v for k, v in settings.items() if k != "_id"}
-    collection = _get_settings_collection("system_settings")
-    if collection is not None:
-        before = collection.find_one({"_id": "default"}) or {}
-        collection.update_one(
-            {"_id": "default"},
-            {
-                "$set": {
-                    **settings_clean,
-                    "updated_at": utc_now_iso(),
-                }
-            },
-            upsert=True,
-        )
-        if before.get("web_page_types_enabled") is True and settings_clean.get("web_page_types_enabled") is False:
-            _resend_stock_now()
-        return {"message": "System settings updated", "settings": settings_clean}
-    return {"message": "System settings updated (no DB)", "settings": settings_clean}
+    collection = _require_settings_collection("system_settings")  # never "updated (no DB)"
+    before = collection.find_one({"_id": "default"}) or {}
+    collection.update_one(
+        {"_id": "default"},
+        {
+            "$set": {
+                **settings_clean,
+                "updated_at": utc_now_iso(),
+            }
+        },
+        upsert=True,
+    )
+    if before.get("web_page_types_enabled") is True and settings_clean.get("web_page_types_enabled") is False:
+        _resend_stock_now()
+    return {"message": "System settings updated", "settings": settings_clean}
 
 
 # ============================================================================
@@ -2882,10 +2852,11 @@ async def get_policies_batch(
     """Effective value of every key at the requested scope (secrets masked)."""
     from api.services import policy_engine
 
-    return {
-        "scope": scope or "global",
-        "policies": policy_engine.get_policies(None, _parse_policy_scope(scope)),
-    }
+    try:
+        policies = policy_engine.get_policies(None, _parse_policy_scope(scope))
+    except policy_engine.PolicyError as exc:  # store unreadable: 503, never defaults
+        raise HTTPException(status_code=exc.status, detail=str(exc))
+    return {"scope": scope or "global", "policies": policies}
 
 
 @router.get("/policies/{key}")
@@ -2901,6 +2872,8 @@ async def get_policy_one(
         return policy_engine.get_effective(key, _parse_policy_scope(scope))
     except KeyError:
         raise HTTPException(status_code=404, detail=f"unknown policy key: {key}")
+    except policy_engine.PolicyError as exc:  # store unreadable: 503, never defaults
+        raise HTTPException(status_code=exc.status, detail=str(exc))
 
 
 @router.put("/policies/{key}")
