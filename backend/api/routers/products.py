@@ -1698,6 +1698,10 @@ async def bulk_price_update(
 
     rows: List[dict] = []
     committed: List[dict] = []
+    # Rows an earlier Apply of this preview already saved: never written
+    # again, but named in this audit (that Apply may have died before its
+    # own audit), so every landed change has an audit trace.
+    recovered: List[dict] = []
     website_failed = 0
     counts = {
         "total": len(products), "valid": 0, "violations": 0, "unchanged": 0, "already_applied": 0,
@@ -1769,9 +1773,15 @@ async def bulk_price_update(
             row["applied"] = False
             row["already_applied"] = True
             counts["already_applied"] += 1
-            # See bulk_price_update: re-carry the website copy only.
-            if not _price_reaches_website(row, pid, p, {"offer_price": _round_money(new_offer)}):
-                website_failed += 1
+            recovered.append(
+                {
+                    "product_id": pid,
+                    "sku": p.get("sku"),
+                    "mrp": [row["old_mrp"], row["new_mrp"]],
+                    "offer_price": [row["old_offer_price"], row["new_offer_price"]],
+                    "recovered": True,
+                }
+            )
             # The earlier Apply may have stopped between the billing write and
             # the website copy: carry the copy again (the same price, so it
             # is idempotent); the billing price is never written twice.
@@ -1839,8 +1849,8 @@ async def bulk_price_update(
         "website_failed": website_failed,
     }
 
-    if body.apply and committed:
-        _audit_bulk("BULK_PRICE_UPDATE", current_user, summary, committed)
+    if body.apply and (committed or recovered):
+        _audit_bulk("BULK_PRICE_UPDATE", current_user, summary, committed + recovered)
         # Invalidate the product list cache so the catalog reflects new prices.
         try:
             from ..services.cache import invalidate_product_lists
@@ -1886,6 +1896,10 @@ async def bulk_offer_update(
 
     rows: List[dict] = []
     committed: List[dict] = []
+    # Rows an earlier Apply of this preview already saved: never written
+    # again, but named in this audit (that Apply may have died before its
+    # own audit), so every landed change has an audit trace.
+    recovered: List[dict] = []
     website_failed = 0
     counts = {
         "total": len(products), "valid": 0, "violations": 0, "unchanged": 0, "already_applied": 0,
@@ -1951,6 +1965,17 @@ async def bulk_offer_update(
             row["applied"] = False
             row["already_applied"] = True
             counts["already_applied"] += 1
+            recovered.append(
+                {
+                    "product_id": pid,
+                    "sku": p.get("sku"),
+                    "offer_price": [row["old_offer_price"], row["new_offer_price"]],
+                    "recovered": True,
+                }
+            )
+            # See bulk_price_update: re-carry the website copy only.
+            if not _price_reaches_website(row, pid, p, {"offer_price": _round_money(new_offer)}):
+                website_failed += 1
         elif body.apply and verdict["ok"] and changed and repo is not None and pid:
             try:
                 price_patch = {"offer_price": _round_money(new_offer)}
@@ -2007,8 +2032,8 @@ async def bulk_offer_update(
         "website_failed": website_failed,
     }
 
-    if body.apply and committed:
-        _audit_bulk("BULK_OFFER_UPDATE", current_user, summary, committed)
+    if body.apply and (committed or recovered):
+        _audit_bulk("BULK_OFFER_UPDATE", current_user, summary, committed + recovered)
         try:
             from ..services.cache import invalidate_product_lists
 

@@ -481,3 +481,110 @@ def test_archiving_a_listed_product_takes_it_off_the_queue(db, monkeypatch):
     _run(catalog_mod._archive_product(_twin(db), ADMIN, spine_id="P1"))
     assert _twin(db).get("deleted_at")
     assert not _queued(db)
+
+
+def test_a_retried_offer_apply_carries_the_website_copy_but_never_the_offer_twice(db, monkeypatch):
+    """The offer twin of the retry above: the billing offer landed, the
+    website copy did not. The same reviewed Apply again re-carries the copy
+    (it used to skip it) and never moves the billing offer a second time."""
+    _seed(db, offer=5000.0)
+    body = products_mod.BulkOfferRequest(action="SET", discount_percent=10)
+    pre = _run(products_mod.bulk_offer_update(body, ADMIN))
+    exp = [
+        products_mod.BulkReviewedRow(product_id=r["product_id"], mrp=r["mrp"], offer_price=r["old_offer_price"])
+        for r in pre["rows"]
+    ]
+    apply = body.model_copy(update={"apply": True, "expected": exp})
+    real_mirror = pm.mirror_update_to_catalog_twin
+    monkeypatch.setattr(pm, "mirror_update_to_catalog_twin", lambda **kw: False)
+    first = _run(products_mod.bulk_offer_update(apply, ADMIN))
+    assert first["summary"]["committed"] == 1 and first["summary"]["website_failed"] == 1
+    assert _twin(db)["offer_price"] == 5000.0
+    monkeypatch.setattr(pm, "mirror_update_to_catalog_twin", real_mirror)
+    again = _run(products_mod.bulk_offer_update(apply, ADMIN))
+    assert again["summary"]["committed"] == 0
+    assert again["rows"][0]["already_applied"] is True and again["rows"][0]["website_synced"] is True
+    assert db["products"].find_one({"product_id": "P1"})["offer_price"] == 4500.0
+    assert (_twin(db)["offer_price"], _twin(db)["pricing"]["offer_price"]) == (4500.0, 4500.0)
+
+
+def test_a_retried_apply_whose_website_copy_fails_again_counts_it_once(db, monkeypatch):
+    """One already-saved row whose website copy fails on the retry is ONE
+    product to save again, on both endpoints (the price door counted 2)."""
+    _seed(db)
+    monkeypatch.setattr(pm, "mirror_update_to_catalog_twin", lambda **kw: False)
+    for fn, body in (
+        (products_mod.bulk_price_update, products_mod.BulkPriceRequest(target="BOTH", mode="PERCENT", amount=10)),
+        (products_mod.bulk_offer_update, products_mod.BulkOfferRequest(action="CLEAR")),
+    ):
+        pre = _run(fn(body, ADMIN))
+        exp = [
+            products_mod.BulkReviewedRow(
+                product_id=r["product_id"], mrp=r.get("old_mrp", r.get("mrp")), offer_price=r["old_offer_price"]
+            )
+            for r in pre["rows"]
+        ]
+        apply = body.model_copy(update={"apply": True, "expected": exp})
+        _run(fn(apply, ADMIN))
+        again = _run(fn(apply, ADMIN))
+        assert again["rows"][0]["already_applied"] is True
+        assert again["summary"]["website_failed"] == 1, (fn.__name__, again["summary"])
+
+
+class _Audit:
+    def __init__(self):
+        self.rows = []
+
+    def create(self, doc):
+        self.rows.append(doc)
+
+
+def test_a_price_that_landed_without_its_audit_is_audited_on_the_retry(db, monkeypatch):
+    """The first Apply's billing write landed but the reply raised (or the
+    worker died before the audit), so that change had no audit row ever. The
+    retry does not write the price again, but it names that row in its audit
+    as recovered, so every landed change has an audit trace -- on both
+    endpoints."""
+    audit = _Audit()
+    monkeypatch.setattr(deps, "get_audit_repository", lambda: audit)
+    repo = products_mod.get_product_repository()
+    for fn, body, action in (
+        (products_mod.bulk_price_update, products_mod.BulkPriceRequest(target="BOTH", mode="FLAT", amount=10),
+         "BULK_PRICE_UPDATE"),
+        (products_mod.bulk_offer_update, products_mod.BulkOfferRequest(action="CLEAR"),
+         "BULK_OFFER_UPDATE"),
+    ):
+        db["products"].delete_many({})
+        db["catalog_products"].delete_many({})
+        _seed(db)
+        _seed(db, "P2")
+        pre = _run(fn(body, ADMIN))
+        exp = [
+            products_mod.BulkReviewedRow(
+                product_id=r["product_id"], mrp=r.get("old_mrp", r.get("mrp")), offer_price=r["old_offer_price"]
+            )
+            for r in pre["rows"]
+        ]
+        apply = body.model_copy(update={"apply": True, "expected": exp})
+        real_update = type(repo).update
+
+        def _lands_then_raises(self, pid, data, **kw):
+            done = real_update(self, pid, data, **kw)
+            if pid == "P1":
+                raise RuntimeError("AutoReconnect after the server applied the write")
+            return done
+
+        monkeypatch.setattr(type(repo), "update", _lands_then_raises)
+        audit.rows.clear()
+        first = _run(fn(apply, ADMIN))
+        monkeypatch.setattr(type(repo), "update", real_update)
+        assert first["summary"]["committed"] == 1
+        assert [c["product_id"] for c in audit.rows[0]["details"]["changes"]] == ["P2"]
+        again = _run(fn(apply, ADMIN))
+        assert again["summary"]["committed"] == 0 and again["summary"]["counts"]["already_applied"] == 2
+        retry_audit = audit.rows[-1]
+        assert retry_audit["action"] == action
+        named = {c["product_id"]: c for c in retry_audit["details"]["changes"]}
+        assert named["P1"]["recovered"] is True, retry_audit
+        # Both rows were already saved: no second price move is claimed.
+        assert all(c.get("recovered") for c in named.values())
