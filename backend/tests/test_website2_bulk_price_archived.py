@@ -778,3 +778,33 @@ def test_a_retry_racing_the_original_never_hides_the_original_s_rows(db, monkeyp
     assert _named(db, action) == ["P1", "P2"]
     assert _prices(db, "P1") == want and _prices(db, "P2") == want
 
+
+
+def test_a_retry_with_changed_content_never_moves_a_landed_row_again(db, monkeypatch):
+    """D94: P1 landed under the first Apply and P2's write could not be
+    confirmed (503). A retry that changes the operation (+20 instead of +10)
+    on the same reviewed rows is a different Apply: P1, written since the
+    preview, is left alone (never +10 and then +20); P2, still exactly as
+    previewed, takes the new operation once."""
+    from fastapi import HTTPException
+
+    fn, body, action, _want = _BOTH_DOORS[0]
+    apply = _reviewed_apply(db, fn, body)
+    real_update = type(products_mod.get_product_repository()).update
+
+    def p2_fails(self, pid, data, **kw):
+        if pid == "P2":
+            raise RuntimeError("write failed before reaching the server")
+        return real_update(self, pid, data, **kw)
+
+    monkeypatch.setattr(type(products_mod.get_product_repository()), "update", p2_fails)
+    with pytest.raises(HTTPException) as ei:
+        _run(fn(apply, ADMIN))
+    assert ei.value.status_code == 503
+    monkeypatch.setattr(type(products_mod.get_product_repository()), "update", real_update)
+    changed = _run(fn(apply.model_copy(update={"amount": 20.0}), ADMIN))
+    rows = {r["product_id"]: r for r in changed["rows"]}
+    assert rows["P1"]["reason"] == "CHANGED_SINCE_PREVIEW"
+    assert rows["P2"]["applied"] is True
+    assert _prices(db, "P1") == (5010.0, 4510.0) and _prices(db, "P2") == (5020.0, 4520.0)
+    assert _named(db, action) == ["P1", "P2"]
