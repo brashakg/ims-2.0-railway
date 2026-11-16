@@ -1172,7 +1172,7 @@ export function CatalogManagerPage({
                           <button
                             type="button"
                             onClick={() => toggleExpanded(family.lead_id)}
-                            className="-my-2 -ml-2 flex h-9 w-9 shrink-0 items-center justify-center rounded text-gray-500 hover:bg-gray-100"
+                            className="-my-3 -ml-3 flex h-11 w-11 shrink-0 items-center justify-center rounded text-gray-500 hover:bg-gray-100"
                             aria-expanded={isOpen}
                             aria-label={`${isOpen ? 'Hide' : 'Show'} the ${family.count} colours and sizes of ${name}`}
                             data-testid="family-toggle"

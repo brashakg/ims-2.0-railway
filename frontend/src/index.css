@@ -3762,6 +3762,11 @@ main input[type="date"] { background-color: #fff; border-color: #d1d5db; color: 
   background: #f9fafb;                 /* gray-50 */
   border-color: #d1d5db;               /* gray-300 */
 }
+/* UI-02 (D74, F-1435-B): on a touch screen every filter pill is a 44px tap
+   target; a mouse keeps the compact 27px pill. */
+@media (pointer: coarse) {
+  .ims-chip { min-height: 44px; }
+}
 /* Selected: BV red text on a faint red tint. Hover state pinned so a selected
    chip doesn't grey out on mouse-over. focus-visible comes from the global
    ring (rule 10 above). */
