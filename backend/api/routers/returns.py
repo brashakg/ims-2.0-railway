@@ -6667,10 +6667,10 @@ _MONEY_MOVED = ("Money moved on this return (store credit, or the counter finish
 def _fence_void_move(row: Dict[str, Any]) -> None:
     """D85: a VOID credit line's balance move could still land late (a
     stalled press) and be healed beside a NOTHING_PAID record. One
-    compare-and-set on the customer decides: the move's guard is fenced
-    (customers.GUARD_FENCED) only while the move has not landed -- from then
+    compare-and-set on the customer decides: the move is fenced
+    (customers.STORE_CREDIT_FENCED) only while it has not landed -- from then
     on it never can. Landed first: 409, the money moved. Unknown: 503."""
-    from .customers import GUARD_FENCED, STORE_CREDIT_REFS
+    from .customers import STORE_CREDIT_FENCED, STORE_CREDIT_REFS
 
     eid, cid = row.get("entry_id"), row.get("customer_id")
     coll = getattr(get_customer_repository(), "collection", None) if cid else None
@@ -6678,7 +6678,7 @@ def _fence_void_move(row: Dict[str, Any]) -> None:
         return  # no customer balance: no move can land
     try:
         res = coll.update_one({"customer_id": cid, STORE_CREDIT_REFS: {"$ne": eid}},
-                              {"$addToSet": {STORE_CREDIT_REFS: eid + GUARD_FENCED}})
+                              {"$addToSet": {STORE_CREDIT_FENCED: eid}})
         matched = getattr(res, "matched_count", getattr(res, "modified_count", 0))
         landed = not matched and coll.find_one({"customer_id": cid, STORE_CREDIT_REFS: eid}) is not None
     except Exception as exc:  # noqa: BLE001
