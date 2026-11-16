@@ -931,12 +931,15 @@ def _close_linked_follow_up(
 
 
 def _refuse_closed_by_another(state, coll, store_id, day, array, customer_id) -> None:
-    """A linked follow-up already closed with ANOTHER outcome keeps it (409)
-    and the card leaves the list. (Closed by another work-list action: that
-    action's own retry is still recognised on the done card -- see
-    _replay_or_refuse -- so it can still finish its next reminder.)"""
+    """A linked follow-up already closed with ANOTHER outcome keeps it (409).
+    Closed outside the work-list (follow-ups page): the card leaves the list.
+    Closed by another work-list action: the card STAYS -- that action owns it
+    and takes it off itself once its next reminder is set (D69: after "Call
+    saved. The next reminder was NOT set." a Skip must not hide the card from
+    the Retry)."""
     if state in ("already_closed", "other_action"):
-        _mark_list_entry_done(coll, store_id, day, array, customer_id)
+        if state == "already_closed":
+            _mark_list_entry_done(coll, store_id, day, array, customer_id)
         raise HTTPException(
             status_code=409,
             detail=_CHANGED_DETAILS if state == "other_action" else _ALREADY_RECORDED,
@@ -979,9 +982,27 @@ def _mark_list_entry_done(coll, store_id: str, day: str, array: str, customer_id
 
 
 def _nba_audit(
-    action: str, customer_id: str, store_id: str, current_user: dict, detail: dict
+    action: str, customer_id: str, store_id: str, current_user: dict, detail: dict,
+    db=None, action_key: Optional[str] = None, record_id: Optional[str] = None,
 ) -> None:
-    """Best-effort audit row. Fail-soft -- never undoes the NBA write."""
+    """Best-effort audit row, ONE per action. Fail-soft -- never undoes the
+    NBA write. ``record_id`` is the follow-up this action wrote (it carries
+    ``action_key``): the row is written only by the request that atomically
+    marks that record audited, so an identical retry, a double press or two
+    overlapping identical requests write it once. With no record (a card with
+    no follow-up and no next date) the row is written per request."""
+    if db is not None and record_id and action_key:
+        try:
+            claimed = db.get_collection("follow_ups").update_one(
+                {"follow_up_id": record_id, "action_key": action_key,
+                 "audit_logged": {"$ne": True}},
+                {"$set": {"audit_logged": True}},
+            ).modified_count
+            if not claimed:
+                return
+        except Exception as exc:  # noqa: BLE001
+            # Unknown: write the row rather than lose the trail.
+            logger.warning("[CRM] audit claim on %s failed: %s", record_id, exc)
     try:
         arepo = get_audit_repository()
         if arepo is None:
@@ -1119,6 +1140,7 @@ async def dismiss_nba_card(
         store_id,
         current_user,
         {"reason": body.reason, "follow_up_id": follow_up_id},
+        db, key, follow_up_id,
     )
     return {"ok": True}
 
@@ -1203,6 +1225,7 @@ async def complete_nba_card(
         store_id,
         current_user,
         {"follow_up_id": follow_up_id, "next_follow_up_id": next_follow_up_id},
+        db, key, follow_up_id or next_follow_up_id,
     )
     return {"ok": True, "next_follow_up_id": next_follow_up_id}
 
@@ -1401,9 +1424,8 @@ async def log_reactivation_outcome(
                 key,
             )
         except HTTPException:
-            # Saved by another action: its outcome is kept and the entry
-            # leaves the list (that action's own retry is still recognised).
-            _mark_list_entry_done(cohorts, store_id, target_date, "entries", body.customer_id)
+            # Saved by another action: its outcome is kept (409) and the entry
+            # stays for THAT action, which takes it off itself (D69).
             raise
         except Exception as exc:  # noqa: BLE001
             logger.warning("[CRM] reactivation record %s not saved: %s", follow_up_id, exc)
@@ -1436,6 +1458,7 @@ async def log_reactivation_outcome(
             "follow_up_id": follow_up_id,
             "next_follow_up_id": next_follow_up_id,
         },
+        db, key, follow_up_id,
     )
     return {
         "ok": True,
