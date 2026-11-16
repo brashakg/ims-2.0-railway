@@ -272,6 +272,7 @@ def _bmff(major: bytes, *compatible: bytes) -> bytes:
         (_bmff(b"heic", b"mif1", b"heic"), "image/heic", ".heic"),
         (_bmff(b"mif1", b"mif1", b"miaf"), "image/heif", ".heif"),
     ],
+    ids=["heic", "heif"],
 )
 def test_upload_accepts_an_iphone_photo_like_the_catalogue_door(
     client, auth_headers, patched_storage_and_audit, content, mime, ext
