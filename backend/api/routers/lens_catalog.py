@@ -167,10 +167,19 @@ def _stock_coll():
 def _refuse_retire_with_stock(lens_line_id: str) -> None:
     """THE retirement rule for a lens line, shared by every door that
     switches one off (DELETE, and PATCH is_active=false): refuse with 409
-    while ANY stock cell of the line still carries on_hand or reserved."""
+    while ANY stock cell of the line still carries on_hand or reserved.
+    An unreadable stock balance is never read as zero: refuse 503 (retry)
+    without writing."""
+    unreadable = HTTPException(
+        status_code=503,
+        detail=(
+            "Could not check this lens line's stock, so it was not retired. "
+            "Please try again."
+        ),
+    )
     stock = _stock_coll()
     if stock is None:
-        return
+        raise unreadable
     try:
         n = stock.count_documents(
             {
@@ -181,8 +190,9 @@ def _refuse_retire_with_stock(lens_line_id: str) -> None:
                 ],
             }
         )
-    except Exception:  # noqa: BLE001
-        n = 0
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[LENS_CATALOG] stock count failed for %s: %s", lens_line_id, exc)
+        raise unreadable
     if n:
         raise HTTPException(
             status_code=409,

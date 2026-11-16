@@ -509,6 +509,38 @@ def test_patch_retires_a_zero_stock_line_and_reactivates(fake_db):
     assert exc.value.status_code == 409
 
 
+@pytest.mark.parametrize("door", ["PATCH", "DELETE"])
+def test_unreadable_stock_count_refuses_retirement(fake_db, monkeypatch, door):
+    """Codex PR-1425 round 1: a failed stock count is NOT zero stock. Both
+    retirement doors refuse 503 (retry) and write nothing; the line stays
+    active with its stock."""
+    admin = _user(["SUPERADMIN"])
+    out = asyncio.run(catalog_router.create_lens_line(_payload_line(), admin))
+    slug = out["lens_line"]["lens_line_id"]
+    fake_db["lens_stock_lines"].insert_one(_stock_cell(slug, on_hand=2, reserved=1))
+
+    def outage(*_a, **_k):
+        raise RuntimeError("AutoReconnect: stock count unavailable")
+
+    monkeypatch.setattr(fake_db["lens_stock_lines"], "count_documents", outage)
+    with pytest.raises(HTTPException) as exc:
+        if door == "PATCH":
+            asyncio.run(catalog_router.update_lens_line(
+                slug, catalog_router.LensLineUpdate(is_active=False), admin))
+        else:
+            asyncio.run(catalog_router.delete_lens_line(slug, admin))
+    assert exc.value.status_code == 503
+    raw = fake_db["lens_catalog"].find_one({"lens_line_id": slug})
+    assert raw["is_active"] is True
+
+    # The stock collection itself unavailable is the same unknown balance.
+    monkeypatch.setattr(catalog_router, "_stock_coll", lambda: None)
+    with pytest.raises(HTTPException) as exc2:
+        asyncio.run(catalog_router.delete_lens_line(slug, admin))
+    assert exc2.value.status_code == 503
+    assert fake_db["lens_catalog"].find_one({"lens_line_id": slug})["is_active"] is True
+
+
 def test_get_unknown_returns_404(fake_db):
     admin = _user(["SUPERADMIN"])
     with pytest.raises(HTTPException) as exc:
