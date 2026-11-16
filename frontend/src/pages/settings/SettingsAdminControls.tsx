@@ -14,6 +14,8 @@ import { settingsApi } from '../../services/api/settings';
 import { Save, Loader2 } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 import { useUnsavedGuard } from '../../hooks/useUnsavedGuard';
+// The one visible failure for a stored-settings load (never silently defaults).
+import { SettingsLoadError as LoadError } from '../../components/settings/SettingsLoadError';
 
 const LIMIT_LABEL = 'Default Credit Limit (₹)';
 
@@ -25,15 +27,6 @@ type AdminControlsPayload = Parameters<typeof settingsApi.updateAdminControls>[0
 
 const LOAD_ERROR = 'Could not load the saved settings, so they cannot be changed or saved. Reload the page to retry.';
 
-/** Visible failure for the stored-settings load (never silently show defaults). */
-function LoadError({ message }: { message: string | null }) {
-  if (!message) return null;
-  return (
-    <div role="alert" className="p-3 rounded-lg border border-red-200 bg-red-50 text-sm text-red-700">
-      {message}
-    </div>
-  );
-}
 
 /**
  * dirty flag + guard: markDirty() on a user edit. beginSave() is called when a
