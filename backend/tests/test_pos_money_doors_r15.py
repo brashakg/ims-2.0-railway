@@ -249,7 +249,11 @@ def test_a_recovered_record_keeps_the_return_line_shape(till, tasks):
                     net_amount=1800.0, gross_refund=1800.0, restocking_fee=0.0, round_off=0.0, gst_view=view,
                     return_type="RETURN")
     doc = _complete("RET-S", cash_leg_paid=True)
-    assert doc["items"] == [{"order_item_id": "li1", "item_id": "li1", "product_id": "P1", "return_qty": 1.0}]
+    # D85 round 8 / #1413 D6: a hold that never recorded the unit's condition
+    # keeps none, so its Retry stock step SETS THE PIECE ASIDE for a person to
+    # check (_retry_lines) -- never on sale blind.
+    assert doc["items"] == [{"order_item_id": "li1", "item_id": "li1", "product_id": "P1", "return_qty": 1.0,
+                             "sku": "", "product_name": ""}]
 
 
 # =========================================================================== #
