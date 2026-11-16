@@ -4823,6 +4823,9 @@ def _claimed_line(rl: Dict[str, Any]) -> Dict[str, Any]:
     return {"item_id": rl["orig_line"].get("item_id") or rl["orig_line"].get("id"),
             "product_id": rl["orig_line"].get("product_id"), "qty": float(ret.return_qty),
             "token": rl["token"], "sku": ret.sku, "product_name": ret.product_name,
+            # The IMS product the press restocks (an online line keeps
+            # Shopify's id as its product_id).
+            "ims_product_id": ret.product_id,
             "condition": ret.condition, "restock": ret.restock}
 
 
@@ -6473,7 +6476,8 @@ async def complete_return_record(
             # The return-line shape every reader counts (the over-return
             # book reads return_qty and order_item_id).
             "items": [{"order_item_id": ln.get("item_id"), "item_id": ln.get("item_id"),
-                       "product_id": ln.get("product_id"), "return_qty": float(ln.get("qty") or 0),
+                       "product_id": ln.get("ims_product_id") or ln.get("product_id"),
+                       "return_qty": float(ln.get("qty") or 0),
                        # Its Restock (retry_restock) puts back only a unit the
                        # press called GOOD and restockable; an unknown one, never.
                        "sku": ln.get("sku") or "", "product_name": ln.get("product_name") or "",

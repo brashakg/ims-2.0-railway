@@ -875,3 +875,16 @@ def test_a_void_lines_move_that_landed_first_refuses_nothing_paid(till, monkeypa
         _complete("RET-V", nothing_paid=True)
     assert exc.value.status_code == 409 and "Money moved" in exc.value.detail
     assert _docs(till) == [] and _balance(till) == 900.0
+
+
+def test_a_record_completed_from_a_hold_restocks_the_ims_product(till, tasks):
+    """Native probe J (online bill): the hold kept the bill line's Shopify
+    product id (None), so the record's Restock reported 'applied' and put
+    nothing back. The record carries the IMS product the press returned."""
+    _bill_with_hold(till, "RET-IP", money_out=True, net_amount=900.0, return_type="RETURN",
+                    gst_view={"taxable": 857.14, "tax": 42.86, "gross": 900.0, "gst_rate": 5.0},
+                    tenders=[{"method": "CASH", "amount": 900.0}],
+                    lines=[{"item_id": "li1", "product_id": None, "ims_product_id": "IMS-P", "qty": 1.0,
+                            "condition": "GOOD", "restock": True}])
+    doc = _complete("RET-IP", cash_leg_paid=True)
+    assert doc["items"][0]["product_id"] == "IMS-P" and doc["items"][0]["restock"] is True
