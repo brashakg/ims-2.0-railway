@@ -740,7 +740,7 @@ class _Repo:
     def __init__(self, docs):
         self.docs = [dict(d) for d in docs]
 
-    def find_many(self, _flt=None, limit=None):
+    def find_many(self, _flt=None, limit=None, strict=False):
         return [dict(d) for d in self.docs]
 
 
@@ -748,7 +748,7 @@ def _acquisition(customers, from_d, to_d):
     with _PatchAttrs(
         reports_mod,
         get_customer_repository=lambda: _Repo(customers),
-        get_order_repository=lambda: None,
+        get_order_repository=lambda: _Repo([]),
     ):
         return asyncio.run(
             reports_mod.customer_acquisition(

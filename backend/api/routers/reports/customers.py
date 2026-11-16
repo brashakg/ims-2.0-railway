@@ -1,6 +1,6 @@
 """Expense-vs-revenue, customer acquisition, brand sell-through, targets."""
 
-from fastapi import Depends, Query
+from fastapi import Depends, HTTPException, Query
 from typing import Optional
 from datetime import date, datetime, timedelta
 from ...utils.ist import (
@@ -114,13 +114,11 @@ async def customer_acquisition(
     customer_repo = get_customer_repository()
     order_repo = get_order_repository()
 
-    if customer_repo is None:
-        return {
-            "new_customers": 0,
-            "returning_customers": 0,
-            "total_customers": 0,
-            "retention_percent": 0,
-        }
+    if customer_repo is None or order_repo is None:
+        # No database is not "0 customers": say the report could not be read.
+        raise HTTPException(
+            status_code=503, detail="Could not read the customer report. Please try again."
+        )
 
     # BUG-104, BOUND rule (the bound moves BACKWARD). from_date/to_date are
     # IST calendar days the caller typed; created_at is a stored naive-UTC
@@ -132,10 +130,30 @@ async def customer_acquisition(
         microseconds=1
     )
 
-    # Get all customers (small enough N to walk in-process)
-    all_customers = customer_repo.find_many(
-        {"store_id": active_store} if active_store else {}, limit=0
-    ) or []
+    # The shop's customers by THE customer-ownership rule (home_store_id /
+    # preferred_store_id, CustomerRepository.store_scope) -- the same rule the
+    # customer list uses. It used to read `store_id`, which no customer writer
+    # sets, so a shop's report said 0 customers (audit PR #1427, D52). Only
+    # created_at is needed; a failed read is a 503, never a report of zeros.
+    from database.repositories.customer_repository import CustomerRepository
+
+    try:
+        all_customers = customer_repo.find_many(
+            CustomerRepository.store_scope(active_store) if active_store else {},
+            limit=0,
+            strict=True,
+        ) or []
+        orders = _orders_in_window(
+            order_repo,
+            store_id=active_store,
+            start_dt=from_dt,
+            end_dt=to_dt,
+            strict=True,
+        )
+    except Exception as exc:  # noqa: BLE001 -- any read fault
+        raise HTTPException(
+            status_code=503, detail="Could not read the customer report. Please try again."
+        ) from exc
 
     # New customers — created_at within window. Mongo stamps `created_at`
     # as a real datetime, but legacy seeds may have it as ISO string.
@@ -152,22 +170,13 @@ async def customer_acquisition(
     new_customers = len([c for c in all_customers if _in_window(c.get("created_at"))])
 
     # Returning customers: placed >1 order in the window.
-    returning_customers = 0
-    total_buyers = 0
-    if order_repo:
-        orders = _orders_in_window(
-            order_repo,
-            store_id=active_store,
-            start_dt=from_dt,
-            end_dt=to_dt,
-        )
-        repeat_customers: dict = {}
-        for order in orders:
-            cust_id = order.get("customer_id")
-            if cust_id:
-                repeat_customers[cust_id] = repeat_customers.get(cust_id, 0) + 1
-        total_buyers = len(repeat_customers)
-        returning_customers = sum(1 for n in repeat_customers.values() if n > 1)
+    repeat_customers: dict = {}
+    for order in orders:
+        cust_id = order.get("customer_id")
+        if cust_id:
+            repeat_customers[cust_id] = repeat_customers.get(cust_id, 0) + 1
+    total_buyers = len(repeat_customers)
+    returning_customers = sum(1 for n in repeat_customers.values() if n > 1)
 
     # Retention% = returning customers as a share of all unique buyers
     # in the window. The previous formula divided by `new_customers`,

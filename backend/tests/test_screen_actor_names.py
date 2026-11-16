@@ -109,10 +109,10 @@ class _OrderRepo:
     def list_filter(*_a, **_k):
         return {}
 
-    def count(self, _query):
+    def count(self, _query, strict=False):
         return len(self.docs)
 
-    def find_many(self, _query, sort=None, skip=0, limit=100):
+    def find_many(self, _query, sort=None, skip=0, limit=100, strict=False):
         return [dict(d) for d in self.docs[skip:skip + limit]]
 
 

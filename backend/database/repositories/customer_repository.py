@@ -55,21 +55,25 @@ class CustomerRepository(BaseRepository):
     SEARCH_FIELDS = ["name", "mobile", "phone", "email", "patients.name", "patients.mobile"]
 
     @staticmethod
-    def _search_scope(store_id: str = None, filter: Dict = None) -> Optional[Dict]:
-        """Store scope matches home_store_id (native) or preferred_store_id
-        (import), ANDed with the caller's own filter."""
+    def store_scope(store_id: str) -> Dict:
+        """THE customer-ownership rule: a shop's customers are those whose
+        home_store_id (native create door) or preferred_store_id (import) is
+        that shop. The list, search and the customer report all use it."""
+        return {"$or": [{"home_store_id": store_id}, {"preferred_store_id": store_id}]}
+
+    @classmethod
+    def _search_scope(cls, store_id: str = None, filter: Dict = None) -> Optional[Dict]:
+        """Store scope (store_scope), ANDed with the caller's own filter."""
         clauses = [filter] if filter else []
         if store_id:
-            clauses.append(
-                {"$or": [{"home_store_id": store_id}, {"preferred_store_id": store_id}]}
-            )
+            clauses.append(cls.store_scope(store_id))
         if not clauses:
             return None
         return clauses[0] if len(clauses) == 1 else {"$and": clauses}
 
     def search_customers(
         self, query: str, store_id: str = None, filter: Dict = None,
-        skip: int = 0, limit: int = 100,
+        skip: int = 0, limit: int = 100, strict: bool = False,
     ) -> List[Dict]:
         """One page of matches, in a stable order (_id) so skip/limit pages
         are disjoint (audit R31)."""
@@ -78,11 +82,15 @@ class CustomerRepository(BaseRepository):
             sort=[("_id", 1)],
             skip=skip,
             limit=limit,
+            strict=strict,
         )
 
-    def count_search_customers(self, query: str, store_id: str = None, filter: Dict = None) -> int:
+    def count_search_customers(self, query: str, store_id: str = None, filter: Dict = None,
+                               strict: bool = False) -> int:
         """Total the SAME search_customers query matches, before skip/limit."""
-        return self.search_count(query, self.SEARCH_FIELDS, self._search_scope(store_id, filter))
+        return self.search_count(
+            query, self.SEARCH_FIELDS, self._search_scope(store_id, filter), strict=strict
+        )
 
     def find_b2b_customers(self, store_id: str = None) -> List[Dict]:
         filter = {"customer_type": "B2B"}

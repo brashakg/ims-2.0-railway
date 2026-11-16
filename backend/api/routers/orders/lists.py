@@ -7,7 +7,7 @@ rounding or validation was changed.
 """
 
 from datetime import date
-from fastapi import Depends, Query
+from fastapi import Depends, HTTPException, Query
 from typing import Optional
 from ..auth import get_current_user
 from ...dependencies import (
@@ -107,8 +107,16 @@ async def list_orders(
                 {"$or": [{"created_at": {"$gte": _horizon}}, {"createdAt": {"$gte": _horizon}}]}
             )
         query = {"$and": clauses}
-        total = repo.count(query)
-        orders = repo.find_many(query, sort=repo.LIST_SORT, skip=skip, limit=limit)
+        # strict reads: a failed read is a 503, never an empty list / total 0.
+        try:
+            total = repo.count(query, strict=True)
+            orders = repo.find_many(
+                query, sort=repo.LIST_SORT, skip=skip, limit=limit, strict=True
+            )
+        except Exception as exc:  # noqa: BLE001 -- any read fault
+            raise HTTPException(
+                status_code=503, detail="Could not read the order list. Please try again."
+            ) from exc
 
         # Convert to frontend format (camelCase)
         from ...utils.pagination import paginate
@@ -120,12 +128,10 @@ async def list_orders(
         result["orders"] = result["data"]  # backward compat
         return result
 
-    return {
-        "orders": [],
-        "total": 0,
-        "data": [],
-        "pagination": {"total": 0, "page": 1, "page_size": limit, "total_pages": 0},
-    }
+    # No database is not "no orders": say the list could not be read.
+    raise HTTPException(
+        status_code=503, detail="Could not read the order list. Please try again."
+    )
 
 
 # NOTE: Specific routes MUST come before /{order_id} to avoid being matched as order_id

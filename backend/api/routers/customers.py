@@ -750,16 +750,12 @@ async def list_customers(
             # one, else the first own shop: store_in_view).
             effective_store = store_in_view(None, current_user)
 
-        store_clause: Optional[Dict[str, Any]] = None
-        if effective_store:
-            # Match either home_store_id (seed/old) or preferred_store_id
-            # (TechCherry import + future inserts).
-            store_clause = {
-                "$or": [
-                    {"home_store_id": effective_store},
-                    {"preferred_store_id": effective_store},
-                ]
-            }
+        # The one customer-ownership rule (home_store_id or preferred_store_id).
+        from database.repositories.customer_repository import CustomerRepository
+
+        store_clause: Optional[Dict[str, Any]] = (
+            CustomerRepository.store_scope(effective_store) if effective_store else None
+        )
 
         # Channel segregation (step-4): online-origin vs in-store, by tag.
         channel_clause = _build_channel_clause(channel)
@@ -778,15 +774,26 @@ async def list_customers(
         # customer_type, exclude_marketing) and is counted on it, so skip/limit
         # and the total are real (audit R31: it used to return the first 100
         # matches for every page and filter channel/tier after that cap).
-        if search:
-            customers = _annotate_customer_matches(
-                repo.search_customers(search, filter=filter_dict, skip=skip, limit=limit),
-                search,
-            )
-            total = repo.count_search_customers(search, filter=filter_dict)
-        else:
-            customers = repo.find_many(filter_dict, sort=[("_id", 1)], skip=skip, limit=limit)
-            total = repo.count(filter_dict)
+        # strict reads: a failed read is a 503, never an empty list / total 0.
+        try:
+            if search:
+                customers = _annotate_customer_matches(
+                    repo.search_customers(
+                        search, filter=filter_dict, skip=skip, limit=limit, strict=True
+                    ),
+                    search,
+                )
+                total = repo.count_search_customers(search, filter=filter_dict, strict=True)
+            else:
+                customers = repo.find_many(
+                    filter_dict, sort=[("_id", 1)], skip=skip, limit=limit, strict=True
+                )
+                total = repo.count(filter_dict, strict=True)
+        except Exception as exc:  # noqa: BLE001 -- any read fault
+            raise HTTPException(
+                status_code=503,
+                detail="Could not read the customer list. Please try again.",
+            ) from exc
 
         # OS-026: the online-segment list drives the Online-customers screen's
         # Orders / Lifetime columns -- fields nothing persists. Enrich the page
@@ -804,8 +811,10 @@ async def list_customers(
         result["customers"] = result["data"]
         return result
 
-    # No database available - return empty
-    return {"customers": [], "total": 0}
+    # No database is not "no customers": say the list could not be read.
+    raise HTTPException(
+        status_code=503, detail="Could not read the customer list. Please try again."
+    )
 
 
 @router.post("", status_code=201)
