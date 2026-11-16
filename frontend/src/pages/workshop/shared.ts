@@ -140,19 +140,21 @@ export function resolvePriorityConfig(priority: unknown) {
 
 /** What the printed job card shows for a job: the bench's fitting
  *  instructions and notes travel with it (L2-WS-F03), and its dates are the
- *  IST calendar day, so the card prints the same day in every browser zone. */
-export function jobCardPrintData(job: Job): JobCardPrintData {
+ *  IST calendar day, so the card prints the same day in every browser zone.
+ *  The ONE mapping for every door that prints WorkshopJobCardPrint -- the
+ *  Workshop page and the POS sale-complete screen (Codex PR-1425). */
+export function jobCardPrintData(job: Partial<Job>): JobCardPrintData {
   return {
-    jobNumber: job.jobNumber,
-    orderNumber: job.orderNumber,
-    customerName: job.customerName,
-    customerPhone: job.customerPhone,
+    jobNumber: job.jobNumber || '',
+    orderNumber: job.orderNumber || '',
+    customerName: job.customerName || '',
+    customerPhone: job.customerPhone || '',
     frameBrand: (job.frameName || '').split(' ')[0],
     frameModel: (job.frameName || '').replace(/^[^ ]+ /, ''),
     frameColor: '',
-    lensType: job.lensType,
-    priority: job.priority,
-    dueDate: istDayString(job.promisedDate) ?? '',
+    lensType: job.lensType || '',
+    priority: job.priority || 'NORMAL',
+    dueDate: istDayString(job.promisedDate || job.expectedDate) ?? '',
     assignedTechnician: job.assignedToName || job.assignedTo,
     fittingInstructions: job.fittingInstructions,
     notes: job.notes,
