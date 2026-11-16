@@ -42,7 +42,9 @@ vi.mock('../../../context/ToastContext', () => ({
   }),
 }));
 
-vi.mock('react-router-dom', () => ({
+vi.mock('react-router-dom', async (importOriginal) => ({
+  // The unsaved-work guard reads the router's navigation context (D51).
+  ...(await importOriginal<typeof import('react-router-dom')>()),
   Link: ({ children }: { children: React.ReactNode }) => <span>{children}</span>,
 }));
 

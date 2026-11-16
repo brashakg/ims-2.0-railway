@@ -89,6 +89,10 @@ function Where() {
       <button type="button" onClick={() => navigate('/catalog/add')}>sidebar add</button>
       {/* Any other sidebar menu link. */}
       <Link to="/stock">sidebar stock</Link>
+      {/* The top command palette's Catalog result (a programmatic navigate). */}
+      <button type="button" onClick={() => navigate('/catalog')}>palette catalog</button>
+      {/* A direct switch to another product on the same page. */}
+      <button type="button" onClick={() => navigate('/catalog/add?edit=P-B')}>open P-B</button>
     </>
   );
 }
@@ -352,6 +356,70 @@ describe('CAT-04: refresh and other menus ask before dropping unsaved changes', 
     await screen.findByRole('button', { name: /Save product/ });
     expect(where()).toBe('/catalog/add');
     expect((screen.getByLabelText(/^MRP/) as HTMLInputElement).value).toBe('');
+    confirm.mockRestore();
+  });
+});
+
+describe('CAT-04 / D51: every exit asks, in every form mode', () => {
+  const unload = () => {
+    const ev = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(ev);
+    return ev.defaultPrevented;
+  };
+  const dirtyEdit = async () => {
+    renderAt('/catalog/add?edit=P-A');
+    await screen.findByRole('button', { name: /Save changes/ });
+    await sleep(30);
+    fireEvent.change(screen.getByLabelText(/^MRP/), { target: { value: '7990' } });
+    await sleep(30);
+  };
+
+  it('the command palette (programmatic navigate) asks; Stay keeps 7990', async () => {
+    await dirtyEdit();
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    fireEvent.click(screen.getByRole('button', { name: 'palette catalog' }));
+    await sleep(30);
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(where()).toBe('/catalog/add?edit=P-A');
+    expect((screen.getByLabelText(/^MRP/) as HTMLInputElement).value).toBe('7990');
+    confirm.mockRestore();
+  });
+
+  it('a switch to another product on the same page asks; Stay never loads it over the edit', async () => {
+    await dirtyEdit();
+    const loads = productSpies.getProduct.mock.calls.length;
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    fireEvent.click(screen.getByRole('button', { name: 'open P-B' }));
+    await sleep(50);
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(where()).toBe('/catalog/add?edit=P-A');
+    expect(productSpies.getProduct.mock.calls.length).toBe(loads);
+    expect((screen.getByLabelText(/^MRP/) as HTMLInputElement).value).toBe('7990');
+    confirm.mockRestore();
+  });
+
+  it('a new product with a typed MRP: refresh is held and a menu asks', async () => {
+    renderAt('/catalog/add');
+    await screen.findByRole('button', { name: /Save product/ });
+    await sleep(30);
+    expect(unload()).toBe(false);
+    fireEvent.change(screen.getByLabelText(/^MRP/), { target: { value: '9876' } });
+    await sleep(30);
+    expect(unload()).toBe(true);
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    fireEvent.click(screen.getByRole('button', { name: 'palette catalog' }));
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(where()).toBe('/catalog/add');
+    confirm.mockRestore();
+  });
+
+  it('a successful save leaves without a redundant question', async () => {
+    await dirtyEdit();
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    fireEvent.click(screen.getByRole('button', { name: /Save changes/ }));
+    await waitFor(() => expect(productSpies.updateProduct).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(where()).not.toMatch(/edit=P-A/));
+    expect(confirm).not.toHaveBeenCalled();
     confirm.mockRestore();
   });
 });

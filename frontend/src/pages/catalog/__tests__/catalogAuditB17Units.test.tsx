@@ -112,6 +112,14 @@ describe('CAT-07: one spelling per attribute', () => {
     });
   });
 
+  it('a camelCase CUSTOM key (no stored twin, not a form field) keeps its own spelling (D51)', () => {
+    const src = { vendorDisplayHint: 'KEEP ORIGINAL CUSTOM KEY', brand_name: 'X' };
+    expect(canonicalAttributes(src)).toEqual(src);
+    const v = productToFormValues({ product_id: 'P1', category: 'SUNGLASS', attributes: src } as never);
+    expect(v.attributes).toMatchObject({ vendorDisplayHint: 'KEEP ORIGINAL CUSTOM KEY' });
+    expect('vendor_display_hint' in (v.attributes || {})).toBe(false);
+  });
+
   it('the edit form (and so its save) never carries a camelCase twin', () => {
     const v = productToFormValues({
       product_id: 'P1', category: 'SUNGLASS',
@@ -164,5 +172,13 @@ describe('CAT-05/06: Share Catalogue search', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
     expect(await screen.findByText(/No products match/, {}, { timeout: 2000 })).toBeInTheDocument();
     expect(api.getProducts).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('UI-02 / F-1435-B (D74): filter pills on a touch screen', () => {
+  it('index.css makes every .ims-chip a 44px tap target under a coarse pointer', async () => {
+    const { readFileSync } = await import('node:fs');
+    const css = readFileSync(`${process.cwd()}/src/index.css`, 'utf8');
+    expect(css).toMatch(/@media \(pointer: coarse\) \{\s*\.ims-chip \{ min-height: 44px; \}/);
   });
 });

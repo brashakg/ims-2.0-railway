@@ -12,8 +12,9 @@
 
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
+import type { NavigateFunction, SetURLSearchParams } from 'react-router-dom';
 import { useAuth } from '../../../context/AuthContext';
-import { useUnsavedGuard } from '../../../hooks/useUnsavedGuard';
+import { useUnsavedGuard, ownNavigation } from '../../../hooks/useUnsavedGuard';
 import { getErrorStatus } from '../../../utils/errorHandler';
 import { useToast } from '../../../context/ToastContext';
 import { COST_ROLES } from '../../../components/common/CostCell';
@@ -80,11 +81,29 @@ import { typedLevel, levelText, isLevelInputValid, LEVEL_INPUT_ERROR } from '../
 export function useQuickAddForm() {
   const { hasRole, user } = useAuth();
   const toast = useToast();
-  const navigate = useNavigate();
-  const [searchParams, setSearchParams] = useSearchParams();
+  // D51: `routerNavigate` / `routerSetSearchParams` are staff exits the
+  // unsaved-work guard asks about (the page's buttons, a toast action).
+  // `navigate` / `setSearchParams` below are this form's OWN moves: after a
+  // successful save, after its own Skip / Cancel question, the duplicate
+  // popup's / exact-match hint's "open the existing one" (the typed item IS
+  // that product, so nothing is lost), or an address rewrite while loading.
+  const routerNavigate = useNavigate();
+  const [searchParams, routerSetSearchParams] = useSearchParams();
+  const navigate = useCallback(
+    ((...a: Parameters<NavigateFunction>) =>
+      ownNavigation(() => routerNavigate(...(a as [string])))) as NavigateFunction,
+    [routerNavigate],
+  );
+  const setSearchParams = useCallback<SetURLSearchParams>(
+    (...a) => ownNavigation(() => routerSetSearchParams(...a)),
+    [routerSetSearchParams],
+  );
 
   // ---- Form state (mirrors the wizard's fields exactly) --------------------
   const [selectedCategory, setSelectedCategory] = useState<string>('');
+  // CAT-04 / D51: the new-product form as it stood when last blank / seeded
+  // (a variant prefill, Save + New's kept brand) -- typed work differs from it.
+  const [createBaseline, setCreateBaseline] = useState<string | null>(null);
   const [attributes, setAttributes] = useState<Record<string, string>>({});
   const [description, setDescription] = useState('');
   const [hsnCode, setHsnCode] = useState('');
@@ -513,6 +532,7 @@ export function useQuickAddForm() {
       setReviewTags([]);
       clearDifferent();
       discardPending();
+      setCreateBaseline(null);
     },
     [attributes.brand_name, clearDifferent, discardPending]
   );
@@ -542,6 +562,7 @@ export function useQuickAddForm() {
     setDisplayName(v.name || '');
     setReviewTags(Array.isArray(v.tags) ? v.tags : []);
     setErrors({});
+    setCreateBaseline(null);
     // Reveal Inventory too when a prefill carries images so they're visible.
     setOpenSections((s) => ({
       ...s,
@@ -728,6 +749,7 @@ export function useQuickAddForm() {
     setDescription('');
     setImages([]);
     discardPending();
+    setCreateBaseline(null);
     setErrors({});
     setFlaggedFields(
       new Set([...attrFlags, ...variantFlaggedFormFields(currentValues())])
@@ -816,10 +838,6 @@ export function useQuickAddForm() {
   const [editLoadError, setEditLoadError] = useState<{ id: string; notFound: boolean } | null>(null);
   const [editReload, setEditReload] = useState(0);
   const retryEditLoad = useCallback(() => setEditReload((n) => n + 1), []);
-  // Set when the staff member chose to stay on a dirty edit and the address
-  // was put back: the loader must not re-fetch over their unsaved edits.
-  const keepEditFormRef = useRef<string | null>(null);
-  const editSearchRef = useRef<string>('');
   // The form as loaded -- the unsaved-changes check for Skip.
   const [editBaseline, setEditBaseline] = useState<string | null>(null);
   const editFingerprint = useMemo(
@@ -840,8 +858,6 @@ export function useQuickAddForm() {
     editMode?.kind === 'spine' &&
     ((editBaseline !== null && editBaseline !== editFingerprint) ||
       typedLevel(reorderLevel) !== typedLevel(levelText(editLevels?.[reorderShop])));
-  // CAT-04: refresh / tab close and any in-app link off this page ask first.
-  useUnsavedGuard(editDirty || imagesBusy);
 
   // Open the product after position `at` of the queue. Past the stashed rows,
   // the list's own query is asked for the rows after those queued, a page at
@@ -1078,7 +1094,7 @@ export function useQuickAddForm() {
           newId && hasRole(PURCHASE_ROLES)
             ? {
                 label: 'Order this now',
-                onClick: () => navigate(`/purchase/orders?new=1&product=${encodeURIComponent(newId)}`),
+                onClick: () => routerNavigate(`/purchase/orders?new=1&product=${encodeURIComponent(newId)}`),
               }
             : undefined
         );
@@ -1162,6 +1178,27 @@ export function useQuickAddForm() {
     if (editMode?.kind !== 'catalog' || !reviewSnapshot) return false;
     return Object.keys(formValuesToCatalogUpdate(currentValues(), reviewSnapshot.values)).length > 0;
   }, [editMode, reviewSnapshot, currentValues]);
+
+  // A new product (or variant) with typed work: what the staff member typed
+  // since the form was last blank / seeded. Category, HSN / GST and discount
+  // category are derived, not typed work.
+  const createFingerprint = useMemo(
+    () => JSON.stringify([
+      typedAttributes(attributes), description, weight, mrp, offerPrice, costPrice, images,
+      typedLevel(reorderLevel),
+    ]),
+    [attributes, description, weight, mrp, offerPrice, costPrice, images, reorderLevel],
+  );
+  useEffect(() => {
+    if (!editMode && createBaseline === null) setCreateBaseline(createFingerprint);
+  }, [editMode, createBaseline, createFingerprint]);
+  const createDirty = !editMode && createBaseline !== null && createBaseline !== createFingerprint;
+
+  // CAT-04 / D51: every real exit asks first while there is unsaved work in
+  // ANY mode (edit, review, a new product) or a photo is still uploading:
+  // refresh / tab close, links, menus, the command palette, Back / Forward
+  // and a same-page switch to another ?edit= / ?review=.
+  useUnsavedGuard(editDirty || reviewDirty || createDirty || imagesBusy);
 
   const runReviewDryRun = useCallback(async (id: string) => {
     setReviewDryLoading(true);
@@ -1645,13 +1682,6 @@ export function useQuickAddForm() {
   useEffect(() => {
     // ?review wins over a crafted combined URL.
     if (!editId || searchParams.get('review')) return;
-    editSearchRef.current = searchParams.toString();
-    // The address was put back after "stay": the form already holds this
-    // product with the staff member's edits -- never re-fetch over them.
-    if (keepEditFormRef.current === editId) {
-      keepEditFormRef.current = null;
-      return;
-    }
     setEditLoadError(null);
     let cancelled = false;
     // Opened by the Catalog list (its Edit, or Save & next): its queue
@@ -1741,17 +1771,8 @@ export function useQuickAddForm() {
   useEffect(() => {
     if (editId) return;
     setEditLoadError(null);
-    // CAT-04: unsaved edits (or a photo still uploading) ask first. Staying
-    // puts the edit address back; the loader keeps the form as it is.
-    if (
-      editMode?.kind === 'spine' &&
-      (editDirty || imagesBusy) &&
-      !window.confirm('You have unsaved changes on this product — leave without saving?')
-    ) {
-      keepEditFormRef.current = editMode.id;
-      setSearchParams(new URLSearchParams(editSearchRef.current), { replace: true });
-      return;
-    }
+    // CAT-04: unsaved edits were asked about before the address changed (the
+    // shared unsaved-work guard, D51), so reaching here means leave.
     setEditBusy(false);
     if (editMode?.kind !== 'spine') return;
     setEditMode(null);
@@ -1981,8 +2002,8 @@ export function useQuickAddForm() {
   return {
     // identity / who
     user, canAddProduct, canSeeCost, registryReady,
-    // routing
-    navigate, setSearchParams,
+    // routing (staff exits: the unsaved-work guard asks)
+    navigate: routerNavigate, setSearchParams: routerSetSearchParams,
     // form values
     selectedCategory, setSelectedCategory,
     attributes, setAttributes, setAttr,
@@ -2024,7 +2045,7 @@ export function useQuickAddForm() {
       ? editListAddress(readReviewQueue(EDIT_QUEUE_KEY), editMode.id)
       : '/catalog',
     // review mode
-    queueClear, setQueueClear, queuePos, reviewSnapshot, reviewDirty,
+    queueClear, setQueueClear, queuePos, reviewSnapshot, reviewDirty, createDirty,
     reviewApproving, reviewDry, reviewDryLoading, reviewGapView,
     handleReviewSave, handleReviewApprove, handleReviewSkip, handleReviewPrev,
     handleBackToQueue,

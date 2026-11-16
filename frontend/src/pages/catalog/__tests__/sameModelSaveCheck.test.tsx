@@ -372,7 +372,11 @@ describe('the strip answer reaches the next save', () => {
     };
     await typeIn();
     await answerDifferent(user);
+    // The typed form is unsaved work: leaving it asks first (D51); leave.
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
     await user.click(screen.getByRole('button', { name: 'go-variant' }));
+    expect(confirm).toHaveBeenCalledTimes(1);
+    confirm.mockRestore();
     await user.click(await screen.findByRole('button', { name: /New model/ }));
     await typeIn();
     // Asked again: the old answer does not hide the strip.
