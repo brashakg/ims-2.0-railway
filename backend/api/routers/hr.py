@@ -1402,7 +1402,7 @@ async def mark_attendance(
         # correction still owes (it landed after our read).
         _update_day_row(attendance_repo, row_id, data, expected=_NO_PENDING)
         if changed:
-            _settle_attendance_audit(attendance_repo, {**before, **data})
+            _settle_after_write_or_503(attendance_repo, {**before, **data})
     else:
         data["attendance_id"] = str(uuid.uuid4())
         _create_day_row_safe(attendance_repo, data)
@@ -1504,6 +1504,18 @@ def _settle_or_503(attendance_repo, row: dict) -> None:
                 "An earlier correction to this day is not yet in the audit log, "
                 "so this change was not saved. Try again in a minute."
             ),
+        )
+
+
+def _settle_after_write_or_503(attendance_repo, row: dict) -> None:
+    """D84: the correction landed (with its audit_pending marker); if its
+    audit row could not be written the request must not answer success. The
+    identical retry settles the marker (_settle_or_503) and writes the audit
+    row once under the marker's fixed log_id."""
+    if not _settle_attendance_audit(attendance_repo, row):
+        raise HTTPException(
+            status_code=503,
+            detail="Attendance saved, but its record was not written. Press Save again.",
         )
 
 
@@ -1663,7 +1675,7 @@ async def edit_attendance(
         _update_day_row(attendance_repo, row_id, updates, expected=_NO_PENDING)
     after = {**before, **updates}
     if changed:
-        _settle_attendance_audit(attendance_repo, after)
+        _settle_after_write_or_503(attendance_repo, after)
     after.pop("audit_pending", None)
 
     return {

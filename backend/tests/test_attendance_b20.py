@@ -636,7 +636,7 @@ def test_unsettled_audit_blocks_next_correction_until_recorded(real, monkeypatch
     rid = coll.find_one({"employee_id": "emp-a"})["attendance_id"]
     create = audit.create
     monkeypatch.setattr(audit, "create", lambda row: None)  # audit store failing (fail-soft None)
-    assert _correct(c, door, rid, "HALF_DAY").status_code == 200
+    assert _correct(c, door, rid, "HALF_DAY").status_code == 503  # D84: saved, audit owed
     m1 = coll.find_one({"_id": rid})["audit_pending"]
     r = _correct(c, door, rid, "ABSENT")  # audit still failing
     assert r.status_code == 503, r.text
@@ -688,3 +688,42 @@ def test_correction_never_overwrites_a_marker_that_landed_meanwhile(real, monkey
     assert r.status_code == 409, r.text
     row = coll.find_one({"_id": rid})
     assert row["status"] == "ABSENT" and row["audit_pending"] == mb
+
+
+# D84 (lead, 2026-11-16): a correction whose audit row could not be written
+# answers 503 "Attendance saved, but its record was not written. Press Save
+# again." (never 200); the identical retry writes the audit row once and
+# settles the row's marker. Discriminating power (measured by restoring
+# 8c8d436a's hr.py): both doors answered 200 with the marker left on the row.
+
+_D84 = "Attendance saved, but its record was not written. Press Save again."
+
+
+@pytest.mark.parametrize("door", ["put", "mark"])
+@pytest.mark.parametrize("fault", ["refused", "landed_ack_lost"])
+def test_d84_failed_audit_insert_is_503_and_identical_retry_audits_once(real, monkeypatch, door, fault):
+    c, coll, audit = real
+    _seed(c)
+    rid = coll.find_one({"employee_id": "emp-a"})["attendance_id"]
+    create = audit.create
+
+    def failing(row):
+        if fault == "landed_ack_lost":
+            create(row)
+            raise AutoReconnect("audit insert landed, acknowledgement lost")
+        return None  # AuditRepository.create is fail-soft: None = not written
+
+    monkeypatch.setattr(audit, "create", failing)
+    r = _correct(c, door, rid, "HALF_DAY")
+    assert r.status_code == 503, r.text
+    assert r.json().get("detail") == _D84 or _D84 in r.text
+    row = coll.find_one({"_id": rid})
+    assert row["status"] == "HALF_DAY" and row.get("audit_pending")  # saved, audit owed
+    monkeypatch.setattr(audit, "create", create)  # audit store back
+    r2 = _correct(c, door, rid, "HALF_DAY")  # staff press Save again
+    assert r2.status_code == 200, r2.text
+    edits = [(a["before_state"]["status"], a["after_state"]["status"]) for a in audit.rows if a["action"] == "ATTENDANCE_EDIT"]
+    assert edits == [("PRESENT", "HALF_DAY")]  # exactly one row
+    assert not coll.find_one({"_id": rid}).get("audit_pending")
+    assert _correct(c, door, rid, "HALF_DAY").status_code == 200  # third press: still one
+    assert len([a for a in audit.rows if a["action"] == "ATTENDANCE_EDIT"]) == 1
