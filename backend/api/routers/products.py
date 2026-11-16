@@ -4,7 +4,7 @@ IMS 2.0 - Products Router
 Product catalog management endpoints
 """
 
-from api.utils.event_time import utc_now_iso
+from api.utils.event_time import utc_now_iso, utc_now_naive
 
 import io
 from fastapi import APIRouter, HTTPException, Depends, Query, Request, UploadFile, File
@@ -2667,7 +2667,7 @@ async def cataloguing_scorecard(
     field-blind baseline rows, which are no longer read -- those early edits
     are invisible to this metric (acceptable: the door was hours old).
     """
-    now = datetime.now()
+    now = utc_now_naive()
     cutoff = now - timedelta(days=days)
     db = _scorecard_db()
     if db is None:
@@ -2911,7 +2911,7 @@ async def generate_qc_samples(
     if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
-    now = datetime.now()
+    now = utc_now_naive()
     cutoff = now - timedelta(days=body.days)
     try:
         pool_docs = list(
@@ -3931,7 +3931,7 @@ async def update_product(
                                 "user_id": current_user.get("user_id"),
                                 "entity_type": "product",
                                 "entity_id": product_id,
-                                "timestamp": datetime.now(),
+                                "timestamp": utc_now_naive(),
                                 "ts": utc_now_iso(),
                                 "source": "spine_put",
                                 "before": _before,

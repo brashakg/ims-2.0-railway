@@ -11,7 +11,7 @@ Tier 1 marketing features:
 7. Walkout recovery
 """
 
-from api.utils.event_time import utc_now, utc_now_iso
+from api.utils.event_time import utc_now, utc_now_iso, utc_now_naive
 
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field, field_validator
@@ -514,7 +514,7 @@ async def send_rx_reminder(
     # once in a 24-hour window.  Repeat clicks (or UI retries) must not spam
     # the customer.  Only PENDING/SENT/SIMULATED logs count; FAILED entries
     # do NOT block a retry (the previous attempt didn't reach the customer).
-    cutoff_24h = (datetime.now() - timedelta(hours=24)).isoformat()
+    cutoff_24h = (utc_now_naive() - timedelta(hours=24)).isoformat()
     recent = db.get_collection("notification_logs").find_one(
         {
             "customer_id": customer_id,

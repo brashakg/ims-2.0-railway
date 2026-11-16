@@ -171,7 +171,7 @@ async def growth_blueprint(
             if existing:
                 age_hours = (
                     (
-                        datetime.now() - existing.get("generated_at", datetime.min)
+                        utc_now_naive() - existing.get("generated_at", datetime.min)
                     ).total_seconds()
                     / 3600
                     if isinstance(existing.get("generated_at"), datetime)
@@ -271,7 +271,7 @@ async def growth_blueprint(
         }
 
     model_used = model_id or llm_provider.default_model_id() or "default"
-    generated_at = datetime.now()
+    generated_at = utc_now_naive()
 
     # 5. Persist to cache
     if db is not None:

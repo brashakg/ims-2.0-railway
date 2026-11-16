@@ -5,7 +5,7 @@ Enterprise CRM endpoints for customer 360 views, segmentation,
 lifecycle management, and customer intelligence
 """
 
-from api.utils.event_time import utc_now_iso
+from api.utils.event_time import utc_now_iso, utc_now_naive
 
 from fastapi import APIRouter, HTTPException, Depends, Query, Path, Body
 from pydantic import BaseModel, Field
@@ -1302,7 +1302,7 @@ async def get_reactivation_analytics(
     if db is None:
         return empty
 
-    since_iso = (datetime.now() - timedelta(days=days)).isoformat()
+    since_iso = (utc_now_naive() - timedelta(days=days)).isoformat()
     counts = {
         "reached": 0,
         "no_answer": 0,

@@ -9,7 +9,7 @@ from fastapi import HTTPException, Depends, Query
 from pydantic import BaseModel, Field
 from typing import Optional, List
 from datetime import datetime, timedelta
-from api.utils.event_time import utc_now_naive
+from api.utils.event_time import utc_now_naive, utc_now_iso
 from ..auth import get_current_user
 from ...services import spoilage_analytics
 from ...dependencies import store_in_view
@@ -146,11 +146,11 @@ async def get_spoilage_analytics(
             logger.warning("[WORKSHOP] spoilage job fetch failed: %s", exc)
             jobs = []
 
-    cutoff_iso = (datetime.now() - timedelta(days=days)).isoformat()
+    cutoff_iso = (utc_now_naive() - timedelta(days=days)).isoformat()
     windowed = [j for j in jobs if _job_in_spoilage_window(j, cutoff_iso)]
     summary = spoilage_analytics.build_spoilage_summary(windowed, window_days=days)
     summary["store_id"] = active_store
-    summary["as_of"] = datetime.now().isoformat()
+    summary["as_of"] = utc_now_iso()
     # The spoilage cost is worked out from what we pay: the accounts roles'
     # only (owner ruling 2026-10-12); managers keep the remake counts.
     return mask_cost(

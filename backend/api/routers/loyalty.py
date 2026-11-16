@@ -21,7 +21,7 @@ Side-effect on order create:
 
 from __future__ import annotations
 
-from api.utils.event_time import utc_now_iso
+from api.utils.event_time import utc_now_iso, utc_now_naive
 
 from datetime import datetime
 from api.utils.event_time import utc_now_naive
@@ -232,7 +232,7 @@ async def get_account(
 
     # Derive expiring-soon points (any EARN with expires_at within 30 days
     # that hasn't been spent / expired).
-    now = datetime.now()
+    now = utc_now_naive()  # expires_at is stamped from the UTC clock
     expiring_soon = 0
     for t in recent:
         if t.get("type") != "EARN" or t.get("expired"):
@@ -962,7 +962,7 @@ async def expire_sweep(
     if txns is None or accounts is None:
         return {"expired_txns": 0, "points_expired": 0}
 
-    now = datetime.now()
+    now = utc_now_naive()  # expires_at is stamped from the UTC clock (RUN-02)
     candidates = txns.find_expired_unprocessed(now)
 
     by_customer: Dict[str, List[Dict[str, Any]]] = {}
