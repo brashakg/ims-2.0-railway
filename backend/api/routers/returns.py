@@ -2610,11 +2610,31 @@ def _issue_store_credit(
             stored.pop("_id", None)
             return {**stored, "applied": True, "resumed": True}
     else:
+        # A line that moves no balance (all paid in points, settled outside)
+        # is written on its own id too -- the key "Nothing was paid" fences
+        # (_take_from_the_press, D85): only one of the two can ever land.
         try:
-            coll.insert_one(dict(entry))
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[RETURNS] credit ledger insert failed: %s", exc)
-            return None
+            coll.insert_one({**entry, "_id": entry["entry_id"]})
+        except Exception as exc:  # noqa: BLE001 -- the fence, another press's line, a lost ack, or a failure
+            try:
+                stored = coll.find_one({"entry_id": entry["entry_id"]})
+            except Exception:  # noqa: BLE001
+                stored = None
+            kind = (stored or {}).get("type")
+            if kind == scl.FENCED:
+                outcome["fenced"] = True
+                return None
+            if kind != entry["type"]:
+                logger.warning("[RETURNS] credit ledger insert failed: %s", exc)
+                return None
+            # The line is there (this press's, its acknowledgement lost, or
+            # another press's): never "not issued" -- the caller keeps its
+            # claims and the line settles as a stalled press's would.
+            outcome["not_written"] = False
+            if note_number and stored.get("note_number") != note_number:
+                _record_unused_credit_note(note_number, {"order_id": order_id, "store_id": entry.get("store_id")},
+                                           ref, current_user, "another press issued this credit note")
+            raise CreditNotConfirmed(entry["entry_id"])
         outcome["not_written"] = False
     entry.pop("_id", None)
     return entry
@@ -6357,7 +6377,12 @@ async def complete_return_record(
         _audit_credit_event("RETURN_RECORD_REDATED", {"entry_id": f"return:{return_id}", "store_id": store_id,
                                                       "order_id": order_id})
     _audit_complete(return_id, store_id, current_user, recovered, now)
-    return {**doc, "message": "Return record completed. Put its units back in stock by hand."
+    # The press may have put the units back itself before it stalled (its
+    # restock runs after its money step): a person is never told to add a
+    # unit that is already in stock (one frame, two stock rows).
+    return {**doc, "message": "Return record completed. Before putting any of its units back in stock by hand, "
+                              "check that unit first: if it already shows in stock, the counter put it back - "
+                              "do not add it again."
             + (f" The customer is owed Rs {owed:.2f} - a task was raised." if owed else "")}
 
 
