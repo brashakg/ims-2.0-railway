@@ -222,6 +222,7 @@ export function LensRangePricingSection() {
         <div className="flex flex-wrap gap-2 mb-4">
           <select
             value={filterBrand}
+            aria-label="Filter by brand"
             onChange={(e) => setFilterBrand(e.target.value)}
             className="px-2 py-1.5 text-sm border border-gray-300 rounded"
           >
@@ -234,6 +235,7 @@ export function LensRangePricingSection() {
           </select>
           <select
             value={filterIndex}
+            aria-label="Filter by index"
             onChange={(e) => setFilterIndex(e.target.value)}
             className="px-2 py-1.5 text-sm border border-gray-300 rounded"
           >
@@ -246,6 +248,7 @@ export function LensRangePricingSection() {
           </select>
           <select
             value={filterCategory}
+            aria-label="Filter by category"
             onChange={(e) => setFilterCategory(e.target.value)}
             className="px-2 py-1.5 text-sm border border-gray-300 rounded"
           >
@@ -310,6 +313,7 @@ export function LensRangePricingSection() {
                               type="number"
                               step={0.25}
                               value={r.min_value}
+                              aria-label="Min (signed)"
                               disabled={!canEdit}
                               onChange={(e) =>
                                 updateRangeLocal(r.range_id, { min_value: parseFloat(e.target.value) || 0 })
@@ -322,6 +326,7 @@ export function LensRangePricingSection() {
                               type="number"
                               step={0.25}
                               value={r.max_value}
+                              aria-label="Max (signed)"
                               disabled={!canEdit}
                               onChange={(e) =>
                                 updateRangeLocal(r.range_id, { max_value: parseFloat(e.target.value) || 0 })
@@ -334,6 +339,7 @@ export function LensRangePricingSection() {
                               type="number"
                               step={1}
                               value={r.base_price}
+                              aria-label="Base price"
                               disabled={!canEdit}
                               onChange={(e) =>
                                 updateRangeLocal(r.range_id, { base_price: parseFloat(e.target.value) || 0 })
@@ -379,6 +385,7 @@ export function LensRangePricingSection() {
             <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-7 gap-2">
               <select
                 value={newRow.brand_id}
+                aria-label="New range brand"
                 onChange={(e) => setNewRow({ ...newRow, brand_id: e.target.value })}
                 className="px-2 py-1.5 text-sm border border-gray-300 rounded md:col-span-1"
               >
@@ -391,6 +398,7 @@ export function LensRangePricingSection() {
               </select>
               <select
                 value={newRow.index_id}
+                aria-label="New range index"
                 onChange={(e) => setNewRow({ ...newRow, index_id: e.target.value })}
                 className="px-2 py-1.5 text-sm border border-gray-300 rounded"
               >
@@ -403,6 +411,7 @@ export function LensRangePricingSection() {
               </select>
               <select
                 value={newRow.category}
+                aria-label="New range category"
                 onChange={(e) => setNewRow({ ...newRow, category: e.target.value as Category })}
                 className="px-2 py-1.5 text-sm border border-gray-300 rounded"
               >
@@ -414,6 +423,7 @@ export function LensRangePricingSection() {
               </select>
               <select
                 value={newRow.parameter}
+                aria-label="New range parameter"
                 onChange={(e) => setNewRow({ ...newRow, parameter: e.target.value as Parameter })}
                 className="px-2 py-1.5 text-sm border border-gray-300 rounded"
               >
@@ -428,6 +438,7 @@ export function LensRangePricingSection() {
                 step={0.25}
                 placeholder="Min"
                 value={newRow.min_value}
+                aria-label="New range min"
                 onChange={(e) => setNewRow({ ...newRow, min_value: parseFloat(e.target.value) || 0 })}
                 className="px-2 py-1.5 text-sm border border-gray-300 rounded"
               />
@@ -436,6 +447,7 @@ export function LensRangePricingSection() {
                 step={0.25}
                 placeholder="Max"
                 value={newRow.max_value}
+                aria-label="New range max"
                 onChange={(e) => setNewRow({ ...newRow, max_value: parseFloat(e.target.value) || 0 })}
                 className="px-2 py-1.5 text-sm border border-gray-300 rounded"
               />
@@ -444,6 +456,7 @@ export function LensRangePricingSection() {
                 step={1}
                 placeholder="Price ₹"
                 value={newRow.base_price}
+                aria-label="New range base price"
                 onChange={(e) => setNewRow({ ...newRow, base_price: parseFloat(e.target.value) || 0 })}
                 className="px-2 py-1.5 text-sm border border-gray-300 rounded"
               />

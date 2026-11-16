@@ -8,6 +8,32 @@ import { useToast } from '../../context/ToastContext';
 import { adminLensApi } from '../../services/api';
 import type { LensBrand, LensIndex, LensCoating, LensAddon } from './settingsTypes';
 
+// Audit L1-F09: the row actions were bare 12px SVGs with a click handler - no
+// tab stop, no role, no name. A real button, named for its row.
+function RowIconButton({
+  icon: Icon,
+  label,
+  danger,
+  onClick,
+}: {
+  icon: typeof Edit2;
+  label: string;
+  danger?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      title={label}
+      onClick={onClick}
+      className={`inline-flex items-center justify-center w-9 h-9 rounded text-gray-500 hover:bg-gray-200 ${danger ? 'hover:text-red-600' : 'hover:text-bv-red-600'}`}
+    >
+      <Icon className="w-3 h-3" />
+    </button>
+  );
+}
+
 // ============================================================================
 // Lens Master Section
 // ============================================================================
@@ -82,8 +108,9 @@ export function LensMasterSection() {
                 <div key={brand.id} className="p-3 bg-gray-50 border border-gray-200 rounded-lg flex items-center justify-between">
                   <span className="text-sm">{brand.name}</span>
                   <div className="flex items-center gap-1">
-                    <Edit2
-                      className="w-3 h-3 text-gray-500 cursor-pointer hover:text-bv-red-600"
+                    <RowIconButton
+                      icon={Edit2}
+                      label={`Rename lens brand ${brand.name}`}
                       onClick={async () => {
                         const name = prompt('Rename lens brand:', brand.name);
                         if (name && name.trim() && name.trim() !== brand.name) {
@@ -97,8 +124,10 @@ export function LensMasterSection() {
                         }
                       }}
                     />
-                    <Trash2
-                      className="w-3 h-3 text-gray-500 cursor-pointer hover:text-red-600"
+                    <RowIconButton
+                      icon={Trash2}
+                      label={`Delete lens brand ${brand.name}`}
+                      danger
                       onClick={async () => {
                         if (window.confirm(`Delete lens brand "${brand.name}"?`)) {
                           try {
@@ -154,8 +183,10 @@ export function LensMasterSection() {
                     <span className="text-sm font-medium">{idx.value}</span>
                     <span className="text-xs text-gray-500 ml-2">{idx.name}</span>
                   </div>
-                  <Trash2
-                    className="w-3 h-3 text-gray-500 cursor-pointer hover:text-red-600"
+                  <RowIconButton
+                    icon={Trash2}
+                    label={`Delete lens index ${idx.value}`}
+                    danger
                     onClick={async () => {
                       if (window.confirm(`Delete lens index "${idx.value}"?`)) {
                         try {
@@ -215,8 +246,9 @@ export function LensMasterSection() {
                     <span className="text-xs text-gray-500 ml-2">Rs.{Number(coating.price).toFixed(2)}</span>
                   </div>
                   <div className="flex items-center gap-1">
-                    <Edit2
-                      className="w-3 h-3 text-gray-500 cursor-pointer hover:text-bv-red-600"
+                    <RowIconButton
+                      icon={Edit2}
+                      label={`Rename coating ${coating.name}`}
                       onClick={async () => {
                         const name = prompt('Rename coating:', coating.name);
                         if (name && name.trim() && name.trim() !== coating.name) {
@@ -230,8 +262,10 @@ export function LensMasterSection() {
                         }
                       }}
                     />
-                    <Trash2
-                      className="w-3 h-3 text-gray-500 cursor-pointer hover:text-red-600"
+                    <RowIconButton
+                      icon={Trash2}
+                      label={`Delete coating ${coating.name}`}
+                      danger
                       onClick={async () => {
                         if (window.confirm(`Delete coating "${coating.name}"?`)) {
                           try {
@@ -293,8 +327,9 @@ export function LensMasterSection() {
                     <span className="text-xs text-gray-500 ml-2">Rs.{Number(addon.price).toFixed(2)}</span>
                   </div>
                   <div className="flex items-center gap-1">
-                    <Edit2
-                      className="w-3 h-3 text-gray-500 cursor-pointer hover:text-bv-red-600"
+                    <RowIconButton
+                      icon={Edit2}
+                      label={`Rename add-on ${addon.name}`}
                       onClick={async () => {
                         const name = prompt('Rename add-on:', addon.name);
                         if (name && name.trim() && name.trim() !== addon.name) {
@@ -308,8 +343,10 @@ export function LensMasterSection() {
                         }
                       }}
                     />
-                    <Trash2
-                      className="w-3 h-3 text-gray-500 cursor-pointer hover:text-red-600"
+                    <RowIconButton
+                      icon={Trash2}
+                      label={`Delete add-on ${addon.name}`}
+                      danger
                       onClick={async () => {
                         if (window.confirm(`Delete add-on "${addon.name}"?`)) {
                           try {
