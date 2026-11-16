@@ -13,7 +13,8 @@ plus an optional single-line comment.
 
 Auto-deletion (TTL):
   - Mongo TTL index on `expires_at` removes the handoff doc.
-  - The orphaned GridFS blob is cleaned up by NEXUS's hourly sweep.
+  - The GridFS blob is NOT freed on TTL expiry: no sweep exists. Bytes are
+    freed only by revoke / an abandoned forward (_release_file).
 
 Reshare (per user direction):
   - Creates a NEW handoff doc with `parent_handoff_id` set + the SAME
@@ -667,11 +668,13 @@ async def reshare_handoff(
             detail="The sender withdrew this handoff while you were forwarding it; nothing was forwarded",
         )
     if not _publish_forward(repo, new_handoff_id):
-        # Committed, so its bytes are safe either way; the copy is either live
-        # (visible in Sent) or still pending (invisible). Say so honestly.
+        # Committed, so its bytes are safe either way. The copy is most likely
+        # still pending (invisible, removed by the TTL index) and the card stays
+        # on this recipient's desk, so trying again is safe: at worst the
+        # recipient gets the same file twice. No screen lists Sent handoffs.
         raise HTTPException(
             status_code=503,
-            detail="Could not confirm the forward. Check your Sent list before forwarding again.",
+            detail="Could not confirm the forward; it may not have gone through. Please try again.",
         )
     saved["forward_state"] = "live"
 
@@ -739,7 +742,7 @@ async def revoke_handoff(
     current_user: dict = Depends(get_current_user),
 ):
     """Uploader can revoke a handoff before TTL. Best-effort GridFS
-    cleanup happens here too (orphan sweep is the fallback)."""
+    cleanup happens here too (no sweep exists; bytes it cannot free stay)."""
     repo = get_handoff_repository()
     if repo is None:
         raise HTTPException(status_code=503, detail="Database not available")
@@ -765,7 +768,8 @@ async def revoke_handoff(
 def _abandon_forward(repo, child_id: str, file_id: Optional[str]) -> None:
     """Take back a reshare child that was never committed. It is still pending,
     so even if this delete fails the row stays invisible to every route (the
-    TTL index removes it); its bytes are freed only when nothing uses them."""
+    TTL index removes the row; its bytes are then never freed, storage only);
+    its bytes are freed here only when nothing uses them."""
     repo.delete(child_id)
     _release_file(repo, file_id)
 
@@ -796,7 +800,7 @@ def _release_file(repo, file_id: Optional[str]) -> None:
     its pending child BEFORE committing on its live parent, so a zero count
     here means every handoff using this file is already gone and any later
     forward's commit fails; a pending child is counted too. A failed check
-    keeps the bytes (the orphan sweep is the fallback)."""
+    keeps the bytes (storage only; no sweep frees them later)."""
     if not file_id:
         return
     try:

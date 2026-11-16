@@ -858,14 +858,29 @@ def test_r23_d47_publish_that_never_lands_is_503_and_stays_invisible(client, pat
     def down(_cid):
         raise ConnectionError("synthetic outage")
 
+    real_publish = repo.publish_reshare
     repo.publish_reshare = down
     r = client.post(f"/api/v1/handoffs/{parent['handoff_id']}/reshare", headers=_auth(mgr),
                     json={"recipient_user_ids": ["u-acct"]})
-    assert r.status_code == 503 and "Sent" in r.json()["detail"]
+    assert r.status_code == 503
+    # Review: no screen lists Sent handoffs, so the refusal must not send
+    # staff there; it says the forward may not have gone and to try again.
+    detail = r.json()["detail"]
+    assert "Sent" not in detail and "try again" in detail.lower()
     inbox = client.get("/api/v1/handoffs/inbox", headers=_auth(acct)).json()
     assert inbox["handoffs"] == []
-    # The original is untouched and its file still opens.
+    # The original is untouched, still on the manager's desk, and opens.
     assert _download(client, parent["handoff_id"], mgr).status_code == 200
+    mine = client.get("/api/v1/handoffs/inbox", headers=_auth(mgr)).json()["handoffs"]
+    assert [h["handoff_id"] for h in mine] == [parent["handoff_id"]]
+    # Trying again (what the message says) works and delivers one live copy.
+    repo.publish_reshare = real_publish
+    r2 = client.post(f"/api/v1/handoffs/{parent['handoff_id']}/reshare", headers=_auth(mgr),
+                     json={"recipient_user_ids": ["u-acct"]})
+    assert r2.status_code == 201, r2.text
+    got = client.get("/api/v1/handoffs/inbox", headers=_auth(acct)).json()["handoffs"]
+    assert [h["handoff_id"] for h in got] == [r2.json()["handoff_id"]]
+    assert _download(client, r2.json()["handoff_id"], acct).status_code == 200
 
 
 @pytest.mark.parametrize("path", ["/api/v1/handoffs/inbox", "/api/v1/handoffs/sent"])
