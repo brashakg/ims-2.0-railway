@@ -17,8 +17,31 @@ function parseLensPrice(raw: string | null): number | null {
   return /^\d+(\.\d{1,2})?$/.test(t) ? Number(t) : null;
 }
 
-// Icon buttons (were bare SVGs with no role or name).
-const ICON_BTN = 'p-1 rounded text-gray-500 hover:bg-gray-200';
+// Audit L1-F09: the row actions were bare 12px SVGs with a click handler - no
+// tab stop, no role, no name. A real button, named for its row.
+function RowIconButton({
+  icon: Icon,
+  label,
+  danger,
+  onClick,
+}: {
+  icon: typeof Edit2;
+  label: string;
+  danger?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      title={label}
+      onClick={onClick}
+      className={`inline-flex items-center justify-center w-9 h-9 rounded text-gray-500 hover:bg-gray-200 ${danger ? 'hover:text-red-600' : 'hover:text-bv-red-600'}`}
+    >
+      <Icon className="w-3 h-3" />
+    </button>
+  );
+}
 
 // ============================================================================
 // Lens Master Section
@@ -94,11 +117,9 @@ export function LensMasterSection() {
                 <div key={brand.id} className="p-3 bg-gray-50 border border-gray-200 rounded-lg flex items-center justify-between">
                   <span className="text-sm">{brand.name}</span>
                   <div className="flex items-center gap-1">
-                    <button
-                      type="button"
-                      aria-label={`Rename lens brand ${brand.name}`}
-                      title={`Rename lens brand ${brand.name}`}
-                      className={ICON_BTN}
+                    <RowIconButton
+                      icon={Edit2}
+                      label={`Rename lens brand ${brand.name}`}
                       onClick={async () => {
                         const name = prompt('Rename lens brand:', brand.name);
                         if (name && name.trim() && name.trim() !== brand.name) {
@@ -111,14 +132,11 @@ export function LensMasterSection() {
                           }
                         }
                       }}
-                    >
-                      <Edit2 className="w-3 h-3" aria-hidden="true" />
-                    </button>
-                    <button
-                      type="button"
-                      aria-label={`Delete lens brand ${brand.name}`}
-                      title={`Delete lens brand ${brand.name}`}
-                      className={ICON_BTN}
+                    />
+                    <RowIconButton
+                      icon={Trash2}
+                      label={`Delete lens brand ${brand.name}`}
+                      danger
                       onClick={async () => {
                         if (window.confirm(`Delete lens brand "${brand.name}"?`)) {
                           try {
@@ -130,9 +148,7 @@ export function LensMasterSection() {
                           }
                         }
                       }}
-                    >
-                      <Trash2 className="w-3 h-3" aria-hidden="true" />
-                    </button>
+                    />
                   </div>
                 </div>
               ))
@@ -177,11 +193,10 @@ export function LensMasterSection() {
                     <span className="text-sm font-medium">{idx.value}</span>
                     <span className="text-xs text-gray-500 ml-2">{idx.name}</span>
                   </div>
-                  <button
-                    type="button"
-                    aria-label={`Delete lens index ${idx.value}`}
-                    title={`Delete lens index ${idx.value}`}
-                    className={ICON_BTN}
+                  <RowIconButton
+                    icon={Trash2}
+                    label={`Delete lens index ${idx.value}`}
+                    danger
                     onClick={async () => {
                       if (window.confirm(`Delete lens index "${idx.value}"?`)) {
                         try {
@@ -193,9 +208,7 @@ export function LensMasterSection() {
                         }
                       }
                     }}
-                  >
-                    <Trash2 className="w-3 h-3" aria-hidden="true" />
-                  </button>
+                  />
                 </div>
               ))
             )}
@@ -248,11 +261,9 @@ export function LensMasterSection() {
                     <span className="text-xs text-gray-500 ml-2">Rs.{Number(coating.price).toFixed(2)}</span>
                   </div>
                   <div className="flex items-center gap-1">
-                    <button
-                      type="button"
-                      aria-label={`Rename coating ${coating.name}`}
-                      title={`Rename coating ${coating.name}`}
-                      className={ICON_BTN}
+                    <RowIconButton
+                      icon={Edit2}
+                      label={`Rename coating ${coating.name}`}
                       onClick={async () => {
                         const name = prompt('Rename coating:', coating.name);
                         if (name && name.trim() && name.trim() !== coating.name) {
@@ -265,14 +276,11 @@ export function LensMasterSection() {
                           }
                         }
                       }}
-                    >
-                      <Edit2 className="w-3 h-3" aria-hidden="true" />
-                    </button>
-                    <button
-                      type="button"
-                      aria-label={`Delete coating ${coating.name}`}
-                      title={`Delete coating ${coating.name}`}
-                      className={ICON_BTN}
+                    />
+                    <RowIconButton
+                      icon={Trash2}
+                      label={`Delete coating ${coating.name}`}
+                      danger
                       onClick={async () => {
                         if (window.confirm(`Delete coating "${coating.name}"?`)) {
                           try {
@@ -284,9 +292,7 @@ export function LensMasterSection() {
                           }
                         }
                       }}
-                    >
-                      <Trash2 className="w-3 h-3" aria-hidden="true" />
-                    </button>
+                    />
                   </div>
                 </div>
               ))
@@ -341,11 +347,9 @@ export function LensMasterSection() {
                     <span className="text-xs text-gray-500 ml-2">Rs.{Number(addon.price).toFixed(2)}</span>
                   </div>
                   <div className="flex items-center gap-1">
-                    <button
-                      type="button"
-                      aria-label={`Rename add-on ${addon.name}`}
-                      title={`Rename add-on ${addon.name}`}
-                      className={ICON_BTN}
+                    <RowIconButton
+                      icon={Edit2}
+                      label={`Rename add-on ${addon.name}`}
                       onClick={async () => {
                         const name = prompt('Rename add-on:', addon.name);
                         if (name && name.trim() && name.trim() !== addon.name) {
@@ -358,14 +362,11 @@ export function LensMasterSection() {
                           }
                         }
                       }}
-                    >
-                      <Edit2 className="w-3 h-3" aria-hidden="true" />
-                    </button>
-                    <button
-                      type="button"
-                      aria-label={`Delete add-on ${addon.name}`}
-                      title={`Delete add-on ${addon.name}`}
-                      className={ICON_BTN}
+                    />
+                    <RowIconButton
+                      icon={Trash2}
+                      label={`Delete add-on ${addon.name}`}
+                      danger
                       onClick={async () => {
                         if (window.confirm(`Delete add-on "${addon.name}"?`)) {
                           try {
@@ -377,9 +378,7 @@ export function LensMasterSection() {
                           }
                         }
                       }}
-                    >
-                      <Trash2 className="w-3 h-3" aria-hidden="true" />
-                    </button>
+                    />
                   </div>
                 </div>
               ))

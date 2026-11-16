@@ -134,7 +134,6 @@ export const inventoryApi = {
       trackingNumber?: string;
       trackingUrl?: string;
       courierName?: string;
-      createShiprocket?: boolean;
     },
   ) => {
     const response = await api.post(`/transfers/${transferId}/ship`, null, {
@@ -142,7 +141,6 @@ export const inventoryApi = {
         ...(opts?.trackingNumber ? { tracking_number: opts.trackingNumber } : {}),
         ...(opts?.trackingUrl ? { tracking_url: opts.trackingUrl } : {}),
         ...(opts?.courierName ? { courier_name: opts.courierName } : {}),
-        ...(opts?.createShiprocket ? { create_shiprocket: true } : {}),
       },
     });
     return response.data;
