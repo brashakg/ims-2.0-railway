@@ -61,6 +61,18 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+async def _reviewed(fn, body, user=ADMIN):
+    """Preview, then Apply exactly the rows that preview showed (L1-F47)."""
+    pre = await fn(body.model_copy(update={"apply": False}), user)
+    exp = [
+        products_mod.BulkReviewedRow(
+            product_id=r["product_id"], mrp=r.get("old_mrp", r.get("mrp")), offer_price=r["old_offer_price"]
+        )
+        for r in pre["rows"]
+    ]
+    return await fn(body.model_copy(update={"apply": True, "expected": exp}), user)
+
+
 class _Conn:
     """The dependencies.get_db() shape over a mongomock database."""
 
@@ -161,8 +173,9 @@ def _queued(db, pid="P1"):
 def test_bulk_price_moves_the_website_twin_and_queues_it(db):
     _seed(db)
     out = _run(
-        products_mod.bulk_price_update(
-            products_mod.BulkPriceRequest(target="BOTH", mode="PERCENT", amount=10, apply=True), ADMIN
+        _reviewed(
+            products_mod.bulk_price_update,
+            products_mod.BulkPriceRequest(target="BOTH", mode="PERCENT", amount=10, apply=True),
         )
     )
     assert out["summary"]["committed"] == 1, out
@@ -177,7 +190,7 @@ def test_bulk_price_moves_the_website_twin_and_queues_it(db):
 
 def test_bulk_offer_moves_the_website_twin_and_queues_it(db):
     _seed(db)
-    _run(products_mod.bulk_offer_update(products_mod.BulkOfferRequest(action="CLEAR", apply=True), ADMIN))
+    _run(_reviewed(products_mod.bulk_offer_update, products_mod.BulkOfferRequest(action="CLEAR", apply=True)))
     twin = _twin(db)
     assert (twin["offer_price"], twin["pricing"]["offer_price"]) == (5000.0, 5000.0)
     assert twin["ecom"]["locally_modified"] is True
@@ -197,8 +210,9 @@ def test_a_bulk_mrp_change_re_derives_the_rule_price_the_website_shows(db):
     db["ecom_discount_rules"].insert_one({"id": "R1", "category": "FRAME", "discount_percentage": 10})
     _seed(db, ecom={"online_offer_price": 4500.0, "online_compare_at_price": 5000.0, "online_price_source": "rule"})
     _run(
-        products_mod.bulk_price_update(
-            products_mod.BulkPriceRequest(target="BOTH", mode="PERCENT", amount=10, apply=True), ADMIN
+        _reviewed(
+            products_mod.bulk_price_update,
+            products_mod.BulkPriceRequest(target="BOTH", mode="PERCENT", amount=10, apply=True),
         )
     )
     ecom = _twin(db)["ecom"]
@@ -220,8 +234,9 @@ def test_the_single_spine_edit_re_derives_the_rule_price_too(db):
 def test_bulk_tools_never_touch_an_archived_product(db):
     _seed(db, archived=True)
     _run(
-        products_mod.bulk_price_update(
-            products_mod.BulkPriceRequest(target="BOTH", amount=10, apply=True), ADMIN
+        _reviewed(
+            products_mod.bulk_price_update,
+            products_mod.BulkPriceRequest(target="BOTH", amount=10, apply=True),
         )
     )
     assert _twin(db)["mrp"] == 5000.0 and not _queued(db)
@@ -348,15 +363,16 @@ def test_a_failed_website_copy_is_reported_per_row_and_in_the_summary(db, monkey
         pm, "mirror_update_to_catalog_twin", lambda **kw: kw["product_id"] != "P2"
     )
     out = _run(
-        products_mod.bulk_price_update(
-            products_mod.BulkPriceRequest(target="BOTH", mode="PERCENT", amount=10, apply=True), ADMIN
+        _reviewed(
+            products_mod.bulk_price_update,
+            products_mod.BulkPriceRequest(target="BOTH", mode="PERCENT", amount=10, apply=True),
         )
     )
     by_pid = {r["product_id"]: r for r in out["rows"]}
     assert by_pid["P1"]["applied"] is True and by_pid["P1"]["website_synced"] is True
     assert by_pid["P2"]["applied"] is True and by_pid["P2"]["website_synced"] is False
     assert out["summary"]["website_failed"] == 1
-    off = _run(products_mod.bulk_offer_update(products_mod.BulkOfferRequest(action="CLEAR", apply=True), ADMIN))
+    off = _run(_reviewed(products_mod.bulk_offer_update, products_mod.BulkOfferRequest(action="CLEAR", apply=True)))
     assert off["summary"]["website_failed"] == 1
     assert {r["product_id"]: r["website_synced"] for r in off["rows"]} == {"P1": True, "P2": False}
 
@@ -372,9 +388,9 @@ def _size_family(db, *, lead_archived):
 def test_a_bulk_mrp_change_on_a_size_moves_its_row_and_queues_a_live_lead(db):
     _size_family(db, lead_archived=False)
     _run(
-        products_mod.bulk_price_update(
+        _reviewed(
+            products_mod.bulk_price_update,
             products_mod.BulkPriceRequest(target="BOTH", mode="PERCENT", amount=10, apply=True, brand="Ray-Ban"),
-            ADMIN,
         )
     )
     row = db["catalog_variants"].find_one({"sku": "FR-RB-C"})
@@ -385,9 +401,9 @@ def test_a_bulk_mrp_change_on_a_size_moves_its_row_and_queues_a_live_lead(db):
 def test_a_bulk_mrp_change_on_a_size_never_queues_an_archived_lead(db):
     _size_family(db, lead_archived=True)
     _run(
-        products_mod.bulk_price_update(
+        _reviewed(
+            products_mod.bulk_price_update,
             products_mod.BulkPriceRequest(target="BOTH", mode="PERCENT", amount=10, apply=True, brand="Ray-Ban"),
-            ADMIN,
         )
     )
     row = db["catalog_variants"].find_one({"sku": "FR-RB-C"})

@@ -778,6 +778,18 @@ class BulkScopeFilter(BaseModel):
     # Hard ceiling on the rows a single op can touch -- a guard against an empty
     # filter sweeping the whole catalog by accident.
     limit: int = Field(default=5000, ge=1, le=20000)
+    # L1-F47: apply=True must name EVERY row the operator reviewed in the
+    # preview, with the prices that preview showed (see _reviewed_states).
+    expected: Optional[List["BulkReviewedRow"]] = Field(default=None, max_length=20000)
+
+
+class BulkReviewedRow(BaseModel):
+    """One previewed row as the operator saw it: its id and the MRP / offer
+    price BEFORE the change."""
+
+    product_id: str = Field(..., min_length=1)
+    mrp: float = Field(..., allow_inf_nan=False)
+    offer_price: float = Field(..., allow_inf_nan=False)
 
 
 class BulkPriceRequest(BulkScopeFilter):
@@ -828,6 +840,11 @@ class BulkOfferRequest(BulkScopeFilter):
     offer_price: Optional[float] = Field(default=None, gt=0)
     apply: bool = False
     reason: Optional[str] = None
+
+
+BulkScopeFilter.model_rebuild()
+BulkPriceRequest.model_rebuild()
+BulkOfferRequest.model_rebuild()
 
 
 # ============================================================================
@@ -1436,11 +1453,12 @@ def _fetch_scoped_products(flt: BulkScopeFilter) -> List[dict]:
     """Fetch active products matching the bulk scope filter.
 
     category / brand filter at the DB level; store_id restricts to products
-    that have stock at that store. Returns [] when the repo is offline.
-    """
+    that have stock at that store. A read that fails RAISES 503: an empty
+    list or an unfiltered store scope would be a false preview (and the
+    apply step would bind to it)."""
     repo = get_product_repository()
     if repo is None:
-        return []
+        raise HTTPException(status_code=503, detail="Product list unavailable; try again")
 
     query: dict = {"is_active": True}
     if flt.category:
@@ -1448,13 +1466,96 @@ def _fetch_scoped_products(flt: BulkScopeFilter) -> List[dict]:
     if flt.brand:
         query["brand"] = flt.brand
 
-    products = repo.find_many(query, limit=flt.limit)
+    try:
+        cursor = repo.collection.find(query).sort("product_id", 1).limit(flt.limit)
+        products = [repo._clean_id(doc) for doc in cursor]  # pylint: disable=protected-access
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[BULK-PRICING] product read failed: %s", exc)
+        raise HTTPException(status_code=503, detail="Product list unavailable; try again") from exc
 
     if flt.store_id:
         allowed = _store_scoped_product_ids(flt.store_id)
-        if allowed is not None:
-            products = [p for p in products if p.get("product_id") in allowed]
+        if allowed is None:
+            raise HTTPException(status_code=503, detail="Shop stock unavailable; try again")
+        products = [p for p in products if p.get("product_id") in allowed]
     return products
+
+
+def _reviewed_states(body: BulkScopeFilter, products: List[dict], compute) -> Dict[str, tuple]:
+    """L1-F47: bind an Apply to the exact rows and prices its preview showed.
+
+    The scope is re-read at apply time, so without this a product added to
+    the scope (or edited) after the preview was changed unseen, and a lost
+    reply retried re-applied a delta (+10 became +20). Every row must still
+    be either exactly as previewed ("pending": write it) or exactly at the
+    previewed result ("done": an earlier Apply of this preview landed; never
+    written again). Anything else -- a row added or gone, or a price someone
+    else changed -- refuses the whole Apply with 409 and writes nothing.
+
+    `compute(mrp, offer) -> (new_mrp, new_offer)` is the operation itself.
+    Returns {product_id: ("pending" | "done", stored prices)}; sets each
+    product's mrp / offer_price to the reviewed values so the rows report
+    exactly what was reviewed (equal to the stored ones for a pending row).
+    """
+    if body.expected is None:
+        raise HTTPException(
+            status_code=422, detail="Preview first: an Apply must list the rows you reviewed."
+        )
+    reviewed = {e.product_id: e for e in body.expected}
+    if len(reviewed) != len(body.expected):
+        raise HTTPException(status_code=422, detail="A reviewed row is listed twice.")
+    now_ids = {p.get("product_id") for p in products}
+    added, gone = now_ids - set(reviewed), set(reviewed) - now_ids
+    if added or gone:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"The products in this scope changed since your preview ({len(added)} added, "
+                f"{len(gone)} gone). Nothing was changed: preview again."
+            ),
+        )
+    states: Dict[str, tuple] = {}
+    moved: List[str] = []
+    for p in products:
+        e = reviewed[p["product_id"]]
+        was = (_round_money(e.mrp), _round_money(e.offer_price))
+        new = tuple(_round_money(v) for v in compute(e.mrp, e.offer_price))
+        cur = (_round_money(float(p.get("mrp") or 0)), _round_money(float(p.get("offer_price") or 0)))
+        stored = {"mrp": p.get("mrp"), "offer_price": p.get("offer_price")}
+        if cur == was:
+            states[p["product_id"]] = ("pending", stored)
+        elif cur == new:
+            states[p["product_id"]] = ("done", stored)
+        else:
+            moved.append(p.get("sku") or p["product_id"])
+        p["mrp"], p["offer_price"] = e.mrp, e.offer_price
+    if moved:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{len(moved)} product price(s) changed since your preview ({', '.join(moved[:5])}). "
+                "Nothing was changed: preview again."
+            ),
+        )
+    return states
+
+
+def _write_reviewed_price(repo, pid: str, stored: dict, data: dict, target: dict, row: dict) -> bool:
+    """Compare-and-set one reviewed row: lands only while the stored prices
+    are still the ones just checked, so two Applies of one preview at once
+    move each row once. A lost race whose row now holds the target is that
+    other Apply's write (already_applied), anything else a refusal."""
+    if repo.update(pid, data, expected=stored):
+        row["applied"] = True
+        return True
+    doc = repo.collection.find_one({"product_id": pid}) or {}
+    if all(_round_money(float(doc.get(k) or 0)) == v for k, v in target.items()):
+        row["already_applied"] = True
+    else:
+        row["reason"] = "CHANGED_SINCE_PREVIEW"
+        row["message"] = "This price changed while the bulk change ran; preview again."
+    row["applied"] = False
+    return False
 
 
 def _audit_bulk(
@@ -1587,15 +1688,26 @@ async def bulk_price_update(
 
     products = _fetch_scoped_products(body)
 
+    def _operation(mrp: float, offer: float) -> Tuple[float, float]:
+        return (
+            _apply_delta(mrp, mode, body.amount) if target in ("MRP", "BOTH") else mrp,
+            _apply_delta(offer, mode, body.amount) if target in ("OFFER", "BOTH") else offer,
+        )
+
+    states = _reviewed_states(body, products, _operation) if body.apply else {}
+
     rows: List[dict] = []
     committed: List[dict] = []
     website_failed = 0
-    counts = {"total": len(products), "valid": 0, "violations": 0, "unchanged": 0}
+    counts = {
+        "total": len(products), "valid": 0, "violations": 0, "unchanged": 0, "already_applied": 0,
+    }
 
     repo = get_product_repository()
 
     for p in products:
         pid = p.get("product_id")
+        state, stored = states.get(pid, ("pending", None))
         old_mrp = float(p.get("mrp") or 0)
         old_offer = float(p.get("offer_price") or 0)
         disc_cat = p.get("discount_category") or p.get("category")
@@ -1651,15 +1763,22 @@ async def bulk_price_update(
         else:
             counts["valid"] += 1
 
-        # Commit path: only valid + actually-changed rows are written.
-        if body.apply and verdict["ok"] and changed and repo is not None and pid:
+        # Commit path: only valid + actually-changed rows are written, and a
+        # row an earlier Apply of this same preview already moved never is.
+        if body.apply and state == "done" and changed:
+            row["applied"] = False
+            row["already_applied"] = True
+            counts["already_applied"] += 1
+        elif body.apply and verdict["ok"] and changed and repo is not None and pid:
             try:
                 price_patch = {
                     "mrp": _round_money(new_mrp),
                     "offer_price": _round_money(new_offer),
                 }
-                ok = repo.update(
+                ok = _write_reviewed_price(
+                    repo,
                     pid,
+                    stored,
                     {
                         **price_patch,
                         "price_updated_at": datetime.utcnow(),
@@ -1669,8 +1788,11 @@ async def bulk_price_update(
                             current_user.get("user_id"), current_user.get("username")
                         ),
                     },
+                    price_patch,
+                    row,
                 )
-                row["applied"] = bool(ok)
+                if row.get("already_applied"):
+                    counts["already_applied"] += 1
                 if ok:
                     committed.append(
                         {
@@ -1743,15 +1865,27 @@ async def bulk_offer_update(
 
     products = _fetch_scoped_products(body)
 
+    def _operation(mrp: float, offer: float) -> Tuple[float, float]:
+        if action == "CLEAR":
+            return mrp, mrp
+        if body.discount_percent is not None:
+            return mrp, mrp * (1.0 - body.discount_percent / 100.0)
+        return mrp, body.offer_price
+
+    states = _reviewed_states(body, products, _operation) if body.apply else {}
+
     rows: List[dict] = []
     committed: List[dict] = []
     website_failed = 0
-    counts = {"total": len(products), "valid": 0, "violations": 0, "unchanged": 0}
+    counts = {
+        "total": len(products), "valid": 0, "violations": 0, "unchanged": 0, "already_applied": 0,
+    }
 
     repo = get_product_repository()
 
     for p in products:
         pid = p.get("product_id")
+        state, stored = states.get(pid, ("pending", None))
         mrp = float(p.get("mrp") or 0)
         old_offer = float(p.get("offer_price") or 0)
         disc_cat = p.get("discount_category") or p.get("category")
@@ -1803,11 +1937,17 @@ async def bulk_offer_update(
         else:
             counts["valid"] += 1
 
-        if body.apply and verdict["ok"] and changed and repo is not None and pid:
+        if body.apply and state == "done" and changed:
+            row["applied"] = False
+            row["already_applied"] = True
+            counts["already_applied"] += 1
+        elif body.apply and verdict["ok"] and changed and repo is not None and pid:
             try:
                 price_patch = {"offer_price": _round_money(new_offer)}
-                ok = repo.update(
+                ok = _write_reviewed_price(
+                    repo,
                     pid,
+                    stored,
                     {
                         **price_patch,
                         "price_updated_at": datetime.utcnow(),
@@ -1817,8 +1957,11 @@ async def bulk_offer_update(
                             current_user.get("user_id"), current_user.get("username")
                         ),
                     },
+                    price_patch,
+                    row,
                 )
-                row["applied"] = bool(ok)
+                if row.get("already_applied"):
+                    counts["already_applied"] += 1
                 if ok:
                     committed.append(
                         {
