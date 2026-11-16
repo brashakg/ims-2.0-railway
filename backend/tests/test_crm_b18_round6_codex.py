@@ -256,8 +256,12 @@ def test_changed_retry_after_a_lost_answer_is_refused_and_keeps_the_outcome(stor
     r = client.post(url, headers=_hdr(), json=changed)
     assert r.status_code == 409, r.text
     rows = _rows(db, c2)
-    assert [(x["outcome"], x["notes"]) for x in rows] == [("scheduled_visit", "Synthetic call")]
-    # the original action, pressed again, finishes (its next reminder) once
+    done = [x for x in rows if x["status"] != "pending"]
+    assert [(x["outcome"], x["notes"]) for x in done] == [("scheduled_visit", "Synthetic call")]
+    # round 8 (D69): the saved action's own next reminder is set, with ITS date,
+    # before the entry leaves the list; the changed entry wrote nothing
+    assert [x["scheduled_date"] for x in rows if x["status"] == "pending"] == [NEXT]
+    # the original action, pressed again, repeats nothing
     r = client.post(url, headers=_hdr(), json=body)
     assert r.status_code == 200, r.text
     assert sorted(x["status"] for x in _rows(db, c2)) == ["completed", "pending"]
@@ -273,7 +277,8 @@ def test_changed_retry_on_a_linked_follow_up_is_refused(store, monkeypatch):
     assert r.status_code == 409, r.text
     fu = db.get_collection("follow_ups").find_one({"customer_id": c1, "status": "completed"})
     assert [a["notes"] for a in fu["attempts"]] == ["Called, will visit."]
-    assert db.get_collection("follow_ups").count_documents({"customer_id": c1}) == 1
+    # round 8 (D69): only the SAVED call's own next reminder is added, once
+    assert sorted(x["status"] for x in _rows(db, c1)) == ["completed", "pending"]
 
 
 # ---------------------------------------------------------------------------

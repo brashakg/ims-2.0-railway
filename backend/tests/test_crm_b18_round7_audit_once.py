@@ -27,10 +27,17 @@ from test_crm_b18_round6_codex import (  # noqa: F401  (store is a fixture)
 
 
 class _Recorder:
+    """Audit store with Mongo's unique ``_id`` (= log_id), as AuditRepository."""
+
     def __init__(self):
         self.rows = []
 
+    def find_by_id(self, log_id):
+        return next((r for r in self.rows if r.get("log_id") == log_id), None)
+
     def create(self, row):
+        if row.get("log_id") and self.find_by_id(row["log_id"]):
+            return None  # DuplicateKeyError, swallowed like AuditRepository
         self.rows.append(row)
         return row
 
@@ -115,20 +122,20 @@ def test_two_overlapping_identical_requests_write_one_audit_row(store, audit, mo
     assert len(_for(audit, c1)) == 1, _for(audit, c1)
 
 
-def test_skip_after_reminder_not_set_keeps_the_card_for_the_retry(store, audit, monkeypatch):
+def test_skip_after_reminder_not_set_sets_that_reminder_then_clears(store, audit, monkeypatch):
     client, db, c1, _c2 = store
     url, body = _complete(c1)
     undo = _inject(monkeypatch, db, "insert_one", _is_next, "fail")
     r = client.post(url, headers=_hdr(), json=body)
     undo()
     assert r.json()["detail"].startswith("Call saved. The next reminder was NOT set.")
-    # staff cancel and press Skip, then a Complete with other notes
+    # staff cancel and press Skip: refused, but the SAVED call's reminder is
+    # set first (round 8, D69) and only then does the card leave the list
     durl, dbody = _dismiss(c1)
     assert client.post(durl, headers=_hdr(), json=dbody).status_code == 409
-    changed = {**body, "outcome_notes": "Something else."}
-    assert client.post(url, headers=_hdr(), json=changed).status_code == 409
-    assert not _entry(db, "nba_scores", "cards", c1).get("dismissed")  # never shown done
-    # the original Retry still sets the reminder, once
+    assert _entry(db, "nba_scores", "cards", c1)["dismissed"] is True
+    assert sorted(x["status"] for x in _rows(db, c1)) == ["completed", "pending"]
+    # the original Retry is answered and repeats nothing
     r = client.post(url, headers=_hdr(), json=body)
     assert r.status_code == 200 and r.json()["next_follow_up_id"], r.text
     assert sorted(x["status"] for x in _rows(db, c1)) == ["completed", "pending"]
