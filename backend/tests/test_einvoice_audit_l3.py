@@ -803,6 +803,76 @@ async def test_1409_p2_an_already_cancelled_answer_ims_never_asked_for_is_not_tr
     assert len(posts) == 2
 
 
+# --- 1409-P2 round 2: a provider answer of an unexpected shape (parseable
+# JSON that is not the documented object) is a FAILED result on both paths,
+# never a raise (the route answered 500); on cancel, an answer that neither
+# accepts nor refuses keeps the request on record for the next press.
+
+_ODD = [[{"Status": "1"}], "Status 1", None, {}]
+
+
+@pytest.mark.parametrize(
+    "body", [[{"Status": "0"}], "gateway temporary error", None, {"InfoDtls": [17]},
+             {"InfoDtls": ["x"], "ErrorDetails": "down"}],
+    ids=["list", "text", "null", "nested-int", "nested-str"],
+)
+@pytest.mark.asyncio
+async def test_1409_p2r2_an_odd_generation_answer_is_failed_not_a_crash(monkeypatch, body):
+    order = _till_order([FRAME])
+    db = _db(order, [_creds(JH_GSTIN)])
+    monkeypatch.setenv("IMS_EINVOICE_ENABLED", "1")
+
+    async def _odd(cfg, payload):
+        return body
+
+    monkeypatch.setattr(einvoice, "_call_irp", _odd)
+    out = await einvoice.generate_irn(db, order)
+    assert (out["status"], out["irn"]) == (einvoice.STATUS_FAILED, None)
+    assert "IRP returned no IRN" in out["reason"]
+    assert "irn" not in db.get_collection("orders").find_one({"order_id": "ORD-L3"})
+
+
+@pytest.mark.parametrize("body", _ODD, ids=["list", "text", "null", "empty"])
+@pytest.mark.asyncio
+async def test_1409_p2r2_an_unreadable_cancel_answer_keeps_the_request_for_the_next_press(
+    monkeypatch, cancel_db, body
+):
+    """Codex's case: a list / string answer raised AttributeError out of
+    cancel_irn; a null / empty one cleared the request, so a later "already
+    cancelled" was refused for ever while the IRP may have cancelled it."""
+    order = _issued(cancel_db, order_id="ORD-L3")
+    posts = _cancel_irp(monkeypatch, body, _IRP_ALREADY)
+
+    first = await einvoice.cancel_irn(cancel_db, order)
+    stored = _row(cancel_db, "orders", order_id="ORD-L3")
+    assert (first["status"], first["persisted"]) == (einvoice.STATUS_FAILED, False)
+    assert "could not be read" in first["reason"]
+    assert stored["einvoice_status"] == "GENERATED"
+    assert stored["einvoice_cancel_pending"]["irn"] == "SYNTHETIC-IRN-NOT-VALID"
+
+    retry = await einvoice.cancel_irn(cancel_db, order)
+    stored = _row(cancel_db, "orders", order_id="ORD-L3")
+    assert (retry["status"], retry["persisted"]) == ("CANCELLED", True)
+    assert stored["einvoice_status"] == "CANCELLED" and "einvoice_cancel_pending" not in stored
+
+    third = await einvoice.cancel_irn(cancel_db, order)
+    assert (third["status"], len(posts)) == ("CANCELLED", 2)
+
+
+@pytest.mark.asyncio
+async def test_1409_p2r2_a_refusal_with_odd_error_entries_is_a_refusal(monkeypatch, cancel_db):
+    """An explicit Status 0 still settles this press's request, even when its
+    error list holds no objects -- and never raises."""
+    order = _issued(cancel_db, order_id="ORD-L3")
+    _cancel_irp(monkeypatch, {"Status": "0", "ErrorDetails": [17]}, _IRP_ALREADY)
+
+    for _ in range(2):
+        out = await einvoice.cancel_irn(cancel_db, order)
+        stored = _row(cancel_db, "orders", order_id="ORD-L3")
+        assert out["status"] == einvoice.STATUS_FAILED
+        assert stored["einvoice_status"] == "GENERATED" and "einvoice_cancel_pending" not in stored
+
+
 # --- the same proof on a REAL MongoDB (CI's mongo:7.0; skipped on a PC without one)
 
 MONGO_HOST = os.getenv("MONGO_HOST", "127.0.0.1")

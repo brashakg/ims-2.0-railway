@@ -490,7 +490,7 @@ def _parse_irp_response(body: Dict[str, Any]) -> Dict[str, Any]:
 
     # Shape 1: NIC standard InfoDtls
     info_list = body.get("InfoDtls") or []
-    if isinstance(info_list, list) and info_list:
+    if isinstance(info_list, list) and info_list and isinstance(info_list[0], dict):
         desc = info_list[0].get("Desc") or {}
         if isinstance(desc, dict) and desc.get("Irn"):
             return {
@@ -803,6 +803,7 @@ async def generate_irn(db, order: Dict[str, Any]) -> Dict[str, Any]:
     # ── Call the IRP / GSP ───────────────────────────────────────────────
     try:
         body = await _call_irp(cfg, einvoice_json)
+        irn_fields = _parse_irp_response(body)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[EINVOICE] IRP call failed for order %s: %s", order_id, exc)
         return {
@@ -815,10 +816,11 @@ async def generate_irn(db, order: Dict[str, Any]) -> Dict[str, Any]:
             "einvoice_json": einvoice_json,
         }
 
-    # ── Parse response ───────────────────────────────────────────────────
-    irn_fields = _parse_irp_response(body)
+    # ── No IRN in the answer (any shape: audit 1409-P2 round 2) ─────────
     if not irn_fields.get("irn"):
-        err_details = body.get("ErrorDetails") or body.get("error") or body
+        err_details = (
+            (body.get("ErrorDetails") or body.get("error") or body) if isinstance(body, dict) else body
+        )
         return {
             "status": STATUS_FAILED,
             "irn": None,
@@ -857,16 +859,27 @@ async def generate_irn(db, order: Dict[str, Any]) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _irp_cancel_ok(body: Dict[str, Any]) -> bool:
+def _irp_cancel_ok(body: Any) -> bool:
     """The IRP / GSP accepted the cancel (NIC Status 1, as a string or int)."""
-    return str(body.get("Status")) == "1" or body.get("status") == "success"
+    return isinstance(body, dict) and (
+        str(body.get("Status")) == "1" or body.get("status") == "success"
+    )
 
 
-def _irp_says_already_cancelled(body: Dict[str, Any]) -> bool:
+def _irp_refused(body: Any) -> bool:
+    """The IRP / GSP said NO to this request (NIC Status 0 or an error list).
+    Any other answer -- not an object, empty, no Status -- says nothing about
+    the outcome (audit 1409-P2 round 2)."""
+    return isinstance(body, dict) and (str(body.get("Status")) == "0" or bool(body.get("ErrorDetails")))
+
+
+def _irp_says_already_cancelled(body: Any) -> bool:
     """The IRP refused a cancel because the IRN is already cancelled (NIC
     error 9999 "Invoice is not active"). Only trusted when IMS's OWN earlier
     request for this IRN is on record (cancel_irn). The exact sandbox reply is
     not yet verified -- D31 blocker (6)."""
+    if not isinstance(body, dict):
+        return False
     details = body.get("ErrorDetails") or []
     if isinstance(details, dict):
         details = [details]
@@ -902,7 +915,7 @@ async def _post_cancel(cfg: Dict[str, Any], cancel_payload: Dict[str, Any]) -> D
         )
     if resp.status_code not in (200, 201):
         raise ValueError(f"IRP cancel failed ({resp.status_code}): {resp.text[:300]}")
-    return resp.json() or {}
+    return resp.json()
 
 
 async def cancel_irn(
@@ -994,20 +1007,32 @@ async def cancel_irn(
             f"for the cancel: {exc}"
         )
 
-    # ── Ask the IRP
+    # ── Ask the IRP; what its answer means is read inside the same boundary
+    # (an answer of an unexpected shape is a FAILED result, never a raise)
     try:
         body = await _post_cancel(
             cfg,
             {"Irn": irn, "CnlRsn": cancel_reason_code, "CnlRem": cancel_remark or "Cancelled via IMS"},
         )
+        accepted = _irp_cancel_ok(body)
+        already = asked_before and _irp_says_already_cancelled(body)
+        refused = _irp_refused(body)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[EINVOICE] cancel_irn failed: %s", exc)
         return failed(f"cancel error: {exc}")
 
-    if _irp_cancel_ok(body):
+    if accepted:
         note = None
-    elif asked_before and _irp_says_already_cancelled(body):
+    elif already:
         note = "The IRP says this IRN is already cancelled (IMS asked earlier); recorded now."
+    elif not refused:
+        # An answer that neither accepts nor refuses (not an object, empty,
+        # no Status): the IRP may have cancelled it. The request stays on
+        # record, so the next press can take "already cancelled" as its answer.
+        return failed(
+            "The IRP's answer could not be read, so the cancel may or may not have "
+            f"happened; press cancel again to confirm: {str(body)[:250]}"
+        )
     else:
         # A "no" to the request marked in THIS call settles it, so a later
         # "already cancelled" is not taken as the answer to it. A marker from
