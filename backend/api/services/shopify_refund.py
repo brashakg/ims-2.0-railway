@@ -254,8 +254,11 @@ def _claim_stale_refund_for_retry(returns_coll, refund_id: str, now: str):
 
     Returns the existing doc when THIS caller won the right to re-process a
     never-credited row (the caller falls through to the credit-issue + finalize
-    path, which update_one's this same doc); returns None for a TRUE duplicate -- a
-    credit note really exists, OR another worker is mid-reprocess. Never raises."""
+    path, which update_one's this same doc); returns None when no claim was won --
+    a credit note really exists, OR another run holds a claim not yet stale.
+    RAISES when the claim WRITE fails (D55): a write whose answer never came
+    back may or may not have landed, so it is neither "won" nor "a duplicate";
+    the caller reports a retryable failure."""
     # SF03: a claim whose run stopped is re-claimable once STALE -- a PENDING
     # doc older than _CLAIM_STALE_SECONDS (the first run died between its claim
     # and its finalize) or a re-drive's reprocessing_at that old. A fresh one
@@ -267,23 +270,19 @@ def _claim_stale_refund_for_retry(returns_coll, refund_id: str, now: str):
     fou = getattr(returns_coll, "find_one_and_update", None)
     if callable(fou):
         base = {"shopify_refund_id": refund_id, "credit_note_issued": {"$ne": True}}
-        try:
-            for extra in (
-                # Only re-claim a FINALIZED row -- never an in-flight brand-new
-                # PENDING claim (closes the concurrent first-ever double-issue).
-                {"reprocessing_at": None, "status": {"$ne": "PENDING"}},
-                # A PENDING claim whose first run is dead.
-                {"reprocessing_at": None, "status": "PENDING", "created_at": {"$lt": stale}},
-                # A re-drive that took the claim and died.
-                {"reprocessing_at": {"$lt": stale}},
-            ):
-                won = fou({**base, **extra}, {"$set": {"reprocessing_at": now}})
-                if won is not None:
-                    return won
-            return None
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[SHOPIFY_REFUND] retry-claim find_one_and_update failed: %s", exc)
-            return None
+        for extra in (
+            # Only re-claim a FINALIZED row -- never an in-flight brand-new
+            # PENDING claim (closes the concurrent first-ever double-issue).
+            {"reprocessing_at": None, "status": {"$ne": "PENDING"}},
+            # A PENDING claim whose first run is dead.
+            {"reprocessing_at": None, "status": "PENDING", "created_at": {"$lt": stale}},
+            # A re-drive that took the claim and died.
+            {"reprocessing_at": {"$lt": stale}},
+        ):
+            won = fou({**base, **extra}, {"$set": {"reprocessing_at": now}})
+            if won is not None:
+                return won
+        return None
     # No find_one_and_update (mock / no-DB path): best-effort NON-atomic decision.
     # Still honest -- only re-process when the row was demonstrably never credited.
     try:
@@ -1760,9 +1759,27 @@ def _post_locked(
                 # is mid-reprocess -- so a genuinely-posted refund is still a true
                 # duplicate but an unposted one gets re-driven (not silently
                 # swallowed while the GST reversal is lost).
-                existing = _claim_stale_refund_for_retry(returns_coll, refund_id, now)
+                try:
+                    existing = _claim_stale_refund_for_retry(returns_coll, refund_id, now)
+                    # No claim won: a duplicate ONLY when the credit note is
+                    # really there. A claim another run holds (or one this run
+                    # wrote whose answer was lost) is unfinished work (D55).
+                    done = existing is None and (
+                        returns_coll.find_one({"shopify_refund_id": refund_id}) or {}
+                    ).get("credit_note_issued") is True
+                except Exception as exc:  # noqa: BLE001
+                    logger.error("[SHOPIFY_REFUND] refund=%s: the retry claim could not be "
+                                 "written or checked; nothing posted: %s", refund_id, exc)
+                    existing, done = None, False
                 prior_doc = existing
                 if existing is None:
+                    if not done:
+                        return {
+                            "status": "error",
+                            "error": "refund claim held or unverified -- nothing posted, retry later",
+                            "refund_id": refund_id,
+                            "order_id": order_id,
+                        }
                     logger.info(
                         "[SHOPIFY_REFUND] refund=%s already credited -- duplicate", refund_id
                     )
