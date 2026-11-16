@@ -40,11 +40,15 @@ from pydantic import BaseModel, Field
 
 try:
     from pymongo import ReturnDocument
+    from pymongo.errors import DuplicateKeyError
 except ImportError:  # pragma: no cover - test stubs may not have pymongo
 
     class ReturnDocument:  # type: ignore[no-redef]
         AFTER = "after"
         BEFORE = "before"
+
+    class DuplicateKeyError(Exception):  # type: ignore[no-redef]
+        pass
 
 
 from .auth import get_current_user, require_roles
@@ -3435,7 +3439,7 @@ def _raise_restock_blocked_task(
     order_number: Optional[str] = None,
     refund_id: Optional[str] = None,
     stock_in_failed: bool = False,
-) -> None:
+) -> bool:
     """Put a BLOCKED restock in front of a human, with its real cause and ONE
     action, naming the order staff can look up (its number) and only the
     doors that exist: Goods back only for a Shopify refund whose review row
@@ -3519,12 +3523,14 @@ def _raise_restock_blocked_task(
                 "payload": {"return_id": return_id, "order_id": order_id},
             },
         )
+        return True
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "[RETURNS] restock-blocked task could not be raised for %s: %s",
             return_id,
             exc,
         )
+        return False
 
 
 def _refund_takes_goods_back(refund_id: str) -> bool:
@@ -5107,6 +5113,11 @@ RESTOCK_UNKNOWN = "unknown"
 # D92(4): a press whose record Needs completing took answers this, never 201,
 # so the cash is never handed over twice.
 RECORD_TAKEN_MESSAGE = "This return was completed from Needs completing. Do not pay at the counter."
+# Its record could not be saved nor read back: Needs completing may already
+# have completed it, so the counter pays nothing (round 11).
+RECORD_UNCONFIRMED_MESSAGE = ("This return could not be confirmed as saved. Do not pay at the counter and do "
+                              "not redo it: Accounts finish it in Returns > Needs completing (a task was raised).")
+_UNREAD = object()
 
 
 def _record_exists(return_id: str) -> bool:
@@ -6632,29 +6643,31 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         try:
             coll.insert_one(dict(doc))
         except Exception as exc:  # noqa: BLE001
-            # D92(4): the record Needs completing wrote holds this return id
-            # (uniq_returns_return_id) -- the return is complete: 409, never 201.
+            # D92(4): a duplicate key on this fresh doc can only be another
+            # record of this return id (uniq_returns_return_id) -- the one
+            # Needs completing wrote: 409, never 201, with no read to fail.
+            if isinstance(exc, DuplicateKeyError):
+                _record_taken_by_needs_completing(return_id, quarantined)
             try:
-                _taken = (coll.find_one({"return_id": return_id}) or {}).get("recovered")
-            except Exception:  # noqa: BLE001 -- unknown: the doc-missing path below
-                _taken = None
-            if _taken:
+                _found = coll.find_one({"return_id": return_id})
+                _taken = (_found or {}).get("recovered")
+            except Exception:  # noqa: BLE001 -- unknown: never "Refund recorded"
+                _found, _taken = None, _UNREAD
+            if _taken and _taken is not _UNREAD:
                 _record_taken_by_needs_completing(return_id, quarantined)
             # The money already went out: the KEPT hold keeps this refund in the
             # bill's refunded total (Rs 2,000 rule, cap) -- loud, for the admin:
             # the doc rides on the hold and on a P1 task, for Complete record.
             logger.error("[RETURNS] return %s money recorded but its doc was NOT saved: %s", return_id, exc)
             _keep_order_refund_hold(resolved_order_id, return_id, extra={"doc": dict(doc)})
-            # A record of this return that is there after all (its own insert,
-            # the reply lost; or Accounts rebuilt it in Needs completing while
-            # this press stalled) needs no "record not saved" alarm. Unread:
-            # the alarm stands.
-            try:
-                exists = coll.find_one({"return_id": return_id}, {"_id": 1}) is not None
-            except Exception:  # noqa: BLE001
-                exists = False
-            if not exists:
+            # #1413: this press's own record there after all (its insert
+            # landed, the reply lost) needs no "record not saved" alarm.
+            # Missing or unread: the alarm stands.
+            if _found is None:
                 _task_return_doc_missing(doc)
+            if _taken is _UNREAD:
+                # Needs completing may have taken it: nothing is paid here.
+                raise HTTPException(status_code=503, detail=RECORD_UNCONFIRMED_MESSAGE) from exc
 
     # Audit log (optional, fail-soft).
     try:
@@ -6702,10 +6715,20 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         "CREDIT_NOTE": f"Store credit of Rs {pays} issued{fee_note}{points_note}",
         "EXCHANGE": "Exchange recorded",
     }[body.return_type]
-    if stock_fence == RESTOCK_UNKNOWN and any(ln.restock and ln.condition == "GOOD" for ln in active_lines):
-        # D92(1): the bill could not be checked, so no unit went back here.
+    _left = [ln for ln in active_lines if ln.restock and ln.condition == "GOOD"]
+    if stock_fence == RESTOCK_UNKNOWN and _left:
+        # D92(1): the bill could not be checked, so no unit went back here;
+        # one P1 Inventory task carries the real step (its record's Restock).
+        _raised = _raise_restock_blocked_task(
+            return_id, resolved_order_id, store_id,
+            [{"product_id": ln.product_id, "sku": getattr(ln, "sku", "") or "",
+              "product_name": getattr(ln, "product_name", "") or ""} for ln in _left],
+            current_user.get("active_store_id") or store_id, unread="the bill",
+            historical=bool(order.get("historical")) if order is not None else None,
+            order_number=(order or {}).get("order_number"))
         message += (". Its units were NOT put back in stock (the bill could not be checked just now): "
-                    "press Restock on this return")
+                    + ("a task was raised to put them back - do not add them by hand" if _raised
+                       else "tell the store manager - do not add them by hand"))
 
     return {
         "return_id": return_id,
