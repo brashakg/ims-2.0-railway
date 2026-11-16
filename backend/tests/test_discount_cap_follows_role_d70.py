@@ -23,6 +23,7 @@ import mongomock
 
 from api.routers import users
 from api.services.role_caps import ROLE_DISCOUNT_CAPS
+from database.repositories.audit_repository import AuditRepository
 from database.repositories.user_repository import UserRepository
 from test_user_role_guards import _SUPER, _client_with_audit
 
@@ -127,6 +128,83 @@ def test_concurrent_deliberate_edit_is_not_overwritten(monkeypatch):
     d = real_find(uid)
     assert (d["discount_cap"], d["discount_cap_is_role_default"], d["roles"]) == (
         15.0, False, ["SALES_STAFF"])
+
+
+def test_a_refused_change_is_marked_not_applied_and_cannot_be_reverted_to(monkeypatch):
+    """Round 2: A's PERMISSIONS_UPDATE row (cap 10 -> 0) is written before its
+    compare-and-set loses. The trail must say it never landed, and Revert must
+    not re-apply that phantom state over B's real 15."""
+    repo = _repo()
+    audit = AuditRepository(mongomock.MongoClient().db.audit_logs)
+    c, _ = _client_with_audit(repo, _SUPER, monkeypatch, audit_repo=audit)
+    uid = _create(c, "auto", ["SALES_STAFF"])
+    stale = repo.find_by_id(uid)
+    assert c.put(f"/api/v1/users/{uid}", json={"discount_cap": 15}).status_code == 200
+    real_find = repo.find_by_id
+    monkeypatch.setattr(repo, "find_by_id", lambda i: dict(stale) if i == uid else real_find(i))
+    assert c.put(f"/api/v1/users/{uid}", json={"roles": ["ACCOUNTANT"]}).status_code == 409
+    monkeypatch.setattr(repo, "find_by_id", real_find)
+    hist = c.get(f"/api/v1/users/{uid}/permissions").json()["history"]
+    phantom = [h for h in hist if h["action"] == "PERMISSIONS_UPDATE"
+               and h["permissions_after"]["discount_cap"] == 0.0]
+    assert len(phantom) == 1 and phantom[0].get("not_applied") is True
+    aborted = [h for h in hist if h["action"] == "PERMISSIONS_UPDATE_ABORTED"]
+    assert len(aborted) == 1 and aborted[0]["aborts_log_id"] == phantom[0]["log_id"]
+    assert aborted[0]["permissions_after"]["discount_cap"] == 10.0  # nothing changed
+    # The real change (10 -> 15) stays a live, revertible row.
+    assert not [h for h in hist if h.get("not_applied") and h is not phantom[0]]
+    r = c.post(f"/api/v1/users/{uid}/permissions/revert", json={"audit_log_id": phantom[0]["log_id"]})
+    assert r.status_code == 409, r.text
+    assert _stored(repo, uid) == (15.0, False)
+
+
+def test_role_side_doors_move_a_marked_cap_with_an_audit_row(monkeypatch):
+    """Round 2: POST/DELETE /users/{id}/roles/{role} and assign-store with a
+    role changed roles without D70. Codex's exact sequence: Sales Staff (10,
+    marked) + ACCOUNTANT, then - SALES_STAFF must leave an Accountant at 0."""
+    repo = _repo()
+    c, audit = _client_with_audit(repo, _SUPER, monkeypatch)
+    uid = _create(c, "auto", ["SALES_STAFF"])
+    assert c.post(f"/api/v1/users/{uid}/roles/ACCOUNTANT").status_code == 200
+    assert _stored(repo, uid) == (10.0, True)
+    assert c.delete(f"/api/v1/users/{uid}/roles/SALES_STAFF").status_code == 200
+    d = repo.find_by_id(uid)
+    assert (d["roles"], d["discount_cap"], d["discount_cap_is_role_default"]) == (
+        ["ACCOUNTANT"], 0.0, True)
+    moves = [(r["permissions_before"]["discount_cap"], r["permissions_after"]["discount_cap"])
+             for r in audit.rows if r["action"] == "PERMISSIONS_UPDATE"]
+    assert moves == [(10.0, 0.0)]
+    r = c.post(f"/api/v1/users/{uid}/assign-store", json={"store_id": "S2", "role": "STORE_MANAGER"})
+    assert r.status_code == 200, r.text
+    d = repo.find_by_id(uid)
+    assert ("STORE_MANAGER" in d["roles"], d["discount_cap"], "S2" in d["store_ids"]) == (
+        True, 20.0, True)
+    # A typed cap is still kept through the side door.
+    typed = _create(c, "typed", ["SALES_STAFF"], cap=15)
+    assert c.post(f"/api/v1/users/{typed}/roles/ACCOUNTANT").status_code == 200
+    assert c.delete(f"/api/v1/users/{typed}/roles/SALES_STAFF").status_code == 200
+    assert _stored(repo, typed) == (15.0, False)
+
+
+def test_list_read_failure_is_an_error_not_an_empty_page(monkeypatch):
+    """Round 2: find_many swallowed a Mongo error into [] -> 200 [] -> the
+    screen took it as the last page / 'No users found'."""
+    from pymongo.errors import ServerSelectionTimeoutError
+
+    repo = _repo()
+    repo.collection.insert_one({"user_id": "u1", "username": "u1", "roles": ["SALES_STAFF"],
+                                "store_ids": ["S1"], "is_active": True})
+    c, _ = _client_with_audit(repo, _SUPER, monkeypatch)
+
+    def boom(*a, **k):
+        raise ServerSelectionTimeoutError("down")
+
+    monkeypatch.setattr(repo.collection, "find", boom)
+    for skip in (0, 100):
+        r = c.get("/api/v1/users", params={"skip": skip, "limit": 100})
+        assert r.status_code == 503, (skip, r.status_code, r.text)
+    monkeypatch.setattr(users, "get_user_repository", lambda: None)
+    assert c.get("/api/v1/users").status_code == 503
 
 
 def test_editor_options_carry_the_role_standard_table(monkeypatch):

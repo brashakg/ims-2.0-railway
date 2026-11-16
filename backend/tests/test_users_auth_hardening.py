@@ -165,7 +165,7 @@ class _FakeUserRepo:
                 return False
         return True
 
-    def find_many(self, query=None, sort=None, skip=0, limit=100):  # real signature
+    def find_many(self, query=None, sort=None, skip=0, limit=100, strict=False):  # real signature
         out = [dict(d) for d in self._docs.values() if self._matches(d, query or {})]
         return out[skip : skip + limit]
 

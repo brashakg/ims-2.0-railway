@@ -51,6 +51,7 @@ def write_permission_audit(
     after: dict,
     store_id: Optional[str] = None,
     note: Optional[str] = None,
+    extra: Optional[dict] = None,
 ) -> Optional[dict]:
     """Append ONE hash-chained audit row for a permission change.
 
@@ -79,22 +80,53 @@ def write_permission_audit(
     }
     if note:
         row["note"] = note
+    row.update(extra or {})
     try:
         return audit_repo.create(row)
     except Exception:  # noqa: BLE001 - any failure => no-log-no-commit
         return None
 
 
+ABORTED = "PERMISSIONS_UPDATE_ABORTED"
+
+
+def write_permission_abort(audit_repo, *, actor: dict, aborted: dict, reason: str):
+    """The change logged in ``aborted`` never landed (the write lost its
+    compare-and-set or failed). The audit trail is append-only, so record a
+    second row saying so; history marks the first ``not_applied`` and revert
+    refuses it. Before and after are both the unchanged state."""
+    row = write_permission_audit(
+        audit_repo,
+        action=ABORTED,
+        actor=actor,
+        target_user_id=aborted.get("target_user_id"),
+        prior=aborted.get("permissions_before") or {},
+        after=aborted.get("permissions_before") or {},
+        store_id=aborted.get("store_id"),
+        note=f"Not applied ({reason}); nothing changed.",
+        extra={"aborts_log_id": aborted.get("log_id")},
+    )
+    if row is None:
+        print(f"[permission_audit] abort row NOT written for {aborted.get('log_id')}")
+    return row
+
+
 def find_permission_history(audit_repo, target_user_id: str, limit: int = 50):
-    """Return the permission-change audit rows for a user, newest first. Empty
-    list when the repo is unavailable (fail-soft read)."""
+    """Return the permission-change audit rows for a user, newest first, each
+    change that never landed marked ``not_applied``. Empty list when the repo
+    is unavailable (fail-soft read)."""
     if audit_repo is None:
         return []
     try:
-        return audit_repo.find_many(
+        rows = audit_repo.find_many(
             {"entity_type": "user_permissions", "target_user_id": target_user_id},
             sort=[("timestamp", -1)],
             limit=limit,
         )
     except Exception:  # noqa: BLE001
         return []
+    dead = {r.get("aborts_log_id") for r in rows if r.get("action") == ABORTED}
+    for r in rows:
+        if r.get("log_id") in dead:
+            r["not_applied"] = True
+    return rows

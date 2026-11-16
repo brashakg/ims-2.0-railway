@@ -931,11 +931,18 @@ async def list_users(
         if active_only:
             filter_dict["is_active"] = True
 
-        # Stable order so skip/limit pages neither repeat nor skip anyone.
-        users = repo.find_many(filter_dict, sort=[("_id", 1)], skip=skip, limit=limit)
+        # Stable order so skip/limit pages neither repeat nor skip anyone. A
+        # failed read is a 503, never a 200 [] the screen would take as the
+        # last page (or "No users found").
+        try:
+            users = repo.find_many(
+                filter_dict, sort=[("_id", 1)], skip=skip, limit=limit, strict=True
+            )
+        except Exception:  # noqa: BLE001
+            raise HTTPException(status_code=503, detail="Could not read the staff list. Retry.")
         return [sanitize_user(u, current_user) for u in users]
 
-    return []
+    raise HTTPException(status_code=503, detail="Could not read the staff list. Retry.")
 
 
 @router.post("", response_model=dict, status_code=201)
@@ -1225,6 +1232,15 @@ async def update_user(
             if _expect is not None
             else repo.update(user_id, update_data)
         )
+        if not _updated and _audit_needed:
+            # The change logged above never landed: say so in the trail so the
+            # timeline and Revert never offer it as a real state.
+            _perm_audit.write_permission_abort(
+                get_audit_repository(),
+                actor=current_user,
+                aborted=audit,
+                reason="changed meanwhile" if _expect is not None else "write failed",
+            )
         if not _updated and _expect is not None:
             raise HTTPException(
                 status_code=409,
@@ -1300,6 +1316,18 @@ async def delete_user(user_id: str, current_user: dict = Depends(require_admin))
     return {"message": "User deactivated"}
 
 
+async def _add_role_via_update(user_id: str, existing: dict, role: str, current_user: dict):
+    """One door for every role change (D70): the PUT path moves a marked
+    role-default discount cap with its audit row and compare-and-set, and runs
+    the hierarchy / escalation / last-admin guards."""
+    # ponytail: read-modify-write of roles (was an atomic $addToSet), same as
+    # PUT; add a roles compare-and-set if concurrent role edits ever matter.
+    roles = list(existing.get("roles", []) or [])
+    if role not in roles:
+        roles.append(role)
+    await update_user(user_id, UserUpdate(roles=roles), current_user)
+
+
 @router.post("/{user_id}/roles/{role}")
 async def add_role(
     user_id: str, role: str, current_user: dict = Depends(require_admin)
@@ -1328,10 +1356,8 @@ async def add_role(
         if existing is None:
             raise HTTPException(status_code=404, detail="User not found")
 
-        if repo.add_role(user_id, role):
-            return {"message": f"Role {role} added to user"}
-
-        raise HTTPException(status_code=500, detail="Failed to add role")
+        await _add_role_via_update(user_id, existing, role, current_user)
+        return {"message": f"Role {role} added to user"}
 
     return {"message": f"Role {role} added to user"}
 
@@ -1378,10 +1404,11 @@ async def remove_role(
                 detail="Cannot remove admin role from the last active admin",
             )
 
-        if repo.remove_role(user_id, role):
-            return {"message": f"Role {role} removed from user"}
-
-        raise HTTPException(status_code=500, detail="Failed to remove role")
+        # Same single role-change door as add_role (D70 cap move + audit).
+        await update_user(
+            user_id, UserUpdate(roles=[r for r in current_roles if r != role]), current_user
+        )
+        return {"message": f"Role {role} removed from user"}
 
     return {"message": f"Role {role} removed from user"}
 
@@ -1631,12 +1658,9 @@ async def assign_store(
         raise HTTPException(status_code=404, detail="User not found")
     repo.add_store(user_id, body.store_id)
     if body.role:
-        # Add the role if the repo supports it; ignore failures so the
-        # store assignment still succeeds.
-        try:
-            repo.add_role(user_id, body.role)
-        except Exception:
-            pass
+        # Through the same role-change door as add_role (D70). A refusal is
+        # reported; the store access above has already been granted.
+        await _add_role_via_update(user_id, existing, body.role, current_user)
     return {"user_id": user_id, "store_id": body.store_id, "message": "Store assigned"}
 
 
@@ -1880,6 +1904,11 @@ async def revert_user_permissions(
     target = next((h for h in history if h.get("log_id") == body.audit_log_id), None)
     if target is None:
         raise HTTPException(status_code=404, detail="Audit snapshot not found")
+    if target.get("not_applied"):
+        raise HTTPException(
+            status_code=409,
+            detail="That change was never applied, so there is nothing to revert to.",
+        )
     # Re-apply the AFTER state of the chosen historical row (that is the state
     # the user wants to return TO). Re-run it through the guard + sanitize so a
     # state set by a higher admin can't be re-applied by a lower one.

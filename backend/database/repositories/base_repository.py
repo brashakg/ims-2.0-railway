@@ -166,9 +166,11 @@ class BaseRepository(ABC, Generic[T]):
         sort: List[tuple] = None,
         skip: int = 0,
         limit: int = 100,
+        strict: bool = False,
     ) -> List[Dict]:
         """
-        Find multiple documents
+        Find multiple documents. ``strict``: a database error RAISES instead of
+        reading as an empty list (for screens where empty must mean empty).
 
         Args:
             filter: MongoDB filter
@@ -192,6 +194,8 @@ class BaseRepository(ABC, Generic[T]):
             return [self._clean_id(doc) for doc in cursor]
         except Exception as e:
             print(f"Error finding {self.entity_name}s: {e}")
+            if strict:
+                raise
             return []
 
     def update(self, id: str, data: Dict, expected: Optional[Dict] = None) -> bool:
