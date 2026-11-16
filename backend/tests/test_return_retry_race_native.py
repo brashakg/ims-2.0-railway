@@ -784,3 +784,25 @@ def test_the_counter_press_refuses_when_a_return_slot_index_is_missing(press, fi
     assert again.status_code == 201, again.text
     assert [u["stock_id"] for u in db.stock_units.find({"status": status})] == ["STK-1"]
     assert db.stock_units.count_documents({}) == 1
+
+
+def test_the_counter_press_refuses_when_the_index_list_cannot_be_read(press, monkeypatch):
+    """D82: an unreadable index list is a missing guarantee -- 503, nothing written."""
+    from pymongo.collection import Collection
+    from pymongo.errors import AutoReconnect
+
+    from tests.test_returns_restock import _hdr, _payload
+
+    ctx, db = press
+    db.stock_units.insert_one({"_id": "STK-1", "stock_id": "STK-1", "product_id": "PRD-1",
+                               "store_id": "BV-PUN-01", "status": "SOLD", "order_id": "ORD-1", "quantity": 1})
+
+    def unreadable(self, *a, **k):
+        raise AutoReconnect("index list lost")
+
+    monkeypatch.setattr(Collection, "index_information", unreadable)
+    r = ctx["client"].post("/api/v1/returns", json=_payload(), headers=_hdr(["ADMIN"]))
+    assert r.status_code == 503, r.text
+    assert db.stock_units.find_one({"_id": "STK-1"})["status"] == "SOLD"
+    assert ctx["returns_coll"].docs == [] and ctx["ledger_coll"].docs == []
+    assert not ctx["order_repo"]._order.get("refund_holds")
