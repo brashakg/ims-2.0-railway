@@ -799,9 +799,57 @@ def test_shop_that_cannot_be_read_refuses_the_run_instead_of_dropping_pt(rig, mo
     assert with_pt["breakdown"]["deductions"]["professional_tax"] > 0  # the shop's state charges PT
     _fail_reads_of(monkeypatch, rig, "stores")
     reply = rig.run(dry_run=dry_run)
-    assert reply.status_code >= 500, reply.text
+    assert reply.status_code == 503, reply.text
+    assert "nothing was calculated or saved" in _detail(reply)
     monkeypatch.undo()
     assert rig.rows() == []
+    g = rig.guard()
+    assert g is None or g.get("runs") == 0
+
+
+@pytest.mark.parametrize("dry_run", [True, False], ids=["preview", "save"])
+def test_d83_pt_slab_that_cannot_be_read_refuses_the_run_instead_of_the_built_in_slab(
+    rig, monkeypatch, dry_run
+):
+    """D83: the state's stored PT slab is the one that applies. A failed read
+    of it is not 'no stored slab', so the built-in slab is never used in its
+    place: the run answers 503 before any write."""
+    def pt():
+        reply = rig.run(dry_run=True)
+        assert reply.status_code == 200, reply.text
+        return reply.json()["rows"][0]["breakdown"]["deductions"]["professional_tax"]
+
+    rig.db.get_collection("stores").insert_one({"store_id": STORE, "state": "Maharashtra"})
+    assert pt() == 200  # no stored slab: the built-in one applies (not a failure)
+    # A stored MH slab that differs from the built-in one, so a silent
+    # fall-back would show up as a different PT amount.
+    rig.db.get_collection("pt_slabs").insert_one(
+        {"state_code": "MH", "basis": "MONTHLY", "slabs": [{"min": 0, "max": None, "amount": 123}]})
+    assert pt() == 123
+    _fail_reads_of(monkeypatch, rig, "pt_slabs")
+    reply = rig.run(dry_run=dry_run)
+    assert reply.status_code == 503, reply.text
+    assert "Professional Tax" in _detail(reply) and "nothing was calculated or saved" in _detail(reply)
+    monkeypatch.undo()
+    assert rig.rows() == []
+    g = rig.guard()
+    assert g is None or g.get("runs") == 0
+
+
+@pytest.mark.parametrize("dry_run", [True, False], ids=["preview", "save"])
+def test_employee_that_cannot_be_read_refuses_the_run_instead_of_a_blank_name(
+    rig, monkeypatch, dry_run
+):
+    """The same rule for the employee's own record: a failed read is not an
+    employee with no name, so no payslip row is saved with a blank name."""
+    _fail_reads_of(monkeypatch, rig, "users")
+    reply = rig.run(dry_run=dry_run)
+    assert reply.status_code == 503, reply.text
+    assert "nothing was calculated or saved" in _detail(reply)
+    monkeypatch.undo()
+    assert rig.rows() == []
+    g = rig.guard()
+    assert g is None or g.get("runs") == 0
 
 
 # ---------------------------------------------------------------------------

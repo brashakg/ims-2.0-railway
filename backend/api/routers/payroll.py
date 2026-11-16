@@ -277,8 +277,11 @@ def _get_db():
     return get_db()
 
 
-def _get_employee_details(db, employee_id: str) -> dict:
-    """Get employee details from users collection"""
+def _get_employee_details(db, employee_id: str, strict: bool = False) -> dict:
+    """Get employee details from users collection.
+
+    ``strict`` (the payroll run): a failed read refuses with 503 instead of
+    answering an employee with no name, which would be saved on the row."""
     # ``is None``, never ``not db``: the staff payslip door (GET /hr/me/payslip)
     # hands in the raw Mongo database, which refuses a truth test. That raised
     # here and the staff member was told "no payslip" for a saved payroll run.
@@ -290,6 +293,12 @@ def _get_employee_details(db, employee_id: str) -> dict:
         return user or {}
     except Exception as e:
         logger.error(f"Error in _get_employee_details: {str(e)}", exc_info=True)
+        if strict:
+            raise HTTPException(
+                status_code=503,
+                detail=f"The record of employee {employee_id} could not be read, "
+                "so nothing was calculated or saved. Try again.",
+            )
         return {}
 
 
@@ -1588,26 +1597,38 @@ def _fetch_incentive(db, employee_id: str, month: int, year: int,
 
 
 def _resolve_pt_slab(db, config: dict) -> Optional[dict]:
-    """Resolve the PT slab for an employee from their store's state."""
+    """Resolve the PT slab for an employee from their store's state.
+
+    A failed read is not an empty read (D83): an unreadable shop is not a
+    shop with no Professional Tax, and an unreadable stored slab is not "no
+    stored slab", so neither falls back to the built-in slab. Both refuse the
+    run (503) -- they run before anything is written."""
     state = None
     store_id = config.get("store_id")
-    if db is not None and store_id:
-        # A read failure raises: an unreadable shop is not a shop with no
-        # Professional Tax, and pay saved without PT would overpay.
-        store = db.get_collection("stores").find_one({"store_id": store_id})
-        if store:
-            state = store.get("state") or store.get("gst_state_code")
-    code = pt_code_for_state(state)
-    if not code:
-        return None
-    if db is not None:
-        try:
-            slab = db.get_collection("pt_slabs").find_one({"state_code": code})
-            if slab:
-                return slab
-        except Exception:
-            pass
-    return DEFAULT_PT_SLABS.get(code)
+    code = None
+    try:
+        if db is not None and store_id:
+            store = db.get_collection("stores").find_one({"store_id": store_id})
+            if store:
+                state = store.get("state") or store.get("gst_state_code")
+        code = pt_code_for_state(state)
+        if not code:
+            return None
+        slab = (
+            db.get_collection("pt_slabs").find_one({"state_code": code})
+            if db is not None
+            else None
+        )
+    except Exception as exc:
+        logger.error("Payroll PT read failed: %s", exc)
+        what = f"the Professional Tax slab for {code}" if code else f"shop {store_id}"
+        raise HTTPException(
+            status_code=503,
+            detail=f"The Professional Tax for {config.get('employee_id')} could not "
+            f"be worked out because {what} could not be read, so nothing was "
+            "calculated or saved. Try again.",
+        )
+    return slab or DEFAULT_PT_SLABS.get(code)
 
 
 def _scope_configs(db, store_id: Optional[str], entity_id: Optional[str]) -> list:
@@ -1710,7 +1731,7 @@ async def run_payroll(
             set_aside = -locked if locked < 0 else 0.0  # never -0.0
             advance = float(req.advances.get(emp, 0) or 0)
             pt_slab = _resolve_pt_slab(db, cfg)
-            employee_name = _get_employee_details(db, emp).get("full_name", "")
+            employee_name = _get_employee_details(db, emp, strict=True).get("full_name", "")
             try:
                 breakdown = compute_payroll(
                     cfg,
