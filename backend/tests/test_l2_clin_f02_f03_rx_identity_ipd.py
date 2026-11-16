@@ -338,3 +338,9 @@ def test_portal_read_failures_are_503_never_a_false_empty_or_unnamed_list(monkey
     assert _portal_get(monkeypatch, None, _Repo(ACCOUNT, key="customer_id")).status_code == 503
     assert _portal_get(monkeypatch, [_exam_rx()], _Boom()).status_code == 503
     assert _portal_get(monkeypatch, [_exam_rx()], None).status_code == 503
+
+
+def test_canonical_print_without_db_is_503_not_a_false_not_found(monkeypatch):
+    c = _client(monkeypatch, _exam_rx())
+    monkeypatch.setattr(prescriptions, "get_prescription_repository", lambda: None)
+    assert c.get("/prescriptions/rx-1/print").status_code == 503

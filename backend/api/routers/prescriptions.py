@@ -2111,7 +2111,11 @@ async def print_prescription(
             "prescription_number": prescription.get("prescription_number"),
         }
 
-    return {"html": "<html><body>Prescription not found</body></html>"}
+    # PR-1430 round 1: a missing store answered 200 "Prescription not found",
+    # a false not-found for an Rx that may well exist. 503 = try again.
+    raise HTTPException(
+        status_code=503, detail="Prescription is temporarily unavailable"
+    )
 
 
 # ============================================================================

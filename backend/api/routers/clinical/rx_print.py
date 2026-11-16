@@ -268,16 +268,16 @@ async def print_prescription(
     """Return a self-contained, printable A5 Rx card (read-only).
 
     Same gate as GET /prescriptions/{id} (audit L2-CLIN-F01): the clinical
-    read roles, and the Rx's own store (404 cross-store). Fail-soft: if the DB is
-    unavailable we still return a minimal valid card rather than 500-ing, so a
-    degraded backend never blocks a counter staffer from handing a patient a
-    printout.
+    read roles, and the Rx's own store (404 cross-store). With the DB
+    unavailable it answers 503 (never a blank card presented as an Rx).
     """
     rx_repo = get_prescription_repository()
     if rx_repo is None:
-        # DB down: render an empty-but-valid card so the print window opens.
-        return HTMLResponse(
-            _build_rx_card_html({"prescription_id": prescription_id}, None)
+        # PR-1430 round 1: this used to print an EMPTY card with a 200 -- a
+        # blank prescription a patient could be handed as if it were theirs.
+        # A missing store is "try again", never a printed Rx.
+        raise HTTPException(
+            status_code=503, detail="Prescription is temporarily unavailable"
         )
 
     rx = rx_repo.find_by_id(prescription_id)
