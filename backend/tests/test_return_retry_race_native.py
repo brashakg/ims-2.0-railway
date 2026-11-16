@@ -26,6 +26,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from api.routers import returns as R  # noqa: E402
+from tests.test_returns_restock import ctx  # noqa: E402,F401  (the press fixture)
 
 URL = os.getenv("IMS_NATIVE_MONGO_URL") or os.getenv("MONGODB_URL") or "mongodb://localhost:27017"
 STORE, RID, OID, PID = "BV-RACE-01", "RET-RACE-1", "ORD-RACE-1", "P-RACE-1"
@@ -623,3 +624,69 @@ def test_a_later_return_of_the_resold_unit_never_frees_its_slot_for_a_second_rec
     assert native.stock_units.count_documents({}) == 1, (
         f"one piece became two records: {list(native.stock_units.find({}, {'_id': 1, 'source_id': 1}))}")
     assert again["restock_applied"] is True and again["restock_stock_ids"] == ["U1"]
+
+
+# --------------------------------------------------------------------------- #
+# The counter press (POST /returns) still running when Accounts completed its
+# record (Returns > Needs completing) and ran the panel's Retry stock step.
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def press(native, ctx, gst_numbers, monkeypatch):  # noqa: F811
+    """The press on the fakes of test_returns_restock, its serialized stock on
+    the REAL Mongo (the app's unique return-slot indexes)."""
+    from database.repositories.product_repository import StockRepository
+
+    repo = StockRepository(native.stock_units)
+    monkeypatch.setattr(R, "get_stock_repository", lambda: repo)
+    monkeypatch.setattr(R.barcode_svc, "mint_unit_barcode", lambda *a, **k: f"BC-{uuid.uuid4().hex[:10]}")
+    import agents.registry as registry
+    from api.services import item_events as ie
+
+    async def _quiet(event, payload, source=""):
+        return None
+
+    monkeypatch.setattr(registry, "dispatch_event", _quiet)
+    monkeypatch.setattr(ie, "record_post_write_event", lambda db, **kw: None)
+    return ctx, native
+
+
+@pytest.mark.parametrize("units,condition,status", [
+    (["STK-1"], "GOOD", "AVAILABLE"),            # the reviewer's case: the press would mint
+    (["STK-1", "STK-2"], "GOOD", "AVAILABLE"),   # the press would put back the bill's other unit
+    (["STK-1", "STK-2"], "DAMAGED", "QUARANTINED"),
+])
+def test_a_press_resuming_after_its_rebuilt_record_was_retried_adds_no_second_record(
+        press, monkeypatch, units, condition, status):
+    """D45(a), D79: the press issued the credit and stalled before its stock
+    step; its hold aged, Accounts completed the record and the panel's Retry
+    stock step moved the piece (its snapshot: nothing moved yet, slot 0).
+    The press then resumes: it must take the same slot, so its write is
+    refused and the piece is counted as the retry's unit -- never a second
+    stock record, never the bill's other unit still with the customer."""
+    from tests.test_returns_restock import _hdr, _payload
+
+    ctx, db = press
+    for sid in units:
+        db.stock_units.insert_one({"_id": sid, "stock_id": sid, "product_id": "PRD-1", "store_id": "BV-PUN-01",
+                                   "status": "SOLD", "order_id": "ORD-1", "quantity": 1})
+    target = "_restock_good_items" if condition == "GOOD" else "_quarantine_damaged_units"
+    real, retried = getattr(R, target), []
+
+    def stalled(*a, **k):
+        if not retried:  # meanwhile: the panel's Retry stock step, the shared rule
+            retried.append(real(*a, **{**k, "moved_ids": set()}))
+        return real(*a, **k)
+
+    monkeypatch.setattr(R, target, stalled)
+    body = _payload()
+    body["items"][0]["condition"] = condition
+    r = ctx["client"].post("/api/v1/returns", json=body, headers=_hdr(["ADMIN"]))
+    assert r.status_code == 201, r.text
+    moved = sorted(u["stock_id"] for u in db.stock_units.find({"status": status}))
+    assert len(moved) == 1, f"one returned piece became {len(moved)} stock records: {moved}"
+    assert db.stock_units.count_documents({}) == len(units), "the press minted a second record"
+    assert db.stock_units.count_documents({"status": "SOLD"}) == len(units) - 1
+    assert r.json()["restock_applied"] is True
+    saved = ctx["returns_coll"].docs[-1]  # the press's own record (Accounts' rebuilt one is elsewhere)
+    key = "restock_stock_ids" if condition == "GOOD" else "quarantined_stock_ids"
+    assert saved["restock_applied"] is True and saved[key] == moved, saved

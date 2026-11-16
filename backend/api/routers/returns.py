@@ -2748,8 +2748,12 @@ def _return_slot_keys(stock_repo: Any, return_id: str, kind: str,
     keys held are read from `moved_ids` -- the units the retry already
     counted as moved, the same snapshot its pieces-still-out came from (a
     unit that landed after it is not in it, and its key is the one this
-    retry picks too) -- or, with no snapshot (the press, the Shopify doors),
-    from every unit this return moved. RAISES when they cannot be read."""
+    retry picks too). The press passes an empty snapshot: nothing of a fresh
+    return moved before it, and a unit a concurrent Retry stock step of its
+    rebuilt record put back is exactly the slot the press must collide on.
+    With no snapshot (None, the Shopify doors, serialised per line by their
+    booking) they are read from every unit this return moved. RAISES when
+    they cannot be read."""
     held = {u.get("return_slot") for u in _own_moved_units(stock_repo, return_id, moved_ids)}
     keys: List[str] = []
     for u in units:
@@ -6151,6 +6155,11 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
             processing_store_id=current_user.get("active_store_id"),
             # Already resolved above; saves the online branch a second fetch.
             order=order,
+            # A fresh return: nothing of it moved before this press, so its
+            # pieces take slots 0..n-1 -- the very slots a Retry stock step
+            # of its rebuilt record (Needs completing) picks while this press
+            # stalls, so the later write of a piece is refused (D45a, D79).
+            moved_ids=set(),
         )
     except Exception as exc:  # noqa: BLE001
         # A stock-write failure must never break the return record - leave
@@ -6160,7 +6169,8 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
     # go to the supplier or be cleared), and the task agent raises its 7-day
     # follow-up.
     quarantined, aside_ok = _quarantine_damaged_units(
-        active_lines, resolved_order_id, order, return_id, current_user.get("user_id"))
+        active_lines, resolved_order_id, order, return_id, current_user.get("user_id"),
+        moved_ids=set())  # the press's slots, as for the put-back above
     for unit in quarantined:
         try:
             from agents.registry import dispatch_event
