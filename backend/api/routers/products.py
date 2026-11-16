@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field, field_validator
 from typing import Any, Dict, List, Optional, Tuple, Union
 from datetime import datetime, timedelta
 import logging
+import hashlib
 import random
 import uuid
 from .auth import get_current_user, require_roles
@@ -1540,59 +1541,138 @@ def _reviewed_states(body: BulkScopeFilter, products: List[dict], compute) -> Di
     return states
 
 
-def _write_reviewed_price(repo, pid: str, stored: dict, data: dict, target: dict, row: dict) -> bool:
+def _stored_doc(repo, pid: str) -> dict:
+    """Read one product back (raises on a database error)."""
+    return repo.collection.find_one({"product_id": pid}) or {}
+
+
+def _write_reviewed_price(repo, pid: str, stored: dict, data: dict, target: dict, row: dict) -> str:
     """Compare-and-set one reviewed row: lands only while the stored prices
     are still the ones just checked, so two Applies of one preview at once
-    move each row once. A lost race whose row now holds the target is that
-    other Apply's write (already_applied), anything else a refusal."""
-    if repo.update(pid, data, expected=stored):
-        row["applied"] = True
-        return True
-    doc = repo.collection.find_one({"product_id": pid}) or {}
-    if all(_round_money(float(doc.get(k) or 0)) == v for k, v in target.items()):
-        row["already_applied"] = True
-    else:
-        row["reason"] = "CHANGED_SINCE_PREVIEW"
-        row["message"] = "This price changed while the bulk change ran; preview again."
-    row["applied"] = False
-    return False
+    move each row once. `data` carries this Apply's `bulk_write_id`.
 
-
-def _audit_bulk(
-    action: str,
-    user: dict,
-    summary: dict,
-    rows: List[dict],
-) -> None:
-    """Append one immutable audit entry summarising a committed bulk op, plus
-    the per-row diffs (was -> now). Fail-soft: a logging failure never blocks
-    the price change that already happened."""
+    Returns "applied" (this Apply's write landed -- also when the database
+    raised after landing it: the re-read finds this Apply's write id),
+    "already" (another Apply of the preview wrote it), "refused" (someone
+    else changed it) or "uncertain" (a database error, and the row could not
+    be read back or still shows the old price: the caller answers 503 so the
+    page holds the preview and the identical retry finishes it)."""
+    raised = False
     try:
-        from ..dependencies import get_audit_repository
-
-        audit = get_audit_repository()
-        if audit is None:
-            return
-        audit.create(
-            {
-                "action": action,
-                "entity_type": "product_price",
-                "store_id": summary.get("store_id"),
-                "user_id": user.get("user_id"),
-                "severity": "WARNING",  # bulk price moves are notable events
-                "timestamp": datetime.utcnow(),
-                "created_at": datetime.utcnow(),
-                "details": {
-                    "summary": summary,
-                    # Cap the embedded diff list so a 5,000-row op doesn't write
-                    # a multi-MB audit doc; the summary always has full counts.
-                    "changes": rows[:500],
-                    "changes_truncated": len(rows) > 500,
-                },
-            }
-        )
+        if repo.update(pid, data, expected=stored):
+            row["applied"] = True
+            return "applied"
+    except Exception as exc:  # noqa: BLE001 -- it may have landed (lost acknowledgement)
+        logger.warning("[BULK-PRICING] write for %s raised: %s", pid, exc)
+        raised = True
+    row["applied"] = False
+    try:
+        doc = _stored_doc(repo, pid)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("[BULK-PRICING] audit log skipped: %s", exc)
+        logger.warning("[BULK-PRICING] read-back for %s failed: %s", pid, exc)
+        doc = None
+    if doc is not None and all(_round_money(float(doc.get(k) or 0)) == v for k, v in target.items()):
+        if doc.get("bulk_write_id") == data["bulk_write_id"]:
+            row["applied"] = True
+            return "applied"
+        row["already_applied"] = True
+        return "already"
+    if raised or doc is None:
+        row["reason"] = "NOT_CONFIRMED"
+        row["message"] = "Not confirmed saved; retry the same Apply."
+        return "uncertain"
+    row["reason"] = "CHANGED_SINCE_PREVIEW"
+    row["message"] = "This price changed while the bulk change ran; preview again."
+    return "refused"
+
+
+def _audit_bulk(action: str, user: dict, summary: dict, groups: Dict[str, List[dict]]) -> None:
+    """D84: one immutable audit entry per Apply that wrote prices, under a
+    fixed id (action + that Apply's bulk_write_id, stamped on every product
+    it wrote). Written before the request answers success; an identical
+    retry finds the entry and never writes a second, and names a landed row
+    whose own Apply never got its entry written (recovered). An entry that
+    cannot be written RAISES 503, so the page holds the preview and offers
+    the identical retry, which writes it once."""
+    from ..dependencies import get_audit_repository
+
+    audit = get_audit_repository()
+    try:
+        if audit is None:
+            raise RuntimeError("audit repository unavailable")
+        for wid, rows in groups.items():
+            log_id = f"{action}:{wid}"
+            if audit.collection.find_one({"log_id": log_id}, {"_id": 1}):
+                continue
+            audit.create(
+                {
+                    "log_id": log_id,
+                    "action": action,
+                    "entity_type": "product_price",
+                    "entity_id": wid,
+                    "store_id": summary.get("store_id"),
+                    "user_id": user.get("user_id"),
+                    "severity": "WARNING",  # bulk price moves are notable events
+                    "timestamp": datetime.utcnow(),
+                    "created_at": datetime.utcnow(),
+                    "details": {
+                        "summary": summary,
+                        # Cap the embedded diff list so a 5,000-row op doesn't write
+                        # a multi-MB audit doc; the summary always has full counts.
+                        "changes": rows[:500],
+                        "changes_truncated": len(rows) > 500,
+                    },
+                }
+            )
+            # create() is fail-soft (None); a racing identical retry may have
+            # written the same id -- either way the entry must now exist.
+            if not audit.collection.find_one({"log_id": log_id}, {"_id": 1}):
+                raise RuntimeError(f"audit entry {log_id} not written")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[BULK-PRICING] audit not written: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "The prices were saved but the record of this change was not. "
+                "Press Retry the same Apply: nothing is changed twice."
+            ),
+        ) from exc
+
+
+def _finish_bulk_apply(action: str, user: dict, summary: dict, write_id: str,
+                       committed: List[dict], recovered: List[dict], uncertain: int) -> None:
+    """The end of every bulk Apply (price and offer). A row whose write
+    raised and could not be confirmed answers 503 (the identical retry
+    finishes it and writes the audit); otherwise the audit entries are
+    written before success is answered (_audit_bulk)."""
+    if committed or recovered:
+        try:
+            from ..services.cache import invalidate_product_lists
+
+            invalidate_product_lists()
+        except Exception:  # noqa: BLE001
+            pass
+    if uncertain:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"{uncertain} price change(s) could not be confirmed as saved. "
+                "Press Retry the same Apply: rows already saved are not changed again."
+            ),
+        )
+    groups: Dict[str, List[dict]] = {write_id: committed} if committed else {}
+    unkeyed: List[dict] = []
+    for change in recovered:
+        if change.get("write_id"):
+            groups.setdefault(change["write_id"], []).append(change)
+        else:
+            unkeyed.append(change)
+    if unkeyed:  # saved before write ids existed: a fixed id from the rows
+        groups["unkeyed-" + hashlib.sha256(
+            "|".join(sorted(c["product_id"] for c in unkeyed)).encode()
+        ).hexdigest()[:24]] = unkeyed
+    if groups:
+        _audit_bulk(action, user, summary, groups)
 
 
 def _price_reaches_website(row: dict, pid: str, product: dict, price_patch: dict) -> bool:
@@ -1699,9 +1779,11 @@ async def bulk_price_update(
     rows: List[dict] = []
     committed: List[dict] = []
     # Rows an earlier Apply of this preview already saved: never written
-    # again, but named in this audit (that Apply may have died before its
-    # own audit), so every landed change has an audit trace.
+    # again; named in that Apply's audit entry if it never got written.
     recovered: List[dict] = []
+    # Stamped on every product this Apply writes: the audit entry's fixed id.
+    write_id = uuid.uuid4().hex
+    uncertain = 0
     website_failed = 0
     counts = {
         "total": len(products), "valid": 0, "violations": 0, "unchanged": 0, "already_applied": 0,
@@ -1780,6 +1862,7 @@ async def bulk_price_update(
                     "mrp": [row["old_mrp"], row["new_mrp"]],
                     "offer_price": [row["old_offer_price"], row["new_offer_price"]],
                     "recovered": True,
+                    "write_id": p.get("bulk_write_id"),
                 }
             )
             # The earlier Apply may have stopped between the billing write and
@@ -1790,46 +1873,42 @@ async def bulk_price_update(
             ):
                 website_failed += 1
         elif body.apply and verdict["ok"] and changed and repo is not None and pid:
-            try:
-                price_patch = {
-                    "mrp": _round_money(new_mrp),
-                    "offer_price": _round_money(new_offer),
-                }
-                ok = _write_reviewed_price(
-                    repo,
-                    pid,
-                    stored,
+            price_patch = {
+                "mrp": _round_money(new_mrp),
+                "offer_price": _round_money(new_offer),
+            }
+            outcome = _write_reviewed_price(
+                repo,
+                pid,
+                stored,
+                {
+                    **price_patch,
+                    "bulk_write_id": write_id,
+                    "price_updated_at": datetime.utcnow(),
+                    "price_updated_by": current_user.get("user_id"),
+                    # A price change by a person IS a catalogue edit.
+                    **_catalog_list.edit_stamp(
+                        current_user.get("user_id"), current_user.get("username")
+                    ),
+                },
+                price_patch,
+                row,
+            )
+            if outcome == "already":
+                counts["already_applied"] += 1
+            elif outcome == "uncertain":
+                uncertain += 1
+            elif outcome == "applied":
+                committed.append(
                     {
-                        **price_patch,
-                        "price_updated_at": datetime.utcnow(),
-                        "price_updated_by": current_user.get("user_id"),
-                        # A price change by a person IS a catalogue edit.
-                        **_catalog_list.edit_stamp(
-                            current_user.get("user_id"), current_user.get("username")
-                        ),
-                    },
-                    price_patch,
-                    row,
+                        "product_id": pid,
+                        "sku": p.get("sku"),
+                        "mrp": [row["old_mrp"], row["new_mrp"]],
+                        "offer_price": [row["old_offer_price"], row["new_offer_price"]],
+                    }
                 )
-                if row.get("already_applied"):
-                    counts["already_applied"] += 1
-                if ok:
-                    committed.append(
-                        {
-                            "product_id": pid,
-                            "sku": p.get("sku"),
-                            "mrp": [row["old_mrp"], row["new_mrp"]],
-                            "offer_price": [
-                                row["old_offer_price"],
-                                row["new_offer_price"],
-                            ],
-                        }
-                    )
-                    if not _price_reaches_website(row, pid, p, price_patch):
-                        website_failed += 1
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("[BULK-PRICING] update failed for %s: %s", pid, exc)
-                row["applied"] = False
+                if not _price_reaches_website(row, pid, p, price_patch):
+                    website_failed += 1
         rows.append(row)
 
     summary = {
@@ -1849,15 +1928,10 @@ async def bulk_price_update(
         "website_failed": website_failed,
     }
 
-    if body.apply and (committed or recovered):
-        _audit_bulk("BULK_PRICE_UPDATE", current_user, summary, committed + recovered)
-        # Invalidate the product list cache so the catalog reflects new prices.
-        try:
-            from ..services.cache import invalidate_product_lists
-
-            invalidate_product_lists()
-        except Exception:  # noqa: BLE001
-            pass
+    if body.apply:
+        _finish_bulk_apply(
+            "BULK_PRICE_UPDATE", current_user, summary, write_id, committed, recovered, uncertain
+        )
 
     return {"dry_run": not body.apply, "summary": summary, "rows": rows}
 
@@ -1897,9 +1971,11 @@ async def bulk_offer_update(
     rows: List[dict] = []
     committed: List[dict] = []
     # Rows an earlier Apply of this preview already saved: never written
-    # again, but named in this audit (that Apply may have died before its
-    # own audit), so every landed change has an audit trace.
+    # again; named in that Apply's audit entry if it never got written.
     recovered: List[dict] = []
+    # Stamped on every product this Apply writes: the audit entry's fixed id.
+    write_id = uuid.uuid4().hex
+    uncertain = 0
     website_failed = 0
     counts = {
         "total": len(products), "valid": 0, "violations": 0, "unchanged": 0, "already_applied": 0,
@@ -1971,48 +2047,45 @@ async def bulk_offer_update(
                     "sku": p.get("sku"),
                     "offer_price": [row["old_offer_price"], row["new_offer_price"]],
                     "recovered": True,
+                    "write_id": p.get("bulk_write_id"),
                 }
             )
             # See bulk_price_update: re-carry the website copy only.
             if not _price_reaches_website(row, pid, p, {"offer_price": _round_money(new_offer)}):
                 website_failed += 1
         elif body.apply and verdict["ok"] and changed and repo is not None and pid:
-            try:
-                price_patch = {"offer_price": _round_money(new_offer)}
-                ok = _write_reviewed_price(
-                    repo,
-                    pid,
-                    stored,
+            price_patch = {"offer_price": _round_money(new_offer)}
+            outcome = _write_reviewed_price(
+                repo,
+                pid,
+                stored,
+                {
+                    **price_patch,
+                    "bulk_write_id": write_id,
+                    "price_updated_at": datetime.utcnow(),
+                    "price_updated_by": current_user.get("user_id"),
+                    # A price change by a person IS a catalogue edit.
+                    **_catalog_list.edit_stamp(
+                        current_user.get("user_id"), current_user.get("username")
+                    ),
+                },
+                price_patch,
+                row,
+            )
+            if outcome == "already":
+                counts["already_applied"] += 1
+            elif outcome == "uncertain":
+                uncertain += 1
+            elif outcome == "applied":
+                committed.append(
                     {
-                        **price_patch,
-                        "price_updated_at": datetime.utcnow(),
-                        "price_updated_by": current_user.get("user_id"),
-                        # A price change by a person IS a catalogue edit.
-                        **_catalog_list.edit_stamp(
-                            current_user.get("user_id"), current_user.get("username")
-                        ),
-                    },
-                    price_patch,
-                    row,
+                        "product_id": pid,
+                        "sku": p.get("sku"),
+                        "offer_price": [row["old_offer_price"], row["new_offer_price"]],
+                    }
                 )
-                if row.get("already_applied"):
-                    counts["already_applied"] += 1
-                if ok:
-                    committed.append(
-                        {
-                            "product_id": pid,
-                            "sku": p.get("sku"),
-                            "offer_price": [
-                                row["old_offer_price"],
-                                row["new_offer_price"],
-                            ],
-                        }
-                    )
-                    if not _price_reaches_website(row, pid, p, price_patch):
-                        website_failed += 1
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("[BULK-OFFER] update failed for %s: %s", pid, exc)
-                row["applied"] = False
+                if not _price_reaches_website(row, pid, p, price_patch):
+                    website_failed += 1
         rows.append(row)
 
     summary = {
@@ -2032,14 +2105,10 @@ async def bulk_offer_update(
         "website_failed": website_failed,
     }
 
-    if body.apply and (committed or recovered):
-        _audit_bulk("BULK_OFFER_UPDATE", current_user, summary, committed + recovered)
-        try:
-            from ..services.cache import invalidate_product_lists
-
-            invalidate_product_lists()
-        except Exception:  # noqa: BLE001
-            pass
+    if body.apply:
+        _finish_bulk_apply(
+            "BULK_OFFER_UPDATE", current_user, summary, write_id, committed, recovered, uncertain
+        )
 
     return {"dry_run": not body.apply, "summary": summary, "rows": rows}
 

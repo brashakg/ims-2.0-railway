@@ -48,6 +48,7 @@ from api.services import online_discount_engine as ode  # noqa: E402
 from api.services import product_master as pm  # noqa: E402
 from api.services import shopify_live_sync as live_sync  # noqa: E402
 from api.services import shopify_push  # noqa: E402
+from database.repositories.audit_repository import AuditRepository  # noqa: E402
 from database.repositories.product_repository import ProductRepository  # noqa: E402
 
 pytestmark = pytest.mark.usefixtures("brand_is_for_the_website")
@@ -95,7 +96,7 @@ def db(monkeypatch):
     repo = ProductRepository(raw["products"])
     monkeypatch.setattr(deps, "get_db", lambda: conn)
     monkeypatch.setattr(deps, "get_product_repository", lambda: repo)
-    monkeypatch.setattr(deps, "get_audit_repository", lambda: None)
+    monkeypatch.setattr(deps, "get_audit_repository", lambda: AuditRepository(raw["audit_logs"]))
     monkeypatch.setattr(products_mod, "get_product_repository", lambda: repo)
     monkeypatch.setattr(catalog_mod, "_get_db", lambda: raw)
 
@@ -531,60 +532,161 @@ def test_a_retried_apply_whose_website_copy_fails_again_counts_it_once(db, monke
         assert again["summary"]["website_failed"] == 1, (fn.__name__, again["summary"])
 
 
-class _Audit:
-    def __init__(self):
-        self.rows = []
+# ===========================================================================
+# D84 / PR-1429 round 3: every landed bulk change has exactly one audit
+# entry, written before success; anything unconfirmed answers 503 so the
+# page holds the preview and offers the identical retry.
+# ===========================================================================
 
-    def create(self, doc):
-        self.rows.append(doc)
+_BOTH_DOORS = (
+    (products_mod.bulk_price_update, products_mod.BulkPriceRequest(target="BOTH", mode="FLAT", amount=10),
+     "BULK_PRICE_UPDATE", (5010.0, 4510.0)),
+    (products_mod.bulk_offer_update, products_mod.BulkOfferRequest(action="CLEAR"),
+     "BULK_OFFER_UPDATE", (5000.0, 5000.0)),
+)
 
 
-def test_a_price_that_landed_without_its_audit_is_audited_on_the_retry(db, monkeypatch):
-    """The first Apply's billing write landed but the reply raised (or the
-    worker died before the audit), so that change had no audit row ever. The
-    retry does not write the price again, but it names that row in its audit
-    as recovered, so every landed change has an audit trace -- on both
-    endpoints."""
-    audit = _Audit()
-    monkeypatch.setattr(deps, "get_audit_repository", lambda: audit)
-    repo = products_mod.get_product_repository()
-    for fn, body, action in (
-        (products_mod.bulk_price_update, products_mod.BulkPriceRequest(target="BOTH", mode="FLAT", amount=10),
-         "BULK_PRICE_UPDATE"),
-        (products_mod.bulk_offer_update, products_mod.BulkOfferRequest(action="CLEAR"),
-         "BULK_OFFER_UPDATE"),
-    ):
-        db["products"].delete_many({})
-        db["catalog_products"].delete_many({})
-        _seed(db)
-        _seed(db, "P2")
-        pre = _run(fn(body, ADMIN))
-        exp = [
-            products_mod.BulkReviewedRow(
-                product_id=r["product_id"], mrp=r.get("old_mrp", r.get("mrp")), offer_price=r["old_offer_price"]
-            )
-            for r in pre["rows"]
-        ]
-        apply = body.model_copy(update={"apply": True, "expected": exp})
-        real_update = type(repo).update
+def _reviewed_apply(db, fn, body):
+    db["products"].delete_many({})
+    db["catalog_products"].delete_many({})
+    db["audit_logs"].delete_many({})
+    db["audit_chain_head"].delete_many({})
+    _seed(db)
+    _seed(db, "P2")
+    pre = _run(fn(body, ADMIN))
+    exp = [
+        products_mod.BulkReviewedRow(
+            product_id=r["product_id"], mrp=r.get("old_mrp", r.get("mrp")), offer_price=r["old_offer_price"]
+        )
+        for r in pre["rows"]
+    ]
+    return body.model_copy(update={"apply": True, "expected": exp})
 
-        def _lands_then_raises(self, pid, data, **kw):
-            done = real_update(self, pid, data, **kw)
-            if pid == "P1":
-                raise RuntimeError("AutoReconnect after the server applied the write")
-            return done
 
-        monkeypatch.setattr(type(repo), "update", _lands_then_raises)
-        audit.rows.clear()
-        first = _run(fn(apply, ADMIN))
-        monkeypatch.setattr(type(repo), "update", real_update)
-        assert first["summary"]["committed"] == 1
-        assert [c["product_id"] for c in audit.rows[0]["details"]["changes"]] == ["P2"]
+def _audits(db, action):
+    return list(db["audit_logs"].find({"action": action}))
+
+
+def _named(entry):
+    return sorted(c["product_id"] for c in entry["details"]["changes"])
+
+
+def _prices(db, pid):
+    d = db["products"].find_one({"product_id": pid})
+    return d["mrp"], d["offer_price"]
+
+
+def _lands_then_raises(monkeypatch, repo, victim="P1"):
+    real_update = type(repo).update
+
+    def update(self, pid, data, **kw):
+        done = real_update(self, pid, data, **kw)
+        if pid == victim:
+            raise RuntimeError("AutoReconnect after the server applied the write")
+        return done
+
+    monkeypatch.setattr(type(repo), "update", update)
+    return lambda: monkeypatch.setattr(type(repo), "update", real_update)
+
+
+@pytest.mark.parametrize("fn,body,action,want", _BOTH_DOORS)
+def test_a_lost_acknowledgement_is_committed_audited_and_reaches_the_website(db, monkeypatch, fn, body, action, want):
+    """The database applied P1's write and then raised. The one Apply the
+    page sends must not answer a clean 200 that leaves P1 out: P1 is read
+    back, found at this Apply's write, and counted, audited and copied to
+    the website like any other row."""
+    apply = _reviewed_apply(db, fn, body)
+    restore = _lands_then_raises(monkeypatch, products_mod.get_product_repository())
+    out = _run(fn(apply, ADMIN))
+    restore()
+    assert out["summary"]["committed"] == 2
+    assert {r["product_id"]: r["applied"] for r in out["rows"]} == {"P1": True, "P2": True}
+    (entry,) = _audits(db, action)
+    assert _named(entry) == ["P1", "P2"]
+    assert _prices(db, "P1") == want
+    assert (_twin(db)["mrp"], _twin(db)["offer_price"]) == want
+
+
+@pytest.mark.parametrize("fn,body,action,want", _BOTH_DOORS)
+def test_a_write_that_cannot_be_confirmed_answers_503_and_the_retry_finishes_it_once(
+    db, monkeypatch, fn, body, action, want
+):
+    """P1's write landed and raised, and reading P1 back failed too: the
+    request answers 503 (the page holds the preview and offers the retry),
+    never a 200 that hides P1. The identical retry moves nothing again and
+    writes ONE audit entry naming both landed rows."""
+    from fastapi import HTTPException
+
+    apply = _reviewed_apply(db, fn, body)
+    restore = _lands_then_raises(monkeypatch, products_mod.get_product_repository())
+    real_read = getattr(products_mod, "_stored_doc", None)
+
+    def read(repo, pid):
+        if pid == "P1":
+            raise RuntimeError("read-back failed too")
+        return real_read(repo, pid)
+
+    monkeypatch.setattr(products_mod, "_stored_doc", read, raising=False)
+    with pytest.raises(HTTPException) as ei:
+        _run(fn(apply, ADMIN))
+    assert ei.value.status_code == 503 and "Retry the same Apply" in ei.value.detail
+    restore()
+    monkeypatch.setattr(products_mod, "_stored_doc", real_read, raising=False)
+    assert _audits(db, action) == []
+    again = _run(fn(apply, ADMIN))
+    assert again["summary"]["committed"] == 0 and again["summary"]["counts"]["already_applied"] == 2
+    (entry,) = _audits(db, action)
+    assert _named(entry) == ["P1", "P2"]
+    assert _prices(db, "P1") == want and _prices(db, "P2") == want
+
+
+@pytest.mark.parametrize("fn,body,action,want", _BOTH_DOORS)
+def test_an_audit_that_cannot_be_written_answers_503_and_the_retry_writes_it_once(
+    db, monkeypatch, fn, body, action, want
+):
+    """D84: the prices landed but the audit insert failed. The request
+    answers 503 (not 200 with the change unrecorded); the identical retry
+    writes the entry once, and a further retry writes nothing more."""
+    from fastapi import HTTPException
+
+    apply = _reviewed_apply(db, fn, body)
+    real_create = AuditRepository.create
+    monkeypatch.setattr(AuditRepository, "create", lambda self, data: None)
+    with pytest.raises(HTTPException) as ei:
+        _run(fn(apply, ADMIN))
+    assert ei.value.status_code == 503
+    monkeypatch.setattr(AuditRepository, "create", real_create)
+    assert _audits(db, action) == []
+    assert _prices(db, "P1") == want
+    for _ in range(2):
         again = _run(fn(apply, ADMIN))
-        assert again["summary"]["committed"] == 0 and again["summary"]["counts"]["already_applied"] == 2
-        retry_audit = audit.rows[-1]
-        assert retry_audit["action"] == action
-        named = {c["product_id"]: c for c in retry_audit["details"]["changes"]}
-        assert named["P1"]["recovered"] is True, retry_audit
-        # Both rows were already saved: no second price move is claimed.
-        assert all(c.get("recovered") for c in named.values())
+        assert again["summary"]["counts"]["already_applied"] == 2
+        (entry,) = _audits(db, action)
+        assert _named(entry) == ["P1", "P2"]
+    assert _prices(db, "P1") == want and _prices(db, "P2") == want
+
+
+@pytest.mark.parametrize("fn,body,action,want", _BOTH_DOORS)
+def test_a_retried_apply_never_writes_a_second_audit_entry(db, monkeypatch, fn, body, action, want):
+    """The Apply landed and was audited; its reply was lost and the page
+    sent the identical retry. One change, one audit entry."""
+    apply = _reviewed_apply(db, fn, body)
+    first = _run(fn(apply, ADMIN))
+    assert first["summary"]["committed"] == 2
+    again = _run(fn(apply, ADMIN))
+    assert again["summary"]["committed"] == 0
+    (entry,) = _audits(db, action)
+    assert _named(entry) == ["P1", "P2"]
+    assert not any(c.get("recovered") for c in entry["details"]["changes"])
+
+
+def test_a_new_change_back_to_the_same_prices_is_audited_again(db, monkeypatch):
+    """The fixed id belongs to one Apply, not to the rows or prices: the
+    same +10 previewed again after the prices were put back is a new change
+    with its own entry."""
+    fn, body, action, _want = _BOTH_DOORS[0]
+    apply = _reviewed_apply(db, fn, body)
+    _run(fn(apply, ADMIN))
+    db["products"].update_many({}, {"$set": {"mrp": 5000.0, "offer_price": 4500.0}})
+    _run(_reviewed(fn, body.model_copy(update={"apply": True})))
+    assert len(_audits(db, action)) == 2
