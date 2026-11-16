@@ -18,7 +18,11 @@ const CATEGORY_CODE_SYNONYMS: Record<string, string> = {
   OPTICALFRAME: 'FR', EYEGLASSES: 'FR', SPECTACLES: 'FR',
   // Contact lenses
   CONTACTLENS: 'CL', CONTACTLENSES: 'CL', CL: 'CL', CONTACTS: 'CL',
-  COLOREDCONTACTLENS: 'CL', COLOURCONTACTS: 'CL',
+  // Colour contact lenses are their OWN category (CCL), never CL (L1-F46: a
+  // CCL variant opened locked to CL and the server refused the save).
+  COLOREDCONTACTLENS: 'CCL', COLOREDCONTACTLENSES: 'CCL', COLOURCONTACTLENS: 'CCL',
+  COLOURCONTACTLENSES: 'CCL', COLORCONTACTLENS: 'CCL', COLOURCONTACTS: 'CCL',
+  COLOREDCONTACTS: 'CCL', CCL: 'CCL',
   // Optical (spectacle) lenses
   OPTICALLENS: 'LS', LENS: 'LS', LENSES: 'LS', LS: 'LS', RXLENS: 'LS',
   RXLENSES: 'LS', EYEGLASSLENS: 'LS', SPECTACLELENS: 'LS',
@@ -65,6 +69,9 @@ const TITLE_KEYWORD_RULES: Array<[string, string]> = [
   ['reading glass', 'RG'], ['readers', 'RG'],
   // Sunglasses (before "glass"/"lens").
   ['sunglass', 'SG'], ['shades', 'SG'],
+  // Colour contact lenses (before plain contact lenses).
+  ['colour contact', 'CCL'], ['color contact', 'CCL'], ['colored contact', 'CCL'],
+  ['coloured contact', 'CCL'],
   // Contact lenses (before "lens").
   ['contact lens', 'CL'], ['contact lense', 'CL'], ['contacts', 'CL'],
   // Optical / spectacle lenses.

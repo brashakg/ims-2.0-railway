@@ -556,7 +556,8 @@ export default LensDetailsModal;
  *     the identity rules recognise a virtual, non-catalogue line.
  *   * linked_prescription_id, without which the Rx gate refuses the order, and
  *   * lens_details, which is what makes the order need a workshop job at all
- *     (orders.py::_order_needs_fitting reads it).
+ *     (orders.py::_order_needs_fitting reads it), and records the lens brand,
+ *     coating and every add-on by id and name (D44).
  */
 export function addManualLensToCart(store: any, details: any) {
   const stamp = Date.now();
@@ -570,11 +571,19 @@ export function addManualLensToCart(store: any, details: any) {
     quantity: 2,
     is_optical: true,
     linked_prescription_id: store.prescription?.id,
+    // D44: the bill line records WHICH lens, coating and add-ons were sold
+    // (ids + names). Metadata only: the price is unit_price above, so an
+    // add-on is never charged a second time from here.
     lens_details: {
       type: details.lensCategory,
       material: details.indexLabel,
       index: details.indexId,
       coatings: [details.coatingLabel].filter(Boolean),
+      brand_id: details.brandId || undefined,
+      brand: details.brandLabel || undefined,
+      coating_id: details.coatingId || undefined,
+      add_on_ids: details.addOnIds || [],
+      add_ons: details.addOns || [],
     },
   });
 }
