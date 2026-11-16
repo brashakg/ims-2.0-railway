@@ -118,3 +118,16 @@ describe('D15 Payroll Run: discard a payroll draft', () => {
     expect(toast.success).not.toHaveBeenCalled();
   });
 });
+
+describe('b27 hunt: Payroll Run never shows a failed register read as "No payroll rows yet"', () => {
+  it('register unreadable: says so with Try again, then shows the saved rows', async () => {
+    payrollApi.listRunRows
+      .mockRejectedValueOnce(Object.assign(new Error('503'), { response: { status: 503 } }))
+      .mockResolvedValueOnce({ rows: ROWS, total: ROWS.length, totals: {} });
+    render(<PayrollRunPage />);
+    expect(await screen.findByText(/The payroll register could not be loaded/)).toBeInTheDocument();
+    expect(screen.queryByText(/No payroll rows yet/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByText('ZZ EMP-D')).toBeInTheDocument();
+  });
+});

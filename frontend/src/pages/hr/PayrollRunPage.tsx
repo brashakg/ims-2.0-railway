@@ -61,6 +61,8 @@ export function PayrollRunPage() {
   const [advances, setAdvances] = useState<Record<string, number>>({});
 
   const [rows, setRows] = useState<PayrollRow[]>([]);
+  // The register read failed: never shown as "No payroll rows yet" (b27 hunt).
+  const [rowsFailed, setRowsFailed] = useState(false);
   const [totals, setTotals] = useState<PayrollTotals>({});
   const [busy, setBusy] = useState(false);
   const [payslip, setPayslip] = useState<PayrollRow | null>(null);
@@ -89,9 +91,11 @@ export function PayrollRunPage() {
       setRows(r.rows || []);
       setTotals(r.totals || {});
       setNoAccess(null);
+      setRowsFailed(false);
     } catch (e) {
       setRows([]);
       setTotals({});
+      setRowsFailed(!isForbiddenError(e));
       if (isForbiddenError(e)) {
         setNoAccess(forbiddenDetail(e, 'The payroll register is restricted to administrators.'));
       }
@@ -389,6 +393,11 @@ export function PayrollRunPage() {
         </div>
         {noAccess ? (
           <PayrollAccessNotice message={noAccess} what="the payroll register" />
+        ) : rowsFailed ? (
+          <div role="alert" className="p-6 text-center text-red-700 text-sm">
+            The payroll register could not be loaded.{' '}
+            <button type="button" className="underline" onClick={() => loadRows()}>Try again</button>
+          </div>
         ) : rows.length === 0 ? (
           <div className="p-6 text-center text-gray-500 text-sm">No payroll rows yet. Run payroll above.</div>
         ) : (
