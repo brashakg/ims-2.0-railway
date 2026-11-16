@@ -29,7 +29,7 @@ from ...services.rx_print_values import (
     rx_issue_date_value,
     rx_text_or,
 )
-from ...services.rx_patient import load_rx_patient, rx_patient_identity
+from ...services.rx_patient import load_rx_patient, read_by_id_strict, rx_patient_identity
 from ._shared import _REDO_ROLES, require_rx_read, router
 from .models import RedoCreate
 
@@ -280,7 +280,8 @@ async def print_prescription(
             status_code=503, detail="Prescription is temporarily unavailable"
         )
 
-    rx = rx_repo.find_by_id(prescription_id)
+    # A failed read is 503, never a false "Prescription not found" (PR-1430 r2).
+    rx = read_by_id_strict(rx_repo, prescription_id)
     # BUG-088 / L2-CLIN-F01: store-scope the Rx (404 hides existence cross-store).
     if not rx or not can_access_store_scoped(rx.get("store_id"), current_user):
         raise HTTPException(status_code=404, detail="Prescription not found")

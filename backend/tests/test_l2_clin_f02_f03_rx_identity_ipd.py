@@ -361,3 +361,99 @@ def test_print_customer_read_failure_is_503_never_an_unnamed_card(monkeypatch, c
     r = client.get(path)
     assert r.status_code == 503, r.text
     assert "Not recorded" not in r.text
+
+
+# PR-1430 review 2: the doubles above raise from find_by_id, but the REAL
+# repositories (BaseRepository.find_by_id / find_many) swallow a native read
+# error into None / [] -- a 200 "Not recorded" card, a false 404, a false empty
+# history or portal list. These tests drive the real repository classes over a
+# collection whose reads raise the way PyMongo does.
+from pymongo.errors import ServerSelectionTimeoutError  # noqa: E402
+
+from database.connection import MockCollection  # noqa: E402
+from database.repositories.customer_repository import CustomerRepository  # noqa: E402
+from database.repositories.prescription_repository import PrescriptionRepository  # noqa: E402
+
+
+class _DeadCollection:
+    """What a native collection does while the server is unreachable."""
+
+    def find_one(self, *_a, **_k):
+        raise ServerSelectionTimeoutError("127.0.0.1:27084: timed out")
+
+    def find(self, *_a, **_k):
+        raise ServerSelectionTimeoutError("127.0.0.1:27084: timed out")
+
+
+def _live(name, *docs):
+    coll = MockCollection(name)
+    for d in docs:
+        coll.insert_one(dict(d, _id=d.get("customer_id") if name == "customers" else d["prescription_id"]))
+    return coll
+
+
+def _real_repos(cust_dead=False, rx_dead=False, rows=None):
+    rows = rows if rows is not None else [dict(_exam_rx(), store_id=STORE)]
+    cust = CustomerRepository(_DeadCollection() if cust_dead else _live("customers", ACCOUNT))
+    rx = PrescriptionRepository(_DeadCollection() if rx_dead else _live("prescriptions", *rows))
+    return cust, rx
+
+
+def _wire_real(monkeypatch, cust, rx):
+    client = _client(monkeypatch, _exam_rx())
+    for mod in (rx_print, prescriptions, deps):
+        monkeypatch.setattr(mod, "get_prescription_repository", lambda: rx)
+    for mod in (prescriptions, deps):
+        monkeypatch.setattr(mod, "get_customer_repository", lambda: cust)
+    return client
+
+
+def _portal_real(monkeypatch, cust, rx):
+    _wire_real(monkeypatch, cust, rx)
+    app = FastAPI()
+    app.include_router(portal.router, prefix="/portal")
+    tok = portal._issue_view_token("cust-1")
+    return TestClient(app).get("/portal/rx", headers={"Authorization": "Bearer " + tok})
+
+
+def test_real_repositories_healthy_control(monkeypatch):
+    cust, rx = _real_repos()
+    c = _wire_real(monkeypatch, cust, rx)
+    for path in ("/clinical/prescriptions/rx-1/print", "/prescriptions/rx-1/print"):
+        r = c.get(path)
+        assert r.status_code == 200 and "Asha Daughter" in r.text, (path, r.status_code)
+    fam = c.get("/prescriptions/family/cust-1")
+    assert fam.status_code == 200
+    assert {m["name"]: m["prescription_count"] for m in fam.json()["members"]}["Asha Daughter"] == 1
+    p = _portal_real(monkeypatch, cust, rx)
+    assert p.status_code == 200 and p.json()["count"] == 1
+    assert p.json()["prescriptions"][0]["patient_name"] == "Asha Daughter"
+
+
+@pytest.mark.parametrize("path", ["/clinical/prescriptions/rx-1/print", "/prescriptions/rx-1/print"])
+@pytest.mark.parametrize("dead", ["customers", "prescriptions"])
+def test_real_repo_read_failure_on_print_is_503(monkeypatch, path, dead):
+    cust, rx = _real_repos(cust_dead=dead == "customers", rx_dead=dead == "prescriptions")
+    r = _wire_real(monkeypatch, cust, rx).get(path)
+    assert r.status_code == 503, (r.status_code, r.text[:200])
+    assert "Not recorded" not in r.text
+
+
+@pytest.mark.parametrize("dead", ["customers", "prescriptions"])
+def test_real_repo_read_failure_on_family_history_is_503(monkeypatch, dead):
+    cust, rx = _real_repos(cust_dead=dead == "customers", rx_dead=dead == "prescriptions")
+    r = _wire_real(monkeypatch, cust, rx).get("/prescriptions/family/cust-1")
+    assert r.status_code == 503, (r.status_code, r.text[:200])
+
+
+@pytest.mark.parametrize("dead", ["customers", "prescriptions"])
+def test_real_repo_read_failure_on_portal_is_503(monkeypatch, dead):
+    cust, rx = _real_repos(cust_dead=dead == "customers", rx_dead=dead == "prescriptions")
+    r = _portal_real(monkeypatch, cust, rx)
+    assert r.status_code == 503, (r.status_code, r.text[:200])
+
+
+def test_real_repo_missing_customer_is_still_a_404_not_a_503(monkeypatch):
+    cust, rx = _real_repos()
+    r = _wire_real(monkeypatch, cust, rx).get("/prescriptions/family/nobody")
+    assert r.status_code == 404

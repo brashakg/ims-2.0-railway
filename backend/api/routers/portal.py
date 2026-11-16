@@ -824,22 +824,19 @@ async def get_my_prescriptions(request: Request):
             status_code=503, detail="Prescriptions are temporarily unavailable"
         )
 
-    rows = rx_repo.find_by_customer(customer_id) or []
+    # PR-1430 review 2: the repositories' own reads swallow a native read
+    # error into [] / None (a false empty list, unnamed cards). Strict reads:
+    # any failure is 503 "try again". The account gives the greeting and each
+    # card's member name (D71).
+    from ..services.rx_patient import read_by_id_strict, read_rx_for_customer_strict
 
-    # The account (greeting + each card's member name, D71). A failed read is
-    # a 503, not unnamed cards: the family's cards must say whose they are.
+    _down = "Prescriptions are temporarily unavailable"
+    rows = read_rx_for_customer_strict(rx_repo, customer_id, _down)
     try:
         cust_repo = get_customer_repository()
-        cust = cust_repo.find_by_id(customer_id) if cust_repo is not None else None
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[PORTAL] customer read failed: %s", exc)
-        raise HTTPException(
-            status_code=503, detail="Prescriptions are temporarily unavailable"
-        )
-    if cust_repo is None:
-        raise HTTPException(
-            status_code=503, detail="Prescriptions are temporarily unavailable"
-        )
+    except Exception:  # noqa: BLE001
+        cust_repo = None
+    cust = read_by_id_strict(cust_repo, customer_id, _down)
     first_name = (
         ((cust or {}).get("name") or "").strip().split(" ")[0] or None
     )

@@ -22,7 +22,7 @@ ASCII-only source (Windows cp1252 safe).
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from .member_billing import find_member
 from .rx_print_values import first_present_rx_value, is_absent_rx_value
@@ -66,30 +66,65 @@ def rx_patient_identity(rx: Dict[str, Any], customer: Optional[Dict[str, Any]]) 
     return {"name": name, "phone": phone}
 
 
+def _unavailable(detail: str = "Prescription is temporarily unavailable"):
+    from fastapi import HTTPException
+
+    return HTTPException(status_code=503, detail=detail)
+
+
+def read_by_id_strict(repo, doc_id: str, detail: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """find_by_id that tells "not there" (None) from "could not read" (503).
+
+    BaseRepository.find_by_id swallows every read error and returns None --
+    on native Mongo a timeout or a primary step-down then looks exactly like
+    "no such record" (PR-1430 review 2). Reads the raw collection when the
+    repository has one; a repository without one answers through its own
+    find_by_id, and a raise there is a 503 too."""
+    err = _unavailable(detail) if detail else _unavailable()
+    if repo is None:
+        raise err
+    try:
+        coll = getattr(repo, "collection", None)
+        if coll is not None and callable(getattr(coll, "find_one", None)):
+            doc = coll.find_one({repo.id_field: doc_id})
+            clean = getattr(repo, "_clean_id", None)
+            return clean(doc) if callable(clean) else doc
+        return repo.find_by_id(doc_id)
+    except Exception as exc:  # noqa: BLE001 - any read failure = try again
+        raise err from exc
+
+
+def read_rx_for_customer_strict(repo, customer_id: str, detail: Optional[str] = None) -> List[Dict[str, Any]]:
+    """PrescriptionRepository.find_by_customer that RAISES 503 on a read error.
+
+    The repository's own find_many returns [] on any exception -- a false
+    "this family has no prescriptions". Same filter, order and cap."""
+    err = _unavailable(detail) if detail else _unavailable()
+    if repo is None:
+        raise err
+    try:
+        coll = getattr(repo, "collection", None)
+        if coll is not None and callable(getattr(coll, "find", None)):
+            cur = coll.find({"customer_id": customer_id}).sort([("prescription_date", -1)]).limit(100)
+            clean = getattr(repo, "_clean_id", None)
+            return [clean(d) if callable(clean) else d for d in cur]
+        return list(repo.find_by_customer(customer_id) or [])
+    except Exception as exc:  # noqa: BLE001 - any read failure = try again
+        raise err from exc
+
+
 def load_rx_patient(rx: Dict[str, Any]) -> Dict[str, Any]:
     """rx_patient_identity with the account loaded.
 
     PR-1430 review: an account that cannot be READ (store missing or the read
-    raises) is 503 "try again" -- never a 200 card printing "Not recorded" for
-    a dependent whose name IS on file. An account that simply does not exist
-    still prints with the embedded fields (a data fact, not an outage)."""
-    from fastapi import HTTPException
-
+    fails, including the native read errors BaseRepository swallows) is 503
+    "try again" -- never a 200 card printing "Not recorded" for a dependent
+    whose name IS on file. An account that simply does not exist still prints
+    with the embedded fields (a data fact, not an outage)."""
     customer = None
     cid = _norm((rx or {}).get("customer_id"))
     if cid:
         from ..dependencies import get_customer_repository
 
-        unavailable = HTTPException(
-            status_code=503, detail="Prescription is temporarily unavailable"
-        )
-        try:
-            repo = get_customer_repository()
-            if repo is None:
-                raise unavailable
-            customer = repo.find_by_id(cid)
-        except HTTPException:
-            raise
-        except Exception as exc:  # noqa: BLE001 - any read failure = try again
-            raise unavailable from exc
+        customer = read_by_id_strict(get_customer_repository(), cid)
     return rx_patient_identity(rx, customer)

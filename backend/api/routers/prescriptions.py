@@ -28,7 +28,11 @@ from ..services.rx_print_values import (
     rx_power_or,
     rx_text_or,
 )
-from ..services.rx_patient import load_rx_patient
+from ..services.rx_patient import (
+    load_rx_patient,
+    read_by_id_strict,
+    read_rx_for_customer_strict,
+)
 from ..dependencies import (
     get_prescription_repository,
     get_customer_repository,
@@ -1176,7 +1180,10 @@ async def family_prescriptions(
             status_code=503, detail="Prescription history is temporarily unavailable"
         )
 
-    customer = customer_repo.find_by_id(customer_id)
+    # PR-1430 review 2: the repositories' own reads swallow a native read
+    # error into None / [] -- a false 404 or a false empty history. Strict.
+    _down = "Prescription history is temporarily unavailable"
+    customer = read_by_id_strict(customer_repo, customer_id, _down)
     if customer is None:
         raise HTTPException(status_code=404, detail="Customer not found")
     # BUG-062 tail: the Rx below are store-filtered, but the customer ROSTER
@@ -1197,7 +1204,9 @@ async def family_prescriptions(
 
     # BUG-088: scope the household Rx view to stores the caller may access so a
     # single-store user can't pull another store's family clinical PII by id.
-    all_rx = filter_docs_by_store(repo.find_by_customer(customer_id) or [], current_user)
+    all_rx = filter_docs_by_store(
+        read_rx_for_customer_strict(repo, customer_id, _down), current_user
+    )
     by_patient: dict = {}
     for rx in all_rx:
         by_patient.setdefault(rx.get("patient_id"), []).append(rx)
@@ -2092,7 +2101,8 @@ async def print_prescription(
     repo = get_prescription_repository()
 
     if repo is not None:
-        prescription = repo.find_by_id(prescription_id)
+        # A failed read is 503, never a false 404 (PR-1430 review 2).
+        prescription = read_by_id_strict(repo, prescription_id)
         # BUG-088: store-scope the clinical Rx read (404 hides existence cross-store).
         if prescription is None or not can_access_store_scoped(
             prescription.get("store_id"), current_user
