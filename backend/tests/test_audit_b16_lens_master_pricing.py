@@ -105,6 +105,50 @@ def test_lens_price_update_keeps_deliberate_zero(model):
     assert model(price=0).price == 0
 
 
+_AC = admin_catalog
+_FINITE_DOORS = [
+    (_AC.LensCoatingCreate, {"name": "Coat", "code": "CT"}, "price"),
+    (_AC.LensCoatingUpdate, {}, "price"),
+    (_AC.LensAddonCreate, {"name": "Tint", "code": "TT", "type": "TINT"}, "price"),
+    (_AC.LensAddonUpdate, {}, "price"),
+    (_AC.LensIndexCreate, {"value": "1.67"}, "multiplier"),
+    (_AC.LensIndexUpdate, {}, "multiplier"),
+    (_AC.LensPricingCreate, {"brand_id": "B", "index_id": "I", "category": "SINGLE_VISION"}, "base_price"),
+    (_AC.LensPricingRangeCreate, {"brand_id": "B", "index_id": "I", "category": "SINGLE_VISION",
+                                  "parameter": "sphere", "min_value": 0, "max_value": 2, "base_price": 1}, "base_price"),
+    (_AC.LensPricingRangeUpdate, {}, "base_price"),
+    (_AC.LensPricingRangeUpdate, {}, "max_value"),
+]
+
+
+@pytest.mark.parametrize("model,base,field", _FINITE_DOORS)
+@pytest.mark.parametrize("bad", ["Infinity", float("inf"), "NaN"])
+def test_lens_master_numbers_refuse_non_finite(model, base, field, bad):
+    """Codex PR-1429 round 1: price "Infinity" passed ge=0, was stored, and
+    then GET of the whole coatings / add-ons list returned 500."""
+    with pytest.raises(ValidationError):
+        model(**{**base, field: bad})
+
+
+def test_infinite_price_put_is_422_and_the_list_still_loads(monkeypatch):
+    """Through the real route: refused before any write, the list stays 200."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    db = mongomock.MongoClient()["b16_inf"]
+    db.lens_coating_masters.insert_one({"coating_id": "C1", "name": "Coat", "code": "CT", "price": 500.0})
+    monkeypatch.setattr(admin_catalog, "_coll", lambda name: db[name])
+    app = FastAPI()
+    app.include_router(admin_catalog.router)
+    app.dependency_overrides[admin_catalog._require_admin_role] = lambda: USER  # pylint: disable=protected-access
+    client = TestClient(app)
+    path = next(r.path for r in admin_catalog.router.routes if r.path.endswith("/lens/coatings/{coating_id}"))
+    r = client.put(path.replace("{coating_id}", "C1"), json={"price": "Infinity"})
+    assert r.status_code == 422
+    assert db.lens_coating_masters.find_one({"coating_id": "C1"})["price"] == 500.0
+    assert client.get(path.rsplit("/", 1)[0]).status_code == 200
+
+
 @pytest.fixture
 def ldb(monkeypatch):
     db = mongomock.MongoClient()["b16_lens"]
