@@ -64,6 +64,7 @@ export default function JournalEntriesPanel() {
   const [pin, setPin] = useState('');
   const [rejectNote, setRejectNote] = useState('');
   const [acting, setActing] = useState(false);
+  const [listError, setListError] = useState<string | null>(null);
 
   const load = async () => {
     setLoading(true);
@@ -72,7 +73,16 @@ export default function JournalEntriesPanel() {
         financeApi.listJournalEntries(statusFilter === 'ALL' ? undefined : { status: statusFilter }),
         financeApi.getChartOfAccounts({ manual_only: true }),
       ]);
-      setEntries(list.status === 'fulfilled' ? (list.value?.journal_entries || []) : []);
+      // A list that could not be read is an error, not "No journal entries":
+      // keep the rows already shown and say so (D84).
+      if (list.status === 'fulfilled') {
+        setEntries(list.value?.journal_entries || []);
+        setListError(null);
+      } else {
+        const msg = getErrorMessage(list.reason, 'Journal entries could not be read just now - please try again');
+        setListError(msg);
+        toast.error(msg);
+      }
       setAccounts(coa.status === 'fulfilled' ? (coa.value?.accounts || []) : []);
     } catch {
       toast.error('Failed to load journal entries');
@@ -293,7 +303,10 @@ export default function JournalEntriesPanel() {
             </tr>
           </thead>
           <tbody>
-            {entries.length === 0 && (
+            {listError && (
+              <tr><td colSpan={6} role="alert" className="px-3 py-3 text-center text-red-700">{listError}</td></tr>
+            )}
+            {entries.length === 0 && !listError && (
               <tr><td colSpan={6} className="px-3 py-8 text-center text-gray-400">No journal entries.</td></tr>
             )}
             {entries.map((je) => (

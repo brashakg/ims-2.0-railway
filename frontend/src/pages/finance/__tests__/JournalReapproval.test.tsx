@@ -97,3 +97,15 @@ describe('journal re-approval (D54)', () => {
     await waitFor(() => expect(api.postJournalEntry).toHaveBeenCalledTimes(2));
   });
 });
+
+describe('a journal list that could not be read (D84)', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('says so instead of "No journal entries."', async () => {
+    const detail = 'Journal entries could not be read just now - please try again';
+    api.listJournalEntries.mockRejectedValue({ response: { status: 503, data: { detail } } });
+    render(<JournalEntriesPanel />);
+    expect(await screen.findByText(detail)).toBeTruthy();
+    expect(screen.queryByText('No journal entries.')).toBeNull();
+  });
+});
