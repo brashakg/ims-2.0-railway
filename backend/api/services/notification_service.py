@@ -166,18 +166,16 @@ def populate_template(template_id: str, variables: dict) -> str:
 # D56 -- THE one consent classification (queue writer AND MEGAPHONE drain).
 # Templates whose content is promotional whatever category a caller stamps on
 # them: a SERVICE / omitted category must never turn a birthday wish into a
-# message that ignores STOP (Codex 1419 round 1). PRESCRIPTION_EXPIRY,
-# ANNUAL_CHECKUP_REMINDER and CL_REORDER_REMINDER are customer-level recall
-# reminders (no single order/Rx/appointment on the row) -> promotional (D56).
-PROMOTIONAL_TEMPLATES = frozenset(
-    {
-        "BIRTHDAY_WISH",
-        "WALKOUT_RECOVERY",
-        "REFERRAL_INVITE",
-        "PRESCRIPTION_EXPIRY",
-        "ANNUAL_CHECKUP_REMINDER",
-        "CL_REORDER_REMINDER",
-    }
+# message that ignores STOP (Codex 1419 round 1).
+PROMOTIONAL_TEMPLATES = frozenset({"BIRTHDAY_WISH", "WALKOUT_RECOVERY", "REFERRAL_INVITE"})
+# Recall reminders. D56: "a reminder tied to a specific order, Rx or
+# appointment is transactional; anything else ... is promotional". So these are
+# transactional ONLY as a REMINDER carrying one order / Rx / appointment (type
+# AND id); a SERVICE / OTP / omitted stamp never exempts them. Today every door
+# that sends them is promotional: the hand-sent Rx reminder is MARKETING, the
+# CL reorder door uses cl_subscription, a reminder RULE row is reminder_rule.
+RECALL_TEMPLATES = frozenset(
+    {"PRESCRIPTION_EXPIRY", "ANNUAL_CHECKUP_REMINDER", "CL_REORDER_REMINDER"}
 )
 # A REMINDER is transactional only when it is about ONE specific order,
 # prescription or appointment (D56); anything else is promotional.
@@ -195,24 +193,28 @@ def consent_basis_for(
 
       * a PROMOTIONAL_TEMPLATES template, or a row produced by a reminder RULE
         (a segment, never one specific order/Rx/appointment): marketing_consent;
+      * REMINDER tied to one order / prescription / appointment (entity type
+        AND id): transactional -- including a RECALL_TEMPLATES template;
+      * a RECALL_TEMPLATES template any other way: marketing_consent;
       * OTP / SERVICE / TRANSACTIONAL: transactional (allowed even to
         marketing opt-outs: order ready, repair ready, review/NPS, OTPs);
-      * REMINDER: transactional only when tied to one order / prescription /
-        appointment (entity type AND id); else marketing_consent;
-      * anything else (MARKETING, PROMOTIONAL, none): marketing_consent.
+      * anything else (MARKETING, PROMOTIONAL, untied REMINDER, none):
+        marketing_consent.
     """
     cat = (category or "").upper()
     if (template_id or "") in PROMOTIONAL_TEMPLATES:
         return "marketing_consent"
     if (related_entity_type or "") == "reminder_rule":
         return "marketing_consent"
-    if cat in ("OTP", "SERVICE", "TRANSACTIONAL"):
-        return "transactional"
     if (
         cat == "REMINDER"
         and (related_entity_type or "") in _SPECIFIC_REMINDER_ENTITIES
         and related_entity_id
     ):
+        return "transactional"
+    if (template_id or "") in RECALL_TEMPLATES:
+        return "marketing_consent"
+    if cat in ("OTP", "SERVICE", "TRANSACTIONAL"):
         return "transactional"
     return "marketing_consent"
 

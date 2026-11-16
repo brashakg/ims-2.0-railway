@@ -188,8 +188,17 @@ def test_genuine_service_message_still_reaches_an_opted_out_customer(db, provide
     [
         (("SERVICE", "BIRTHDAY_WISH"), "marketing_consent"),
         ((None, "BIRTHDAY_WISH"), "marketing_consent"),
-        (("REMINDER", "PRESCRIPTION_EXPIRY", "prescription", "C-1"), "marketing_consent"),
+        # D56 literal: a recall reminder tied to ONE Rx / order / appointment
+        # is transactional; the same template any other way is promotional.
+        (("REMINDER", "PRESCRIPTION_EXPIRY", "prescription", "RX-1"), "transactional"),
+        (("REMINDER", "ANNUAL_CHECKUP_REMINDER", "appointment", "A-1"), "transactional"),
+        (("SERVICE", "PRESCRIPTION_EXPIRY", None, None), "marketing_consent"),
+        ((None, "PRESCRIPTION_EXPIRY", "prescription", "RX-1"), "marketing_consent"),
+        (("MARKETING", "PRESCRIPTION_EXPIRY", "prescription", "C-1"), "marketing_consent"),
+        (("OTP", "ANNUAL_CHECKUP_REMINDER", None, None), "marketing_consent"),
         (("REMINDER", "CL_REORDER_REMINDER", "cl_subscription", "C-1"), "marketing_consent"),
+        (("REMINDER", "PRESCRIPTION_EXPIRY", "reminder_rule", "R-1"), "marketing_consent"),
+        (("REMINDER", "BIRTHDAY_WISH", "order", "O-1"), "marketing_consent"),
         (("OTP", "BIRTHDAY_WISH", "reminder_rule", "R-1"), "marketing_consent"),
         (("OTP", "X_RULE_TPL", "reminder_rule", "R-1"), "marketing_consent"),
         (("REMINDER", "APPT_TPL", "appointment", "A-1"), "transactional"),
@@ -548,3 +557,51 @@ class _ReplySpy:
     async def __call__(self, phone, *_a, **_k):
         self.calls.append(phone)
         return SimpleNamespace(ok=True, status="SIMULATED", provider_id="SPY", error=None)
+
+
+# --------------------------------------------------------------------------
+# Walkout follow-up door (reviewer must-fix, round 3): the writer's verdict
+# decides "queued"; a refused or unsaved message uses no cap.
+# --------------------------------------------------------------------------
+
+WALKOUT = {"walkout_id": "ZZ-WO-1", "store_id": "ZZ-S1", "customer_id": CID, "customer_name": "Zz", "mobile": PHONE}
+
+
+def _walkout_fu(db):
+    from api.routers import walkouts as wo
+
+    return asyncio.run(
+        wo._maybe_queue_followup_outbound(db, walkout_row=dict(WALKOUT), round_num=1, mode="WHATSAPP", current_user=USER)
+    )
+
+
+def test_walkout_followup_with_the_default_wording_is_refused_and_spends_no_cap(db):
+    # Built-in WALKOUT_RECOVERY needs frame_names / discount_percent /
+    # validity_date, which the door does not have: D56 never queues it.
+    assert _walkout_fu(db) == "refused"
+    assert db.notification_logs.count_documents({}) == 0
+    assert db.comms_ledger.count_documents({"customer_id": CID}) == 0
+
+
+def test_walkout_followup_with_a_failed_insert_is_an_error_and_spends_no_cap(db, monkeypatch):
+    from pymongo.collection import Collection
+
+    monkeypatch.setitem(ns.TEMPLATES, "WALKOUT_RECOVERY", "Hi {customer_name}, visit {store_name} again.")
+    real = Collection.insert_one
+
+    def _insert(self, doc, *a, **k):
+        if self.name == "notification_logs":
+            raise OSError("injected: write failed")
+        return real(self, doc, *a, **k)
+
+    monkeypatch.setattr(Collection, "insert_one", _insert)
+    assert _walkout_fu(db) == "error"
+    monkeypatch.setattr(Collection, "insert_one", real)
+    assert db.comms_ledger.count_documents({"customer_id": CID}) == 0
+
+
+def test_walkout_followup_with_fillable_wording_is_queued_once_with_one_cap_row(db, monkeypatch):
+    monkeypatch.setitem(ns.TEMPLATES, "WALKOUT_RECOVERY", "Hi {customer_name}, visit {store_name} again.")
+    assert _walkout_fu(db) == "queued"
+    assert db.notification_logs.count_documents({"related_entity_id": "ZZ-WO-1"}) == 1
+    assert db.comms_ledger.count_documents({"customer_id": CID}) == 1
