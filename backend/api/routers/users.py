@@ -1995,13 +1995,12 @@ async def revert_user_permissions(
     if body.expected_roles is not None and sorted(body.expected_roles) != sorted(_roles):
         raise HTTPException(status_code=409, detail=_CHANGED_MEANWHILE)
     # D93(3): a role-standard cap is restored as role-standard (it follows the
-    # role again), not as a typed value. Snapshots written before the marker
-    # existed: a cap equal to the role standard is taken as role-standard.
-    # ponytail: old snapshots never recorded the role, so "the role standard"
-    # is the person's current roles (the roles this revert writes against).
+    # role again), not as a typed value. D93(4): snapshots written before the
+    # marker never recorded roles, so a cap equal to the standard of ANY role
+    # is role-default (it then follows the CURRENT role); any other is typed.
     _was_default = restore.get("discount_cap_is_role_default")
     if _was_default is None and restore.get("discount_cap") is not None:
-        _was_default = float(restore["discount_cap"]) == role_baseline_cap(_roles)
+        _was_default = float(restore["discount_cap"]) in set(ROLE_DISCOUNT_CAPS.values())
     _cap = (
         None
         if _was_default

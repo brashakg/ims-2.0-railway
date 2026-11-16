@@ -20,6 +20,7 @@ update_one filter), real users router over HTTP.
 from __future__ import annotations
 
 import mongomock
+import pytest
 
 from api.routers import users
 from api.services.role_caps import ROLE_DISCOUNT_CAPS
@@ -476,3 +477,37 @@ def test_a_failed_history_read_is_an_error_not_an_empty_history(monkeypatch):
     r = c.post(f"/api/v1/users/{uid}/permissions/revert", json={"audit_log_id": target})
     assert r.status_code == 503, r.text
     assert _stored(repo, uid) == (15.0, False)
+
+
+@pytest.mark.parametrize("created,snap_cap,now,expected", [
+    # (created as, snapshot cap, role now, stored after revert)
+    (["STORE_MANAGER"], 20.0, ["SALES_STAFF"], (10.0, True)),
+    (["SALES_STAFF"], 10.0, ["ACCOUNTANT"], (ROLE_DISCOUNT_CAPS["ACCOUNTANT"], True)),
+    (["SALES_STAFF"], 17.0, ["SALES_STAFF"], (17.0, False)),
+], ids=["manager20-now-sales", "sales10-now-accountant", "unmatched17-typed"])
+def test_old_snapshot_cap_equal_to_any_role_standard_follows_the_current_role(
+        monkeypatch, created, snap_cap, now, expected):
+    """D93(4): an old snapshot (no marker) never recorded roles. A cap equal to
+    the standard of ANY role is restored as role-default (follows the CURRENT
+    role); any other cap is restored as typed. A Store Manager 20 restored onto
+    a person now Sales Staff must not come back as a typed 20."""
+    repo = _repo()
+    audit = AuditRepository(mongomock.MongoClient().db.audit_logs)
+    c, _ = _client_with_audit(repo, _SUPER, monkeypatch, audit_repo=audit)
+    uid = _create(c, "old", created)
+    for body in ({"discount_cap": 12}, {"discount_cap_follow_role": True},
+                 {"discount_cap": 15}):
+        assert c.put(f"/api/v1/users/{uid}", json=body).status_code == 200
+    target = [h for h in _history(c, uid)
+              if h["permissions_after"].get("discount_cap_is_role_default") is True
+              and h["action"] != "PERMISSIONS_REVERT"][0]
+    audit.collection.update_one(
+        {"log_id": target["log_id"]},
+        {"$set": {"permissions_after.discount_cap": snap_cap},
+         "$unset": {"permissions_after.discount_cap_is_role_default": ""}})
+    if now != created:
+        assert c.put(f"/api/v1/users/{uid}", json={"roles": now}).status_code == 200
+    r = c.post(f"/api/v1/users/{uid}/permissions/revert",
+               json={"audit_log_id": target["log_id"], "expected_roles": now})
+    assert r.status_code == 200, r.text
+    assert _stored(repo, uid) == expected, (created, snap_cap, now)
