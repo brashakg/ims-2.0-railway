@@ -407,6 +407,18 @@ class DatabaseConnection:
             name="uniq_stock_unit_return_slot",
             background=True,
         )
+        # ...and every slot a unit ever carried (#1413 round 1, P1-A): a later
+        # return of the same unit (resold meanwhile) writes its own slot over
+        # `return_slot`, which freed the old one for a second record of the
+        # piece. `return_slots` keeps them all (multikey, unique across units).
+        _backstop(
+            "stock_units",
+            "return_slots",
+            unique=True,
+            partialFilterExpression={"return_slots": {"$type": "string"}},
+            name="uniq_stock_unit_return_slots",
+            background=True,
+        )
         # F8: DB-level backstop behind the GRN accept claim (vendors.py
         # _accept_grn_claimed). Every unit minted for a goods receipt now carries
         # a per-line ordinal `line_unit_seq` derived from the count already

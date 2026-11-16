@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from api.utils.event_time import utc_now_iso
 
+import contextvars
 import logging
 import uuid
 from contextlib import contextmanager
@@ -2673,6 +2674,28 @@ class _SlotTaken(Exception):
         self.holder = holder
 
 
+class _ClaimLost(Exception):
+    """D79: this Retry stock step's claim expired and another retry took the
+    return over. It writes no further unit (_check_restock_fence)."""
+
+
+# D79 (#1413 round 1, P1-A): the Retry stock step's claim renewal, set by
+# _retry_claimed for as long as it moves stock; unset everywhere else (the
+# press and the Shopify doors hold no restock claim). A context variable so
+# the one rule reaches every unit write of the retry -- the put-back, the
+# mint, the set-aside -- without a parameter through each helper.
+_RESTOCK_FENCE: contextvars.ContextVar = contextvars.ContextVar("restock_fence", default=None)
+
+
+def _check_restock_fence() -> None:
+    """Right before a claimed retry writes a unit: its claim must still be its
+    own, and is renewed (no taker can start for another full claim period).
+    Raises _ClaimLost when it was taken over: the stale retry stops."""
+    fence = _RESTOCK_FENCE.get()
+    if fence is not None:
+        fence()
+
+
 def _credit_landed(row: Dict[str, Any], result: Dict[str, Any], landed_stores: List[str],
                    holder: Dict[str, Any], return_id: str) -> None:
     """A piece whose slot another attempt already filled (_SlotTaken): it is
@@ -2689,11 +2712,13 @@ def _credit_landed(row: Dict[str, Any], result: Dict[str, Any], landed_stores: L
 
 
 def _slot_holder(stock_repo: Any, slot: Optional[str]) -> Optional[Dict[str, Any]]:
-    """The unit holding return slot `slot`, or None."""
+    """The unit holding return slot `slot`, or None: the one it is on now, or
+    the one that keeps it in its history (`return_slots`) after a later return
+    of that unit wrote its own."""
     coll = getattr(stock_repo, "collection", None)
     if not slot or coll is None:
         return None
-    return coll.find_one({"return_slot": slot})
+    return coll.find_one({"$or": [{"return_slot": slot}, {"return_slots": slot}]})
 
 
 def _own_moved_units(stock_repo: Any, return_id: str, ids: Optional[set] = None) -> List[Dict[str, Any]]:
@@ -2790,6 +2815,13 @@ def _reactivate_original_unit(
     `slot` (_return_slot_keys, decision D45a) is written with the flip; a
     flip refused because another unit already holds it raises _SlotTaken:
     a concurrent attempt of this return moved this piece, never a second unit.
+
+    The flip is fenced on the unit's OWNERSHIP as it was read (#1413 round 1,
+    P1-A, D79): it lands only while the unit is still SOLD on THIS bill. A
+    retry that stalled after reading its candidate, while its taker put the
+    piece back and a new customer bought and paid for it, must never unsell
+    that new bill -- the unit is SOLD again, but on the new order. A claimed
+    retry also checks its claim right before each write (_check_restock_fence).
     """
     if stock_repo is None or not product_id:
         return None
@@ -2824,6 +2856,7 @@ def _reactivate_original_unit(
         # so the history is preserved; a later sale (claim_one_available) then
         # stamps the NEW order_id onto a clean unit.
         prior_order_id = unit.get("order_id") or order_id
+        _check_restock_fence()
         try:
             ok = _flip_sold_unit(
                 stock_repo,
@@ -2849,6 +2882,8 @@ def _reactivate_original_unit(
                     **(set_aside or {}),
                 },
                 id_field="stock_id" if unit.get("stock_id") else "_id",
+                # Still sold on THIS bill (P1-A): never a resold unit.
+                expect={"order_id": unit.get("order_id")},
             )
         except Exception as exc:  # noqa: BLE001
             holder = _slot_holder(stock_repo, slot) if type(exc).__name__ == "DuplicateKeyError" else None
@@ -2885,21 +2920,31 @@ def _unsell(stock_repo: Any, sid: Any) -> None:
 
 def _flip_sold_unit(
     stock_repo: Any, sid: Any, fields: Dict[str, Any], *, id_field: str = "stock_id",
+    expect: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """Flip unit `sid` back to AVAILABLE only while it is still SOLD (a write
     filtered on status SOLD): True flipped, False no longer SOLD (another
     return took it first). RAISES when the write failed. A write that raised
     is read back: committed with its reply lost, it is this flip -- counted
     as not landed, the retry found no SOLD unit and minted a second one. A
-    fake repository without a collection keeps its update (False: failed)."""
+    fake repository without a collection keeps its update (False: failed).
+
+    `expect`: the fields the unit must still carry (its order, P1-A), in the
+    same filter, so a unit resold since it was read is never touched. A
+    `return_slot` is also added to the unit's `return_slots`, which keeps it
+    for good (uniq_stock_unit_return_slots): a later return of the unit that
+    writes its own slot never frees this one for a second record."""
     coll = getattr(stock_repo, "collection", None)
     if coll is None:
         if not stock_repo.update(sid, fields):
             raise RuntimeError("stock reactivate failed: the SOLD unit stays SOLD")
         return True
     try:
-        return coll.update_one({id_field: sid, "status": "SOLD"},
-                               {"$set": {**fields, "updated_at": datetime.now()}}).matched_count > 0
+        update: Dict[str, Any] = {"$set": {**fields, "updated_at": datetime.now()}}
+        if fields.get("return_slot"):
+            update["$addToSet"] = {"return_slots": fields["return_slot"]}
+        return coll.update_one({**(expect or {}), id_field: sid, "status": "SOLD"},
+                               update).matched_count > 0
     except Exception:  # noqa: BLE001
         # ponytail: a read-back that also fails leaves it open (a second unit
         # is possible only on two misses in a row).
@@ -3982,6 +4027,8 @@ def _restock_good_items(
         except _SlotTaken as taken:
             _credit_landed(row, result, landed_stores, taken.holder, return_id)
             continue
+        except _ClaimLost:
+            raise  # taken over: this stale retry writes nothing more (D79)
         except Exception as exc:  # noqa: BLE001
             # A stock read or write that failed is no answer: never a mint
             # beside a unit that may still be SOLD (a phantom). Not applied,
@@ -4017,6 +4064,7 @@ def _restock_good_items(
         # fresh return-unit has NO connection back to the reversed sale. It
         # carries NO order_id / sold_at (it is unsold shelf stock); a later sale
         # stamps the new order_id cleanly.
+        _check_restock_fence()
         try:
             created = stock_repo.create(
                 {
@@ -4040,6 +4088,7 @@ def _restock_good_items(
                     "restock_route_reason": routing["reason"],
                     # One record per piece (D45a): a second mint of the slot is refused.
                     "return_slot": slot,
+                    "return_slots": [slot],
                 }
             )
         except Exception as exc:  # noqa: BLE001
@@ -4168,6 +4217,8 @@ def _quarantine_damaged_units(
                     "quarantine_label_printed": False,
                 },
             )
+        except _ClaimLost:
+            raise  # taken over: this stale retry writes nothing more (D79)
         except _SlotTaken as taken:  # a concurrent attempt set this piece aside (D45a)
             h = taken.holder
             out.append({"stock_id": str(h.get("stock_id") or h.get("_id")), "store_id": h.get("store_id"),
@@ -7010,6 +7061,10 @@ async def retry_restock(
     return _retry_restock(return_id, current_user, current_user.get("active_store_id"))
 
 
+# The slot a unit carries now, and every slot it ever carried (P1-A).
+_RETURN_SLOT_INDEXES = ("uniq_stock_unit_return_slot", "uniq_stock_unit_return_slots")
+
+
 def _return_slot_index_ok() -> bool:
     """Is uniq_stock_unit_return_slot on the stock? It IS the D45(a)
     guarantee (_return_slot_keys): without it a stalled retry and its taker
@@ -7024,12 +7079,14 @@ def _return_slot_index_ok() -> bool:
     if not isinstance(coll, Collection):
         return True
     try:
-        ok = "uniq_stock_unit_return_slot" in (coll.index_information() or {})
+        names = coll.index_information() or {}
+        ok = all(n in names for n in _RETURN_SLOT_INDEXES)
     except Exception:  # noqa: BLE001
         ok = False
     if not ok:
-        logger.critical("[RETURNS] Retry stock step REFUSED: unique index uniq_stock_unit_return_slot "
-                        "is missing (or unreadable) on stock_units -- rebuild it (ensure_indexes)")
+        logger.critical("[RETURNS] Retry stock step REFUSED: a unique index of %s "
+                        "is missing (or unreadable) on stock_units -- rebuild it (ensure_indexes)",
+                        ", ".join(_RETURN_SLOT_INDEXES))
     return ok
 
 
@@ -7131,8 +7188,22 @@ def _retry_restock(return_id: str, current_user: dict, processing_store_id: Opti
             "restock_stock_ids": doc.get("restock_stock_ids", []),
             "message": "Restock in progress - retry shortly",
         }
+    def _renew() -> None:
+        # D79: every unit write of this attempt first renews its claim, and
+        # only while the claim is still its own (the token): a retry that
+        # stalled past a takeover writes no further unit (_ClaimLost).
+        res = coll.update_one(mine, {"$set": {"restock_started_at": utc_now_iso()}})
+        if not getattr(res, "matched_count", 1):
+            raise _ClaimLost(return_id)
+
+    fence = _RESTOCK_FENCE.set(_renew)
     try:
         return _retry_claimed(coll, mine, claim, current_user, processing_store_id)
+    except _ClaimLost:
+        logger.warning("[RETURNS] restock retry of %s stopped: its claim was taken over", return_id)
+        raise HTTPException(status_code=409, detail=(
+            "Another Retry stock step took this return over while this one was waiting, so this one "
+            "stopped and moved nothing more. Refresh the return to see its stock step."))
     except Exception:
         # The claim goes back whatever failed (a line that cannot be read, an
         # unreadable stock answer): the panel keeps its Retry stock step.
@@ -7141,6 +7212,8 @@ def _retry_restock(return_id: str, current_user: dict, processing_store_id: Opti
         except Exception:  # noqa: BLE001
             logger.error("[RETURNS] restock claim of %s NOT released", return_id)
         raise
+    finally:
+        _RESTOCK_FENCE.reset(fence)
 
 
 def _reopen_by_booking(coll: Any, return_id: str, write: Any) -> None:
@@ -7380,6 +7453,11 @@ def _retry_claimed(coll: Any, mine: Dict[str, Any], claim: Dict[str, Any], curre
                 _reopen_by_booking(coll, return_id, released)
         except Exception:  # noqa: BLE001
             pass
+        if isinstance(exc, _ClaimLost):
+            # Taken over (D79): its release missed on the token (the taker's
+            # claim stands) and a booking it un-did reopened the taker's
+            # record (_reopen_by_booking) -- the caller answers 409.
+            raise
         raise HTTPException(status_code=500, detail="Restock retry failed")
 
     # Merge stock_ids: any units we already had (from a partial earlier run)
@@ -7414,6 +7492,7 @@ def _retry_claimed(coll: Any, mine: Dict[str, Any], claim: Dict[str, Any], curre
                                            *(row["stock_id"] for row in set_aside)]
     if refund_id:
         update["restock_applied_by_booking"] = by_booking
+    saved = None
     try:
         saved = coll.update_one(mine, {"$set": update})
         if refund_id and not update["restock_applied"]:
@@ -7425,6 +7504,11 @@ def _retry_claimed(coll: Any, mine: Dict[str, Any], claim: Dict[str, Any], curre
         # The stock rows are the truth (_units_moved_by_return): a later
         # press finds what moved. The claim is given back either way.
         coll.update_one(mine, {"$set": {"restock_in_progress": False}})
+    if saved is not None and not getattr(saved, "matched_count", 1):
+        # D79: its save missed on the token -- another retry took the return
+        # over while this one ran. Never "Restock applied" for a save that
+        # did not land (nor a Shopify write-back of it): 409 (_retry_restock).
+        raise _ClaimLost(return_id)
 
     # A successful retry raised the shelf count exactly like the create path
     # did, so Shopify has to hear about it too. Without this the online path --

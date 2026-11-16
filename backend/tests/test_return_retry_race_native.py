@@ -86,8 +86,19 @@ def _interleave(db, monkeypatch, target, attr):
         return real(*a, **k)
 
     monkeypatch.setattr(target, attr, stalled)
-    a = R._retry_restock(RID, USER, STORE)
-    return a, seen["b"]
+    return _stale(), seen["b"]
+
+
+def _stale():
+    """Retry A's answer: a dict, or -- when it reaches a further unit write
+    after the takeover -- the 409 of a stale claim (D79)."""
+    from fastapi import HTTPException
+
+    try:
+        return R._retry_restock(RID, USER, STORE)
+    except HTTPException as exc:
+        assert exc.status_code == 409, exc.detail
+        return exc
 
 
 def _back(db):
@@ -150,8 +161,9 @@ def test_the_stale_retry_never_overwrites_the_record_its_taker_finished(native, 
         return real(*a, **k)
 
     monkeypatch.setattr(R, "_flip_sold_unit", stalled)
-    a = R._retry_restock(RID, USER, STORE)
-    assert seen["b"]["restock_applied"] is True and a["restock_applied"] is False
+    a = _stale()
+    assert seen["b"]["restock_applied"] is True
+    assert not isinstance(a, dict) or a["restock_applied"] is False
     doc = native.returns.find_one({"return_id": RID})
     assert doc["restock_applied"] is True and doc["restock_in_progress"] is False
     assert doc["restock_stock_ids"] == seen["b"]["restock_stock_ids"] == _back(native)
@@ -263,7 +275,7 @@ def test_a_shopify_retry_never_reads_a_stale_booking_that_failed_as_applied(nati
         return {"applied": False, "restocked": [], "restock_stock_ids": []}  # A woke; its writes failed
 
     monkeypatch.setattr(SR, "_restock_booked", booked)
-    R._retry_restock(RID, USER, STORE)
+    _stale()  # A: its save misses on the token -- 409 (D79)
     assert native.stock_units.find_one({"_id": "U1"})["status"] == "SOLD"
     doc = native.returns.find_one({"return_id": RID})
     assert doc["restock_applied"] is False, "record reads applied, the piece is not in stock"
@@ -273,6 +285,9 @@ def test_a_shopify_retry_never_reads_a_stale_booking_that_failed_as_applied(nati
 def test_the_return_slot_backstop_is_in_the_apps_index_set(native):
     idx = native.stock_units.index_information()["uniq_stock_unit_return_slot"]
     assert idx["unique"] is True and idx["key"] == [("return_slot", 1)]
+    # P1-A: every slot a unit ever carried stays unique too.
+    idx = native.stock_units.index_information()["uniq_stock_unit_return_slots"]
+    assert idx["unique"] is True and idx["key"] == [("return_slots", 1)]
 
 
 def _shopify_race(native, monkeypatch, wake):
@@ -493,21 +508,118 @@ def test_two_live_retries_over_a_trace_gap_put_back_one_unit_for_the_last_piece(
     assert doc["restock_applied"] is True and doc["restock_in_progress"] is False
 
 
-def test_the_retry_refuses_when_the_return_slot_index_is_missing(native):
+@pytest.mark.parametrize("field", ["return_slot", "return_slots"])
+def test_the_retry_refuses_when_the_return_slot_index_is_missing(native, field):
     """The slot guarantee (D45a) IS the index: without it two live retries can
     both move one piece. So the Retry stock step refuses -- nothing claimed,
-    nothing moved -- until the index is back, rather than running unguarded."""
+    nothing moved -- until the index is back, rather than running unguarded.
+    The same for the slot history (P1-A)."""
     from fastapi import HTTPException
 
     _seed(native, units=["U1"])
-    native.stock_units.drop_index("uniq_stock_unit_return_slot")
+    name = "uniq_stock_unit_" + field
+    native.stock_units.drop_index(name)
     with pytest.raises(HTTPException) as err:
         R._retry_restock(RID, USER, STORE, panel=True)
     assert err.value.status_code == 503
     assert native.stock_units.find_one({"_id": "U1"})["status"] == "SOLD"
     doc = native.returns.find_one({"return_id": RID})
     assert doc["restock_in_progress"] is False and not doc.get("restock_claim")
-    native.stock_units.create_index("return_slot", unique=True, name="uniq_stock_unit_return_slot",
-                                    partialFilterExpression={"return_slot": {"$type": "string"}})
+    native.stock_units.create_index(field, unique=True, name=name,
+                                    partialFilterExpression={field: {"$type": "string"}})
     assert R._retry_restock(RID, USER, STORE)["restock_applied"] is True
     assert _back(native) == ["U1"]
+
+
+# ---------------------------------------------------------------------------
+# #1413 round 1, P1-A (Codex 2026-11-15, decision D79): a stale retry must
+# never unsell a unit a new customer bought (and paid for) since it read it.
+# ---------------------------------------------------------------------------
+NEW_OID = "ORD-RACE-NEW"
+
+
+def _resell(db, sid):
+    """What the till's sale does to an AVAILABLE unit (claim_one_available):
+    SOLD again, on the NEW bill."""
+    res = db.stock_units.update_one({"stock_id": sid, "status": "AVAILABLE"}, {"$set": {
+        "status": "SOLD", "order_id": NEW_OID, "sold_at": datetime.now(), "sold_to_customer_id": "C-NEW"}})
+    assert res.matched_count == 1
+
+
+@pytest.mark.parametrize("condition,taker_status", [("GOOD", "AVAILABLE"), ("DAMAGED", "QUARANTINED")])
+def test_a_stale_retry_never_unsells_a_unit_resold_since_it_read_it(native, monkeypatch,
+                                                                    condition, taker_status):
+    """Codex's reproduction: A reads U1 (SOLD on the bill) and stalls at its
+    flip; its claim ages, B takes over and moves U1 back; U1 is sold to a new
+    customer (and, for a set-aside piece, released first). A wakes: U1 must
+    stay SOLD on the NEW bill, nothing minted, and A stops with 409."""
+    _seed(native, units=["U1"])
+    native.returns.update_one({"return_id": RID}, {"$set": {"items.0.condition": condition}})
+    real, seen = R._flip_sold_unit, {}
+
+    def stalled(*a, **k):
+        if not seen:
+            seen["a"] = True
+            native.returns.update_one({"return_id": RID}, {"$set": {
+                "restock_started_at": (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()}})
+            seen["b"] = R._retry_restock(RID, USER, STORE)
+            assert native.stock_units.find_one({"_id": "U1"})["status"] == taker_status
+            if taker_status == "QUARANTINED":  # the manager releases it to sale
+                native.stock_units.update_one({"_id": "U1"}, {"$set": {"status": "AVAILABLE"}})
+            _resell(native, "U1")
+        return real(*a, **k)
+
+    monkeypatch.setattr(R, "_flip_sold_unit", stalled)
+    a = _stale()
+    assert seen["b"]["restock_applied"] is True
+    unit = native.stock_units.find_one({"_id": "U1"})
+    assert (unit["status"], unit["order_id"]) == ("SOLD", NEW_OID), f"the new bill's unit was unsold: {unit}"
+    assert native.stock_units.count_documents({}) == 1, "a stale retry minted a second record"
+    assert not isinstance(a, dict), f"the stale retry completed: {a}"
+    doc = native.returns.find_one({"return_id": RID})
+    assert doc["restock_applied"] is True and doc["restock_in_progress"] is False
+    assert R._retry_restock(RID, USER, STORE)["message"] == "Already restocked"
+    unit = native.stock_units.find_one({"_id": "U1"})
+    assert (unit["status"], unit["order_id"]) == ("SOLD", NEW_OID)
+
+
+def test_a_stale_retry_whose_flip_lands_after_the_resale_without_its_own_fence_still_misses(native, monkeypatch):
+    """The ownership filter alone (no claim fence: the press and the Shopify
+    doors hold no restock claim): a candidate read SOLD on this bill and
+    resold before the write is never touched -- the flip answers False."""
+    _seed(native, units=["U1"])
+    native.stock_units.update_one({"_id": "U1"}, {"$set": {"status": "SOLD", "order_id": NEW_OID}})
+    from api.dependencies import get_stock_repository
+
+    repo = get_stock_repository()
+    ok = R._flip_sold_unit(repo, "U1", {"status": "AVAILABLE", "returned_at": "x", "order_id": None},
+                           expect={"order_id": OID})
+    assert ok is False
+    assert native.stock_units.find_one({"_id": "U1"})["order_id"] == NEW_OID
+
+
+def test_a_later_return_of_the_resold_unit_never_frees_its_slot_for_a_second_record(native):
+    """Sequential, no race: return R puts U1 back (slot 0) but its record save
+    is lost (the stock is the truth). U1 is resold and returned again by
+    return C, whose flip writes ITS slot and name over U1. R's next retry no
+    longer finds U1 as its own: it must never mint a second record for the
+    piece -- U1 keeps R's slot in its history (return_slots)."""
+    from api.dependencies import get_stock_repository
+
+    _seed(native, units=["U1"])
+    assert R._retry_restock(RID, USER, STORE)["restock_applied"] is True
+    # The record's save was lost: it reads as never restocked.
+    native.returns.update_one({"return_id": RID}, {"$set": {
+        "restock_applied": False, "restock_stock_ids": [], "restocked": []},
+        "$unset": {"restock_claim": ""}})
+    _resell(native, "U1")
+    sid = R._reactivate_original_unit(get_stock_repository(), PID, STORE, NEW_OID, set(),
+                                      return_id="RET-RACE-C", slot=f"RET-RACE-C|back|{PID}|0")
+    assert sid == "U1" and native.stock_units.find_one({"_id": "U1"})["returned_by_return_id"] == "RET-RACE-C"
+    # R's stock_audit row is fail-soft (_audit_stock_transition): without it
+    # nothing on the stock names R any more.
+    native.stock_audit.delete_many({"return_id": RID})
+    again = R._retry_restock(RID, USER, STORE)
+    assert native.stock_units.count_documents({}) == 1, (
+        f"one piece became two records: {list(native.stock_units.find({}, {'_id': 1, 'source_id': 1}))}")
+    assert again["restock_applied"] is True and again["restock_stock_ids"] == ["U1"]
