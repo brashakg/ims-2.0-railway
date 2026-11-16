@@ -3210,9 +3210,14 @@ _ALWAYS_EXCLUDED_FIELDS = (
     "bank_ifsc",
 )
 
-# Per-collection extras on top of the global list. Empty today; kept so a
-# collection-specific field can be added without weakening the global rule.
-_COLLECTION_FIELD_EXCLUSIONS: Dict[str, tuple] = {}
+# Per-collection extras on top of the global list.
+#   webhook_inbox.payload -- the stored delivery as received: an inbound
+#     WhatsApp message keeps the customer's phone and words for 30 days, a
+#     Shopify/MSG91 delivery its buyer's contact details. Redacted at this
+#     Jarvis boundary (D57 option A, Codex round 2 on #1416); the inbox's
+#     restricted operator views elsewhere are unchanged. Status, vendor,
+#     attempts and errors stay readable.
+_COLLECTION_FIELD_EXCLUSIONS: Dict[str, tuple] = {"webhook_inbox": ("payload",)}
 
 
 def _excluded_fields_for(collection: str) -> tuple:

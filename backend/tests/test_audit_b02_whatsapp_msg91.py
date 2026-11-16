@@ -738,6 +738,29 @@ def test_concurrent_runs_of_one_message_store_one_follow_up_each(wa):
     assert set(counts.values()) == {1}, counts
 
 
+def test_jarvis_data_reader_redacts_the_stored_message(client, wa, monkeypatch):
+    """D57 option A: the Jarvis raw reader returned the inbound message's phone
+    and words (webhook_inbox.payload) to the Superadmin. The payload is now
+    neither returned nor filterable/sortable; the row's state stays readable."""
+    from api.routers import jarvis as jarvis_router
+
+    monkeypatch.setattr(jarvis_router, "get_db_collection", lambda name: wa.get_collection(name))
+    wa_id = "wamid.ZZ-JARVIS"
+    _post_inbound(client, _meta_body("book an eye test", wa_id=wa_id))
+    su = _headers(["SUPERADMIN"], [])
+    r = client.get(f"/api/v1/jarvis/data/webhook_inbox?filter_field=event_id&filter_value={wa_id}",
+                   headers=su)
+    assert r.status_code == 200, r.text
+    (row,) = r.json()["rows"]
+    assert "payload" not in row
+    assert row["status"] == "succeeded" and row["vendor"] == "whatsapp"
+    assert PHONE not in r.text and "book an eye test" not in r.text
+    for query in ("filter_field=payload.from_phone&filter_value=x", "sort_by=payload.text",
+                  "filter_field=payload&filter_value=x"):
+        assert client.get(f"/api/v1/jarvis/data/webhook_inbox?{query}", headers=su).status_code == 400
+    assert client.get("/api/v1/jarvis/data/webhook_inbox", headers=_headers(["ADMIN"], [])).status_code == 404
+
+
 def test_without_its_unique_index_a_booking_is_not_applied_and_is_retried(client, wa):
     wa_id = "wamid.ZZ-NOIDX"
     body = _meta_body("book an eye test", wa_id=wa_id)
