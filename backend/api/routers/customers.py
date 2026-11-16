@@ -726,7 +726,10 @@ async def list_customers(
         # Build filter
         filter_dict: Dict[str, Any] = {}
         if customer_type:
-            filter_dict["customer_type"] = customer_type
+            # B2C includes untyped (imported) customers: CustomerRepository.type_scope.
+            from database.repositories.customer_repository import CustomerRepository
+
+            filter_dict.update(CustomerRepository.type_scope(customer_type))
         # Additive tier filter: exclude email-only MARKETING contacts when asked.
         # ``$ne`` also keeps docs where the field is ABSENT (normal customers +
         # FULL upgrades never carry it), so only true MARKETING rows drop out.

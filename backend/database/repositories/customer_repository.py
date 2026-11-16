@@ -61,6 +61,17 @@ class CustomerRepository(BaseRepository):
         that shop. The list, search and the customer report all use it."""
         return {"$or": [{"home_store_id": store_id}, {"preferred_store_id": store_id}]}
 
+    @staticmethod
+    def type_scope(customer_type: str) -> Dict:
+        """THE customer-type rule: B2B means customer_type == 'B2B'; B2C is
+        every other customer, including rows with no type at all (TechCherry
+        imports never write one, and every screen shows them as B2C).
+        A field clause, so it ANDs with the store/channel $or clauses."""
+        ctype = str(customer_type or "").strip().upper()
+        if ctype == "B2C":
+            return {"customer_type": {"$in": ["B2C", None, ""]}}
+        return {"customer_type": ctype}
+
     @classmethod
     def _search_scope(cls, store_id: str = None, filter: Dict = None) -> Optional[Dict]:
         """Store scope (store_scope), ANDed with the caller's own filter."""

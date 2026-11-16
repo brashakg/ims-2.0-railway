@@ -309,3 +309,44 @@ def test_missing_repository_is_503_not_an_empty_answer(monkeypatch):
         with pytest.raises(HTTPException) as e:
             call()
         assert e.value.status_code == 503
+
+
+def test_b2c_chip_counts_customers_with_no_customer_type(monkeypatch):
+    # TechCherry-imported customers carry no customer_type (techcherry_import
+    # writes name/phone/preferred_store_id only); the screen labels them B2C,
+    # so the B2C chip must count them (1427 reviewer: B2C chip half closed).
+    docs = (
+        _people(30, prefix="TYPED", customer_type="B2C")
+        + _people(20, prefix="B2B", customer_type="B2B")
+        + [{"customer_id": f"TC-{i}", "name": f"Imported {i}", "mobile": f"8{i:09d}",
+            "preferred_store_id": "S1"} for i in range(25)]
+        + [{"customer_id": f"NUL-{i}", "name": f"Null {i}", "mobile": f"7{i:09d}",
+            "home_store_id": "S1", "customer_type": None} for i in range(5)]
+    )
+    _customers_repo(monkeypatch, docs)
+    for user, kw in ((MANAGER, {}), (ADMIN, {"store_id": "S1"}), (ADMIN, {})):
+        b2c = _customers(user, customer_type="B2C", limit=500, **kw)
+        assert b2c["pagination"]["total"] == 60, b2c["pagination"]
+        ids = _cids(b2c)
+        assert any(i.startswith("TC-") for i in ids) and not any(i.startswith("B2B") for i in ids)
+        b2b = _customers(user, customer_type="B2B", limit=500, **kw)
+        assert b2b["pagination"]["total"] == 20
+        assert not any(i.startswith(("TC-", "NUL-")) for i in _cids(b2b))
+    # search path and channel path go through the same filter
+    assert _customers(ADMIN, search="Imported", customer_type="B2C")["pagination"]["total"] == 25
+    assert _customers(ADMIN, search="Imported", customer_type="B2B")["pagination"]["total"] == 0
+    assert _customers(ADMIN, customer_type="B2C", channel="STORE", store_id="S1",
+                      limit=500)["pagination"]["total"] == 60
+
+
+def test_campaign_b2c_audience_uses_the_same_type_rule():
+    from api.services.campaign_segments import _resolve_by_customer_type
+
+    db = mongomock.MongoClient().db
+    db.customers.insert_many([
+        {"customer_id": "IMP", "name": "Imported", "mobile": "9000000001", "preferred_store_id": "S1"},
+        {"customer_id": "C", "name": "Typed", "mobile": "9000000002", "home_store_id": "S1", "customer_type": "B2C"},
+        {"customer_id": "B", "name": "Biz", "mobile": "9000000003", "home_store_id": "S1", "customer_type": "B2B"},
+    ])
+    assert len(_resolve_by_customer_type(db, "S1", customer_type="B2C")) == 2
+    assert len(_resolve_by_customer_type(db, "S1", customer_type="b2b")) == 1
