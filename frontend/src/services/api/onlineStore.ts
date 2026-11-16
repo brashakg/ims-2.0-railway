@@ -1323,7 +1323,7 @@ export const imagesApi = {
   /** Upload a real image FILE (multipart) to durable storage and get its URL
    *  back. Phase 4a: the design queue can now take bytes directly instead of
    *  only a pasted, already-hosted URL. The backend validates type (png/jpeg/
-   *  webp/avif) + size (<=10 MB), mints a safe storage key, and persists via the
+   *  webp/avif/heic/heif) + size (<=10 MB), mints a safe storage key, and persists via the
    *  object_storage backend (S3/R2 in prod, local disk in dev). Returns the
    *  durable url + which backend stored it. Throws on failure (caller toasts);
    *  a 415 = bad type, 413 = too big, 503 = storage unavailable. */

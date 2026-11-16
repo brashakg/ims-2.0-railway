@@ -63,6 +63,9 @@ _ALLOWED_IMAGE_TYPES: Dict[str, str] = {
     "image/jpeg": "jpg",
     "image/webp": "webp",
     "image/avif": "avif",
+    # iPhone photos (D9 / D55): accepted at this door as at the catalogue's.
+    "image/heic": "heic",
+    "image/heif": "heif",
 }
 # Hard cap on a single upload (10 MB) -> 413 on violation. Storefront product
 # photos are well under this; the cap stops a memory-DoS / accidental huge file.
@@ -370,7 +373,7 @@ async def upload_image(
     record (the FE consumes the returned url exactly where a pasted url is used).
 
     SECURITY:
-      * content-type allowlist (png / jpeg / webp / avif) -> 415 otherwise.
+      * content-type allowlist (png / jpeg / webp / avif / heic / heif) -> 415 otherwise.
       * 10 MB size cap -> 413 otherwise; an empty body -> 400.
       * the storage KEY is generated (uuid + content-type-derived extension); the
         client filename is NEVER used in the path, so there is no path traversal.

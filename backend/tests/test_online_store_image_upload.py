@@ -255,3 +255,42 @@ def test_upload_bad_kind_is_400(client, auth_headers, patched_storage_and_audit)
         _UPLOAD_PATH, headers=auth_headers, files=files, data={"kind": "BOGUS"}
     )
     assert r.status_code == 400, r.text
+
+
+def _bmff(major: bytes, *compatible: bytes) -> bytes:
+    """A structurally valid ISO-BMFF photo container (ftyp + meta + mdat), the
+    shape an iPhone HEIC has. SYNTHETIC: no decodable pixel data."""
+    def box(kind: bytes, payload: bytes) -> bytes:
+        return (8 + len(payload)).to_bytes(4, "big") + kind + payload
+    ftyp = box(b"ftyp", major + b"\x00\x00\x00\x00" + b"".join(compatible))
+    return ftyp + box(b"meta", b"\x00" * 40) + box(b"mdat", b"\x01" * 200)
+
+
+@pytest.mark.parametrize(
+    "content,mime,ext",
+    [
+        (_bmff(b"heic", b"mif1", b"heic"), "image/heic", ".heic"),
+        (_bmff(b"mif1", b"mif1", b"miaf"), "image/heif", ".heif"),
+    ],
+)
+def test_upload_accepts_an_iphone_photo_like_the_catalogue_door(
+    client, auth_headers, patched_storage_and_audit, content, mime, ext
+):
+    """D9 / D55: HEIC is accepted at BOTH staff upload doors. This door used to
+    answer 415 to the HEIC the catalogue door takes."""
+    storage, _ = patched_storage_and_audit
+    files = {"file": ("IMG_0001.HEIC", io.BytesIO(content), mime)}
+    r = client.post(_UPLOAD_PATH, headers=auth_headers, files=files)
+    assert r.status_code == 200, r.text
+    assert r.json()["content_type"] == mime
+    key, _size, content_type = storage.calls[0]
+    assert key.endswith(ext) and content_type == mime
+
+
+def test_a_cut_short_heic_is_still_refused(client, auth_headers, patched_storage_and_audit):
+    storage, _ = patched_storage_and_audit
+    heic = _bmff(b"heic", b"mif1", b"heic")
+    files = {"file": ("x.heic", io.BytesIO(heic[:24]), "image/heic")}
+    r = client.post(_UPLOAD_PATH, headers=auth_headers, files=files)
+    assert r.status_code == 415, r.text
+    assert storage.calls == []
