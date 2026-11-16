@@ -45,7 +45,7 @@ from api.routers import follow_ups as fu_mod  # noqa: E402
 from api.services import lapsed_reactivation as react  # noqa: E402
 from api.services import nba_call_list as nba  # noqa: E402
 from api.utils.ist import ist_today  # noqa: E402
-from strict_fakes import StrictDB  # noqa: E402
+from strict_fakes import MemAuditRepo, StrictDB  # noqa: E402
 
 STORE = "BV-1"
 
@@ -171,7 +171,7 @@ def lists(monkeypatch):
         date_str=react._today_ist(), lapse_months=24)])
     sdb.seed("follow_ups", [_fu("FU-1", "C1")])
     monkeypatch.setattr(crm_mod, "_crm_get_db", lambda: sdb)
-    monkeypatch.setattr(crm_mod, "get_audit_repository", lambda: None)
+    monkeypatch.setattr(crm_mod, "get_audit_repository", MemAuditRepo())
     monkeypatch.setattr(fu_mod, "_get_db", lambda: sdb)
     app = FastAPI()
     app.include_router(crm_mod.router, prefix="/api/v1/crm")

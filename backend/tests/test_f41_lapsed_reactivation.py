@@ -43,6 +43,8 @@ from fastapi.testclient import TestClient  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from api.routers import crm as crm_mod  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from strict_fakes import MemAuditRepo  # noqa: E402
 from api.routers import auth as auth_mod  # noqa: E402
 from api.services import lapsed_reactivation as react  # noqa: E402
 from api.services import campaign_segments as seg  # noqa: E402
@@ -458,7 +460,7 @@ def test_t4_log_outcome_writes_followup_record(monkeypatch):
             e["follow_up_id"] = fu_id
     doc = react.build_cohort_doc(STORE, entries, date_str=TODAY, lapse_months=24)
     db.get_collection("reactivation_cohorts").docs.append(doc)
-    monkeypatch.setattr(crm_mod, "get_audit_repository", lambda: None)
+    monkeypatch.setattr(crm_mod, "get_audit_repository", MemAuditRepo())
     client = _crm_client(db, monkeypatch)
 
     r = client.post(f"/api/v1/crm/reactivation/{STORE}/log",
@@ -483,7 +485,7 @@ def test_t4b_log_skip_marks_followup_skipped(monkeypatch):
     entries = react.build_cohort(db, STORE, now=NOW, lapse_months=24)
     doc = react.build_cohort_doc(STORE, entries, date_str=TODAY, lapse_months=24)
     db.get_collection("reactivation_cohorts").docs.append(doc)
-    monkeypatch.setattr(crm_mod, "get_audit_repository", lambda: None)
+    monkeypatch.setattr(crm_mod, "get_audit_repository", MemAuditRepo())
     client = _crm_client(db, monkeypatch)
     # No pre-created follow_up here -> the handler writes the in-app RECORD itself.
     r = client.post(f"/api/v1/crm/reactivation/{STORE}/log",
@@ -507,7 +509,7 @@ def test_t4d_off_list_outcome_rejected_and_writes_nothing(monkeypatch):
     entries = react.build_cohort(db, STORE, now=NOW, lapse_months=24)
     doc = react.build_cohort_doc(STORE, entries, date_str=TODAY, lapse_months=24)
     db.get_collection("reactivation_cohorts").docs.append(doc)
-    monkeypatch.setattr(crm_mod, "get_audit_repository", lambda: None)
+    monkeypatch.setattr(crm_mod, "get_audit_repository", MemAuditRepo())
     client = _crm_client(db, monkeypatch)
 
     # ACTIVE_O is a real customer but NOT lapsed -> not in today's cohort.
@@ -534,7 +536,7 @@ def test_t4e_log_without_todays_cohort_doc_is_404(monkeypatch):
     """No persisted cohort doc for today at all -> the log endpoint refuses
     (404 not_on_todays_list) rather than minting an orphan follow_up."""
     db = _seed_population()  # reactivation_cohorts EMPTY
-    monkeypatch.setattr(crm_mod, "get_audit_repository", lambda: None)
+    monkeypatch.setattr(crm_mod, "get_audit_repository", MemAuditRepo())
     client = _crm_client(db, monkeypatch)
     r = client.post(f"/api/v1/crm/reactivation/{STORE}/log",
                     json={"customer_id": "LAPSED", "outcome": "reached",
@@ -550,7 +552,7 @@ def test_t4c_log_schedules_next_touch(monkeypatch):
     entries = react.build_cohort(db, STORE, now=NOW, lapse_months=24)
     doc = react.build_cohort_doc(STORE, entries, date_str=TODAY, lapse_months=24)
     db.get_collection("reactivation_cohorts").docs.append(doc)
-    monkeypatch.setattr(crm_mod, "get_audit_repository", lambda: None)
+    monkeypatch.setattr(crm_mod, "get_audit_repository", MemAuditRepo())
     client = _crm_client(db, monkeypatch)
     nextd = (NOW + timedelta(days=14)).date().isoformat()
     r = client.post(f"/api/v1/crm/reactivation/{STORE}/log",

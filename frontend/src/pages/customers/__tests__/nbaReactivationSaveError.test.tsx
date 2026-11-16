@@ -134,6 +134,32 @@ describe('D69 call saved, next reminder not set', () => {
   });
 });
 
+// D84: the call is saved but its audit record is not. Same lock and Retry.
+describe('D84 call saved, audit record not written', () => {
+  it('NBA: locks the entries and retries the same request', async () => {
+    const AUDIT_NOT_WRITTEN =
+      'Call saved. Its audit record was NOT written. Press Retry; the call is not recorded twice.';
+    crmApi.getNbaCallList.mockResolvedValue({ date: '2026-11-14', cards: [CARD] });
+    crmApi.completeNbaCard.mockImplementationOnce(() =>
+      Promise.reject(buildApiError({
+        isAxiosError: true, message: 'x', config: { method: 'post', url: '/crm/nba/S1/complete' },
+        response: { status: 503, data: { detail: AUDIT_NOT_WRITTEN } },
+      } as never)))
+      .mockResolvedValueOnce({ ok: true, next_follow_up_id: null });
+    render(<NBADashboardPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Done' }));
+    fireEvent.change(screen.getByPlaceholderText(/What did you discuss/), {
+      target: { value: 'Called, will visit Saturday.' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(AUDIT_NOT_WRITTEN);
+    expect(screen.getByPlaceholderText(/What did you discuss/)).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(screen.queryByText(/Call done/)).not.toBeInTheDocument());
+    expect(crmApi.completeNbaCard.mock.calls[1]).toEqual(crmApi.completeNbaCard.mock.calls[0]);
+  });
+});
+
 describe('a failed list read', () => {
   const down = () => Promise.reject(buildApiError({
     isAxiosError: true, message: 'x', config: { method: 'get', url: '/crm/x' },

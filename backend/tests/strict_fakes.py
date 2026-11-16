@@ -714,3 +714,25 @@ class OrdersAt:
 
     def ids_in_stores(self, order_ids, store_ids):
         return set(order_ids) if self.store_id in store_ids else set()
+
+
+class MemAuditRepo:
+    """An in-memory AuditRepository with the one guarantee callers rely on:
+    ``log_id`` (= ``_id``) is unique. Callable, returning itself, so it can
+    stand in for a ``get_audit_repository`` factory directly."""
+
+    def __init__(self):
+        self.rows = {}
+
+    def __call__(self):
+        return self
+
+    def find_by_id(self, log_id):
+        return self.rows.get(log_id)
+
+    def create(self, row):
+        log_id = row.setdefault("log_id", f"AUD-{len(self.rows)}")
+        if log_id in self.rows:
+            return None  # DuplicateKeyError, swallowed like AuditRepository
+        self.rows[log_id] = row
+        return row

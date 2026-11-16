@@ -42,6 +42,8 @@ from fastapi.testclient import TestClient  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from api.routers import crm as crm_mod  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from strict_fakes import MemAuditRepo  # noqa: E402
 from api.routers import customers as cust_mod  # noqa: E402
 from api.routers import auth as auth_mod  # noqa: E402
 from api.services import nba_call_list as nba  # noqa: E402
@@ -468,9 +470,9 @@ def _persisted_nba_doc_db():
 
 def test_t5_dismiss(monkeypatch):
     db = _persisted_nba_doc_db()
-    audit_calls = []
-    monkeypatch.setattr(crm_mod, "get_audit_repository",
-                        lambda: type("A", (), {"create": staticmethod(lambda row: audit_calls.append(row))})())
+    audit = MemAuditRepo()
+    audit_calls = audit.rows.values()
+    monkeypatch.setattr(crm_mod, "get_audit_repository", audit)
     client = _crm_client(db, monkeypatch)
 
     r = client.post(f"/api/v1/crm/nba/{STORE}/dismiss",
@@ -498,7 +500,7 @@ def test_t5_dismiss(monkeypatch):
 
 def test_t6_complete_validation_and_persist(monkeypatch):
     db = _persisted_nba_doc_db()
-    monkeypatch.setattr(crm_mod, "get_audit_repository", lambda: None)
+    monkeypatch.setattr(crm_mod, "get_audit_repository", MemAuditRepo())
     client = _crm_client(db, monkeypatch)
 
     short = client.post(f"/api/v1/crm/nba/{STORE}/complete",
@@ -519,7 +521,7 @@ def test_t6_complete_validation_and_persist(monkeypatch):
 
 def test_t6b_complete_schedules_next_followup(monkeypatch):
     db = _persisted_nba_doc_db()
-    monkeypatch.setattr(crm_mod, "get_audit_repository", lambda: None)
+    monkeypatch.setattr(crm_mod, "get_audit_repository", MemAuditRepo())
     client = _crm_client(db, monkeypatch)
     nextd = (NOW + timedelta(days=14)).date().isoformat()
     r = client.post(f"/api/v1/crm/nba/{STORE}/complete",
@@ -764,7 +766,7 @@ def test_t14b_day_key_boundary_early_morning_ist():
 def test_no_live_send_complete_is_record_only(monkeypatch):
     db = _persisted_nba_doc_db()
     db._cols["notification_logs"] = _FakeColl([])
-    monkeypatch.setattr(crm_mod, "get_audit_repository", lambda: None)
+    monkeypatch.setattr(crm_mod, "get_audit_repository", MemAuditRepo())
 
     # Tripwire: if any code path tried to send, this would record it.
     sent = []

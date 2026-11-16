@@ -46,7 +46,7 @@ from api.services import cl_refill as clr  # noqa: E402
 from api.services import lapsed_reactivation as react  # noqa: E402
 from api.services import nba_call_list as nba  # noqa: E402
 from api.utils.ist import ist_today  # noqa: E402
-from strict_fakes import StrictDB  # noqa: E402
+from strict_fakes import MemAuditRepo, StrictDB  # noqa: E402
 
 STORE = "BV-1"
 NEXT = (ist_today() + timedelta(days=7)).isoformat()
@@ -84,7 +84,7 @@ def _seed(db, run=""):
 
 def _client(monkeypatch, db):
     monkeypatch.setattr(crm_mod, "_crm_get_db", lambda: db)
-    monkeypatch.setattr(crm_mod, "get_audit_repository", lambda: None)
+    monkeypatch.setattr(crm_mod, "get_audit_repository", MemAuditRepo())
     app = FastAPI()
     app.include_router(crm_mod.router, prefix="/api/v1/crm")
     return TestClient(app)

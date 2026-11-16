@@ -17,9 +17,10 @@ import { crmApi } from '../../services/api/crm';
 import { getErrorMessage } from '../../utils/errorHandler';
 import type { NbaCard, NbaDismissReason } from '../../services/api/crm';
 
-// The server's D69 answer when the call is saved but the next reminder is not
-// (crm.py _NEXT_NOT_SET).
-const CALL_SAVED = 'Call saved. The next reminder was NOT set.';
+// The server's answers when the call is saved but a later step is not: the
+// next reminder (D69, crm.py _NEXT_NOT_SET) or the audit record (D84,
+// _AUDIT_NOT_WRITTEN). Entries lock so Retry sends the SAME request.
+const CALL_SAVED = 'Call saved.';
 
 const SKIP_REASONS: { value: NbaDismissReason; label: string }[] = [
   { value: 'not_interested', label: 'Not interested' },

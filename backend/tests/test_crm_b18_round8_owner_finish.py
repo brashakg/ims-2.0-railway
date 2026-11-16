@@ -163,7 +163,8 @@ def test_failed_audit_write_is_written_by_the_retry_once(store, audit, door):
     }[door]()
     cid = body["customer_id"]
     audit.fail = 1  # the audit write is lost (worker killed / Mongo blip)
-    assert client.post(url, headers=_hdr(), json=body).status_code == 200
+    # D84 (round 9): never a success without the row; the card stays for Retry
+    assert client.post(url, headers=_hdr(), json=body).status_code == 503
     assert _for(audit, cid) == []
     for _ in range(2):  # Retry, then a double press
         assert client.post(url, headers=_hdr(), json=body).status_code == 200

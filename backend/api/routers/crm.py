@@ -819,15 +819,25 @@ _OUTCOME_NOT_SAVED = (
 )
 _ALREADY_RECORDED = "This call was already recorded; its outcome is kept. Reload the list."
 _LIST_UNREADABLE = "Today's list could not be read; try again."
+# D87: a Skip or changed entry on a call another action already saved.
 _CHANGED_DETAILS = (
-    "This call was already recorded with different details; the saved outcome "
-    "is kept. Reload the list."
+    "This call was already saved. The saved outcome is kept and its next "
+    "reminder is set. Reload the list."
 )
 # D69: the call is saved but the next reminder is not -- said plainly, and the
 # card stays on the list; pressing Retry (the same request) sets it once.
 _NEXT_NOT_SET = (
     "Call saved. The next reminder was NOT set. Press Retry; the call is not "
     "recorded twice."
+)
+# D84: the action's audit row is written before success is answered; when it
+# is not, the card stays and the same request pressed again writes it once.
+_AUDIT_NOT_WRITTEN = (
+    "Call saved. Its audit record was NOT written. Press Retry; the call is "
+    "not recorded twice."
+)
+_AUDIT_NOT_WRITTEN_NOTHING_SAVED = (
+    "Nothing was saved: the audit record could not be written. Try again."
 )
 
 
@@ -910,14 +920,16 @@ def _schedule_next_once_or_clear(db, next_doc, action_key, call_saved, coll, sto
     try:
         return _schedule_next_once(db, next_doc, action_key, call_saved)
     except HTTPException as exc:
-        if exc.status_code == 409 and on_list:
-            _mark_list_entry_done(coll, store_id, day, array, customer_id)
+        if exc.status_code == 409:
+            _finish_other_action_at(db, next_doc["follow_up_id"], action_key)
+            if on_list:
+                _mark_list_entry_done(coll, store_id, day, array, customer_id)
         raise
 
 
 def _close_linked_follow_up(
     db, follow_up_id: str, store_id: str, update: dict, action_key: str,
-    next_doc: Optional[dict] = None,
+    saved_audit: dict, next_doc: Optional[dict] = None,
 ) -> str:
     """Close the follow-up a work-list card is linked to, through THE open
     predicate the follow-ups page uses (follow_ups.close_open_follow_up):
@@ -929,7 +941,7 @@ def _close_linked_follow_up(
     from .follow_ups import close_open_follow_up
 
     update = {**update, "$set": {**update["$set"], "action_key": action_key,
-                                 "requested_next": next_doc}}
+                                 "requested_next": next_doc, "saved_audit": saved_audit}}
     coll = db.get_collection("follow_ups")
     fu = {}
     try:
@@ -954,10 +966,32 @@ def _finish_saved_action(db, record: dict) -> None:
     next reminder THAT action asked for (once, under its key, with its date)
     so the card can leave the list without losing it (D69). Nothing to finish
     (no reminder asked for, or already written) is a no-op; a failed write is
-    the 503 "Call saved. The next reminder was NOT set." and the card stays."""
-    next_doc = (record or {}).get("requested_next")
-    if next_doc and record.get("action_key"):
-        _schedule_next_once(db, next_doc, record["action_key"], call_saved=True)
+    the 503 "Call saved. The next reminder was NOT set." and the card stays.
+    Then THAT action's own audit row (D84), fixed id, once: its request may
+    have ended in a 503 before the row was written, and staff moved on."""
+    key = (record or {}).get("action_key")
+    if not key:
+        return
+    if record.get("requested_next"):
+        _schedule_next_once(db, record["requested_next"], key, call_saved=True)
+    if record.get("saved_audit"):
+        _nba_audit(record["saved_audit"], key)
+
+
+def _finish_other_action_at(db, follow_up_id: str, action_key: str) -> bool:
+    """The record ``follow_up_id`` was written by ANOTHER work-list action
+    (a next reminder of an unlinked card): finish that action (its audit row)
+    before this press is refused or the card leaves the list. A read failure
+    is a 503; the card stays."""
+    try:
+        rec = db.get_collection("follow_ups").find_one({"follow_up_id": follow_up_id})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[CRM] record %s unreadable: %s", follow_up_id, exc)
+        raise HTTPException(status_code=503, detail=_LIST_UNREADABLE)
+    if rec and rec.get("action_key") and rec["action_key"] != action_key:
+        _finish_saved_action(db, rec)
+        return True
+    return False
 
 
 def _refuse_closed_by_another(state, coll, store_id, day, array, customer_id) -> None:
@@ -976,14 +1010,19 @@ def _refuse_closed_by_another(state, coll, store_id, day, array, customer_id) ->
 def _replay_or_refuse(db, action_key: str, record_ids: list) -> None:
     """The card is already off today's list. The SAME action pressed again
     (a retry after a lost answer, a double press) is recognised by a record it
-    wrote and goes on -- every step after this is write-once, so it repeats
-    nothing and answers with the same ids. Anything else is a 409. A read
+    wrote (or by its audit row) and goes on -- every step after this is
+    write-once, so it repeats nothing and answers with the same ids. Anything else is a 409. A read
     failure is a 503, never a guess."""
     ids = [i for i in record_ids if i]
     try:
         mine = bool(ids) and db.get_collection("follow_ups").find_one(
             {"follow_up_id": {"$in": ids}, "action_key": action_key}
         ) is not None
+        if not mine:
+            # A card with no record to key on (no follow-up, no next date):
+            # its audit row, written before the card left the list (D84).
+            arepo = get_audit_repository()
+            mine = arepo is not None and bool(arepo.find_by_id(f"AUD-CRM-{action_key}"))
     except Exception as exc:  # noqa: BLE001
         logger.warning("[CRM] replay check failed: %s", exc)
         raise HTTPException(status_code=503, detail=_OUTCOME_NOT_SAVED)
@@ -1008,42 +1047,60 @@ def _mark_list_entry_done(coll, store_id: str, day: str, array: str, customer_id
         )
 
 
-def _nba_audit(
-    action: str, customer_id: str, store_id: str, current_user: dict, detail: dict,
-    action_key: str,
-) -> None:
+def _audit_spec(action: str, customer_id: str, store_id: str, current_user: dict,
+                detail: dict) -> dict:
+    """The audit row one work-list action owes, decided BEFORE its first
+    write and stored on every record it writes (``saved_audit``), so whoever
+    finishes the action later writes the row with the action's own user."""
+    return {
+        "action": action,
+        "entity_id": customer_id,
+        "store_id": store_id,
+        "user_id": current_user.get("user_id") or current_user.get("id"),
+        "user_name": current_user.get("full_name") or current_user.get("username"),
+        "after_state": detail,
+    }
+
+
+def _nba_audit(spec: dict, action_key: str, saved: bool = True) -> None:
     """THE audit row of one work-list action, ONE per action: its id is fixed
-    by the action (``action_key``) and ``_id`` is unique in Mongo, so a retry
-    after a lost answer, a double press or two overlapping identical requests
-    store it once, and a row whose write failed (or whose worker died) is
-    written by the next retry -- never lost, never doubled. Fail-soft: never
-    undoes the work-list write."""
+    by the action (``AUD-CRM-<action_key>``) and ``_id`` is unique in Mongo, so
+    a retry after a lost answer or a double press stores it once. D84: it is
+    written AND read back before success is answered; a missing repository, a
+    failed write or a row that cannot be confirmed is a 503 with the card
+    still on the list, and the identical retry writes it. Two overlapping
+    identical requests store one row, but the loser's claimed audit_chain seq
+    is left without a row -- the pre-existing audit_chain limit, not made safe
+    here (GET /audit/verify reports the gap)."""
     log_id = f"AUD-CRM-{action_key}"
+    arepo = None
     try:
         arepo = get_audit_repository()
-        if arepo is None:
-            return
-        find = getattr(arepo, "find_by_id", None)  # AuditRepository has it
-        if find is not None and find(log_id):
-            return
-        arepo.create(
-            {
-                "log_id": log_id,
-                "action": action,
-                "entity_type": "customer",
-                "entity_id": customer_id,
-                "user_id": current_user.get("user_id") or current_user.get("id"),
-                "user_name": current_user.get("full_name")
-                or current_user.get("username"),
-                "store_id": store_id,
-                "severity": "INFO",
-                "source": "crm.nba",
-                "before_state": {},
-                "after_state": detail,
-            }
+        if arepo is not None and not arepo.find_by_id(log_id):
+            arepo.create(
+                {
+                    "log_id": log_id,
+                    "action": spec["action"],
+                    "entity_type": "customer",
+                    "entity_id": spec["entity_id"],
+                    "user_id": spec.get("user_id"),
+                    "user_name": spec.get("user_name"),
+                    "store_id": spec.get("store_id"),
+                    "severity": "INFO",
+                    "source": "crm.nba",
+                    "before_state": {},
+                    "after_state": spec.get("after_state") or {},
+                }
+            )
+        written = arepo is not None and bool(arepo.find_by_id(log_id))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[CRM] audit row %s not written: %s", log_id, exc)
+        written = False
+    if not written:
+        raise HTTPException(
+            status_code=503,
+            detail=_AUDIT_NOT_WRITTEN if saved else _AUDIT_NOT_WRITTEN_NOTHING_SAVED,
         )
-    except Exception:  # noqa: BLE001
-        pass
 
 
 @router.get("/nba/{store_id}")
@@ -1134,6 +1191,8 @@ async def dismiss_nba_card(
                       reason=body.reason)
     if card and card.get("dismissed"):
         _replay_or_refuse(db, key, [follow_up_id])
+    spec = _audit_spec("nba.dismissed", body.customer_id, store_id, current_user,
+                       {"reason": body.reason, "follow_up_id": follow_up_id})
 
     # Outcome first, through the shared open predicate: a closed follow-up
     # keeps its outcome (409), a failed write is a 503 and the card stays.
@@ -1147,21 +1206,21 @@ async def dismiss_nba_card(
                 current_user.get("user_id") or current_user.get("id"),
                 utc_now_iso(),
             ),
-            key,
+            key, spec,
         )
         _refuse_closed_by_another(state, scores, store_id, target_date, "cards",
                                   body.customer_id)
+    elif card and _finish_other_action_at(
+            db, _day_record_id("next", "nba", store_id, target_date, body.customer_id), key):
+        # An unlinked card another action already saved (its next reminder):
+        # that action is finished (its audit row) and its outcome is kept.
+        _refuse_closed_by_another("other_action", scores, store_id, target_date, "cards",
+                                  body.customer_id)
+
+    # D84: the audit row BEFORE the card leaves the list and success is said.
+    _nba_audit(spec, key, saved=bool(follow_up_id))
     if card:
         _mark_list_entry_done(scores, store_id, target_date, "cards", body.customer_id)
-
-    _nba_audit(
-        "nba.dismissed",
-        body.customer_id,
-        store_id,
-        current_user,
-        {"reason": body.reason, "follow_up_id": follow_up_id},
-        key,
-    )
     return {"ok": True}
 
 
@@ -1212,6 +1271,13 @@ async def complete_nba_card(
             "created_at": now_iso,
         },
     ) if body.follow_up_scheduled_date else None
+    spec = _audit_spec(
+        "nba.completed", body.customer_id, store_id, current_user,
+        {"follow_up_id": follow_up_id,
+         "next_follow_up_id": next_doc["follow_up_id"] if next_doc else None},
+    )
+    if next_doc:
+        next_doc["saved_audit"] = spec
     call_saved = False
     if follow_up_id:
         from .follow_ups import close_follow_up_update
@@ -1226,11 +1292,17 @@ async def complete_nba_card(
             close_follow_up_update(
                 "completed", "completed", body.outcome_notes, user_id, now_iso
             ),
-            key, next_doc,
+            key, spec, next_doc,
         )
         _refuse_closed_by_another(state, scores, store_id, target_date, "cards",
                                   body.customer_id)
         call_saved = state in ("closed", "own")
+    elif card and _finish_other_action_at(
+            db, _day_record_id("next", "nba", store_id, target_date, body.customer_id), key):
+        # An unlinked card another action already saved (its next reminder):
+        # that action is finished (its audit row) and its outcome is kept.
+        _refuse_closed_by_another("other_action", scores, store_id, target_date, "cards",
+                                  body.customer_id)
 
     # D69: the next reminder BEFORE the card leaves the list, written once.
     next_follow_up_id = None
@@ -1239,17 +1311,10 @@ async def complete_nba_card(
             db, next_doc, key, call_saved, scores, store_id, target_date, "cards",
             body.customer_id, bool(card),
         )
+    # D84: the audit row BEFORE the card leaves the list and success is said.
+    _nba_audit(spec, key, saved=call_saved or bool(next_follow_up_id))
     if card:
         _mark_list_entry_done(scores, store_id, target_date, "cards", body.customer_id)
-
-    _nba_audit(
-        "nba.completed",
-        body.customer_id,
-        store_id,
-        current_user,
-        {"follow_up_id": follow_up_id, "next_follow_up_id": next_follow_up_id},
-        key,
-    )
     return {"ok": True, "next_follow_up_id": next_follow_up_id}
 
 
@@ -1412,6 +1477,13 @@ async def log_reactivation_outcome(
             f"reactivation|{store_id}|{target_date}|{body.customer_id}".encode()
         ).hexdigest()[:8].upper(),
     )
+    spec = _audit_spec(
+        "reactivation.logged", body.customer_id, store_id, current_user,
+        {"outcome": body.outcome, "follow_up_id": follow_up_id or own_record_id,
+         "next_follow_up_id": next_doc["follow_up_id"] if next_doc else None},
+    )
+    if next_doc:
+        next_doc["saved_audit"] = spec
     if entry.get("dismissed"):
         _replay_or_refuse(db, key, [
             follow_up_id or own_record_id,
@@ -1424,7 +1496,7 @@ async def log_reactivation_outcome(
         state = _close_linked_follow_up(
             db, follow_up_id, store_id,
             close_follow_up_update(status, body.outcome, body.notes, user_id, now_iso),
-            key, next_doc,
+            key, spec, next_doc,
         )
         _refuse_closed_by_another(state, cohorts, store_id, target_date, "entries",
                                   body.customer_id)
@@ -1456,6 +1528,7 @@ async def log_reactivation_outcome(
                     "completed_at": now_iso,
                     "completed_by": user_id,
                     "requested_next": next_doc,
+                    "saved_audit": spec,
                 },
                 key,
             )
@@ -1482,20 +1555,9 @@ async def log_reactivation_outcome(
             db, next_doc, key, call_saved, cohorts, store_id, target_date, "entries",
             body.customer_id, True,
         )
+    # D84: the audit row BEFORE the entry leaves the list and success is said.
+    _nba_audit(spec, key)
     _mark_list_entry_done(cohorts, store_id, target_date, "entries", body.customer_id)
-
-    _nba_audit(
-        "reactivation.logged",
-        body.customer_id,
-        store_id,
-        current_user,
-        {
-            "outcome": body.outcome,
-            "follow_up_id": follow_up_id,
-            "next_follow_up_id": next_follow_up_id,
-        },
-        key,
-    )
     return {
         "ok": True,
         "follow_up_id": follow_up_id,
