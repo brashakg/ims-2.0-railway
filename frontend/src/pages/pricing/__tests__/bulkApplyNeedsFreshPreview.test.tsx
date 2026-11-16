@@ -97,7 +97,10 @@ describe.each([
   ['price', 'Bulk price update', bulkPrice, { old_mrp: 1000 }],
   ['offer', 'Bulk offer update', bulkOffer, { mrp: 1000 }],
 ])('%s tab: lost acknowledgement', (_k, tabLabel, fn, mrpField) => {
-  const row = { product_id: 'P-1', sku: 'S-1', old_offer_price: 1000, new_offer_price: 1010, ok: true, changed: true, ...mrpField };
+  const row = {
+    product_id: 'P-1', sku: 'S-1', old_offer_price: 1000, new_offer_price: 1010, ok: true, changed: true,
+    version: '2026-11-16T10:00:00.123000', ...mrpField,
+  };
   const withRow = { rows: [row], summary: { counts: { valid: 1, violations: 0, total: 1, unchanged: 0 }, committed: 0 } };
 
   it('sends the reviewed rows, and a failed Apply cannot be clicked again until a fresh preview', async () => {
@@ -113,7 +116,7 @@ describe.each([
     await waitFor(() => expect(pending.some((p) => p.args.apply)).toBe(true));
     const sent = pending.find((p) => p.args.apply)!;
     expect((sent.args as unknown as { expected: unknown }).expected).toEqual([
-      { product_id: 'P-1', mrp: 1000, offer_price: 1000 },
+      { product_id: 'P-1', mrp: 1000, offer_price: 1000, version: '2026-11-16T10:00:00.123000' },
     ]);
     // The write landed, the reply did not.
     await act(async () => {
@@ -157,7 +160,7 @@ describe.each([
     const [first, retry] = pending.filter((p) => p.args.apply);
     expect(retry.args).toEqual(first.args);
     expect((retry.args as unknown as { expected: unknown }).expected).toEqual([
-      { product_id: 'P-1', mrp: 1000, offer_price: 1000 },
+      { product_id: 'P-1', mrp: 1000, offer_price: 1000, version: '2026-11-16T10:00:00.123000' },
     ]);
     // While the retry runs it cannot be sent a third time.
     expect(screen.getByRole('button', { name: 'Retry the same Apply' })).toBeDisabled();
@@ -189,5 +192,28 @@ describe.each([
       pending.filter((p) => !p.args.apply).forEach((p) => p.resolve({ ...withRow, rows: [recent] }));
     });
     expect(await screen.findByText(/1 row was changed by a bulk Apply in the last hour/)).toBeTruthy();
+  });
+
+  // D94: the Apply sends each row's preview version; a row someone changed
+  // since is left alone by the server and must not read as a green 'OK'.
+  it('a row the Apply left alone shows "Changed since preview: not saved"', async () => {
+    render(<PricingOffersPage />);
+    fireEvent.click(await screen.findByRole('button', { name: tabLabel }));
+    fireEvent.change(brandSelect(), { target: { value: 'BRAND A' } });
+    await waitFor(() => expect(asked('BRAND A')).toBe(true), { timeout: 2000 });
+    await act(async () => {
+      pending.filter((p) => !p.args.apply).forEach((p) => p.resolve(withRow));
+    });
+    fireEvent.click(await screen.findByRole('button', { name: 'Apply 1 valid row' }));
+    await waitFor(() => expect(pending.some((p) => p.args.apply)).toBe(true));
+    const left = { ...row, applied: false, reason: 'CHANGED_SINCE_PREVIEW', message: 'Changed since preview' };
+    await act(async () => {
+      pending.find((p) => p.args.apply)!.resolve({
+        rows: [left],
+        summary: { ...withRow.summary, applied: true, counts: { ...withRow.summary.counts, changed_since_preview: 1 } },
+      });
+    });
+    expect(await screen.findByText('Changed since preview: not saved')).toBeTruthy();
+    expect(screen.queryByText(/^OK/)).toBeNull();
   });
 });

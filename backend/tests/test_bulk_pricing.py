@@ -39,6 +39,7 @@ import asyncio
 import os
 import sys
 import uuid
+from datetime import datetime
 from typing import Any, Dict, List
 
 import pytest
@@ -281,7 +282,7 @@ def _expected_of(preview: Dict[str, Any]) -> List[Any]:
     from api.routers.products import BulkReviewedRow
 
     return [
-        BulkReviewedRow(product_id=r["product_id"], mrp=r.get("old_mrp", r.get("mrp")), offer_price=r["old_offer_price"])
+        BulkReviewedRow(product_id=r["product_id"], mrp=r.get("old_mrp", r.get("mrp")), offer_price=r["old_offer_price"], version=r.get("version", ""))
         for r in preview["rows"]
     ]
 
@@ -621,6 +622,24 @@ class TestApplyBoundToReviewedRows:
         doc = _get_product(mongo_db, pids[0])
         assert (doc["mrp"], doc["offer_price"]) == (1010.0, 1010.0)
 
+    async def test_a_row_moved_back_to_its_old_price_is_never_reapplied(self, mongo_db, patch_db):
+        """D94(1) ABA: W1 lands 1000 -> 1010, someone edits it back to 1000,
+        then W1's identical retry arrives. The price matches the preview
+        again, but the row's version does not: left alone, never 1010 again."""
+        from database.repositories.product_repository import ProductRepository
+        from api.routers.products import bulk_price_update
+
+        pids = _seed_products(mongo_db, _sample_catalog())
+        apply = await self._preview_then_apply(bulk_price_update, self._plus10())
+        assert (await bulk_price_update(apply, ADMIN_USER))["summary"]["committed"] == 1
+        assert ProductRepository(mongo_db["products"]).update(pids[0], {"mrp": 1000.0, "offer_price": 1000.0})
+        again = await bulk_price_update(apply, ADMIN_USER)
+        assert again["summary"]["committed"] == 0
+        assert again["summary"]["counts"]["changed_since_preview"] == 1
+        assert again["rows"][0]["reason"] == "CHANGED_SINCE_PREVIEW"
+        doc = _get_product(mongo_db, pids[0])
+        assert (doc["mrp"], doc["offer_price"]) == (1000.0, 1000.0)
+
     async def test_a_row_added_after_the_preview_refuses_the_whole_apply(self, mongo_db, patch_db):
         from fastapi import HTTPException
         from api.routers.products import bulk_offer_update, bulk_price_update, BulkOfferRequest
@@ -641,16 +660,17 @@ class TestApplyBoundToReviewedRows:
             assert (doc["mrp"], doc["offer_price"]) == (1000.0, 1000.0), doc["sku"]
         assert mongo_db["audit_logs"].count_documents({}) == 0
 
-    async def test_a_price_edited_after_the_preview_refuses_and_keeps_the_edit(self, mongo_db, patch_db):
-        from fastapi import HTTPException
+    async def test_a_price_edited_after_the_preview_is_left_alone_and_keeps_the_edit(self, mongo_db, patch_db):
+        """D94(1): a row changed since the preview is reported and left alone."""
         from api.routers.products import bulk_price_update
 
         pids = _seed_products(mongo_db, _sample_catalog())
         apply = await self._preview_then_apply(bulk_price_update, self._plus10())
         mongo_db["products"].update_one({"product_id": pids[0]}, {"$set": {"offer_price": 900.0}})
-        with pytest.raises(HTTPException) as ei:
-            await bulk_price_update(apply, ADMIN_USER)
-        assert ei.value.status_code == 409
+        res = await bulk_price_update(apply, ADMIN_USER)
+        assert res["summary"]["committed"] == 0
+        assert res["summary"]["counts"]["changed_since_preview"] == 1
+        assert res["rows"][0]["reason"] == "CHANGED_SINCE_PREVIEW" and res["rows"][0]["applied"] is False
         doc = _get_product(mongo_db, pids[0])
         assert (doc["mrp"], doc["offer_price"]) == (1000.0, 900.0)
 
@@ -664,36 +684,44 @@ class TestApplyBoundToReviewedRows:
         assert ei.value.status_code == 422
         assert _get_product(mongo_db, pids[0])["mrp"] == 1000.0
 
-    @pytest.mark.parametrize("racer_value,want", [(1010.0, "already"), (1234.0, "refused")])
+    @pytest.mark.parametrize("racer_value,want", [("same-apply", "applied"), (1010.0, "refused"), (1234.0, "refused")])
     async def test_a_concurrent_write_between_check_and_write_moves_the_row_once(
         self, mongo_db, patch_db, monkeypatch, racer_value, want
     ):
-        """Two Applies of one preview at once (or an editor) write the row
+        """The identical retry of this Apply (or an editor) writes the row
         between this Apply's check and its write: the compare-and-set write
-        does not land, so the row never moves twice."""
+        does not land, so the row never moves twice. The identical retry's
+        write is this Apply's own (D94: same Apply id); anyone else's -- even
+        to the same price -- is 'changed since preview' and left alone."""
         import api.routers.products as products_mod
 
         pids = _seed_products(mongo_db, _sample_catalog())
         apply = await self._preview_then_apply(products_mod.bulk_price_update, self._plus10())
         checked = products_mod._reviewed_states  # pylint: disable=protected-access
 
+        same = racer_value == "same-apply"
+        value = 1010.0 if same else racer_value
+        racer = {"mrp": value, "offer_price": value, "updated_at": datetime.now()}
+        if same:
+            racer["bulk_write_id"] = products_mod._bulk_apply_id(  # pylint: disable=protected-access
+                "BULK_PRICE_UPDATE", ADMIN_USER, apply
+            )
+
         def racing(*a, **kw):
             out = checked(*a, **kw)
-            mongo_db["products"].update_one(
-                {"product_id": pids[0]}, {"$set": {"mrp": racer_value, "offer_price": racer_value}}
-            )
+            mongo_db["products"].update_one({"product_id": pids[0]}, {"$set": racer})
             return out
 
         monkeypatch.setattr(products_mod, "_reviewed_states", racing)
         res = await products_mod.bulk_price_update(apply, ADMIN_USER)
         row = res["rows"][0]
-        assert res["summary"]["committed"] == 0 and row["applied"] is False
-        if want == "already":
-            assert row["already_applied"] is True
+        if want == "applied":
+            assert res["summary"]["committed"] == 1 and row["applied"] is True
         else:
+            assert res["summary"]["committed"] == 0 and row["applied"] is False
             assert row["reason"] == "CHANGED_SINCE_PREVIEW"
         doc = _get_product(mongo_db, pids[0])
-        assert (doc["mrp"], doc["offer_price"]) == (racer_value, racer_value)
+        assert (doc["mrp"], doc["offer_price"]) == (value, value)
 
     async def test_a_failed_read_is_503_never_an_empty_or_unscoped_preview(self, mongo_db, patch_db, monkeypatch):
         from fastapi import HTTPException

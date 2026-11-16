@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from datetime import datetime, timedelta
 import logging
 import hashlib
+import json
 import random
 import uuid
 from .auth import get_current_user, require_roles
@@ -785,12 +786,14 @@ class BulkScopeFilter(BaseModel):
 
 
 class BulkReviewedRow(BaseModel):
-    """One previewed row as the operator saw it: its id and the MRP / offer
-    price BEFORE the change."""
+    """One previewed row as the operator saw it: its id, the MRP / offer
+    price BEFORE the change and the row's version."""
 
     product_id: str = Field(..., min_length=1)
     mrp: float = Field(..., allow_inf_nan=False)
     offer_price: float = Field(..., allow_inf_nan=False)
+    # D94: the row's version in that preview (the preview row's `version`).
+    version: str = Field(..., max_length=64)
 
 
 class BulkPriceRequest(BulkScopeFilter):
@@ -1482,21 +1485,43 @@ def _fetch_scoped_products(flt: BulkScopeFilter) -> List[dict]:
     return products
 
 
-def _reviewed_states(body: BulkScopeFilter, products: List[dict], compute) -> Dict[str, tuple]:
-    """L1-F47: bind an Apply to the exact rows and prices its preview showed.
+def _price_version(product: dict) -> str:
+    """D94: the version a preview shows for a row. Every product write
+    through the repository stamps updated_at, so a row written by anyone
+    since the preview -- even back to its old price -- has a new version."""
+    at = product.get("updated_at")
+    return at.isoformat() if isinstance(at, datetime) else str(at or "")
 
-    The scope is re-read at apply time, so without this a product added to
-    the scope (or edited) after the preview was changed unseen, and a lost
-    reply retried re-applied a delta (+10 became +20). Every row must still
-    be either exactly as previewed ("pending": write it) or exactly at the
-    previewed result ("done": an earlier Apply of this preview landed; never
-    written again). Anything else -- a row added or gone, or a price someone
-    else changed -- refuses the whole Apply with 409 and writes nothing.
+
+def _bulk_apply_id(action: str, user: dict, body: BulkScopeFilter) -> str:
+    """D94: one id per Apply, the same for its identical retry: the user,
+    the operation and the reviewed rows WITH the versions they were
+    previewed at. Stamped on every product the Apply writes (bulk_write_id),
+    so a retry recognises its own landed rows; a fresh preview after a
+    landed Apply sees new versions and so is a new Apply. The free-text
+    reason is not part of it."""
+    payload = body.model_dump(mode="json", exclude={"apply", "reason", "limit", "expected"})
+    rows = sorted((e.product_id, e.mrp, e.offer_price, e.version) for e in body.expected or [])
+    raw = json.dumps([action, user.get("user_id"), payload, rows], sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode()).hexdigest()[:32]
+
+
+def _reviewed_states(body: BulkScopeFilter, products: List[dict], compute, apply_id: str) -> Dict[str, tuple]:
+    """L1-F47 / D94: bind an Apply to the exact rows, prices and versions its
+    preview showed.
+
+    The scope is re-read at apply time, so a row added to or gone from the
+    scope refuses the whole Apply with 409 and writes nothing. Each row is
+    then "done" (this Apply -- or its identical retry -- already wrote it:
+    bulk_write_id is this Apply's id and the price is the result), "pending"
+    (still exactly the previewed price AND version: write it, compare-and-set
+    on that version) or "changed" (written by anyone since the preview,
+    including back to its old price: reported 'changed since preview' and
+    left alone; never a second +10).
 
     `compute(mrp, offer) -> (new_mrp, new_offer)` is the operation itself.
-    Returns {product_id: ("pending" | "done", stored prices)}; sets each
-    product's mrp / offer_price to the reviewed values so the rows report
-    exactly what was reviewed (equal to the stored ones for a pending row).
+    Returns {product_id: (state, stored fence)}; sets each product's mrp /
+    offer_price to the reviewed values so the rows report what was reviewed.
     """
     if body.expected is None:
         raise HTTPException(
@@ -1516,28 +1541,20 @@ def _reviewed_states(body: BulkScopeFilter, products: List[dict], compute) -> Di
             ),
         )
     states: Dict[str, tuple] = {}
-    moved: List[str] = []
     for p in products:
         e = reviewed[p["product_id"]]
         was = (_round_money(e.mrp), _round_money(e.offer_price))
         new = tuple(_round_money(v) for v in compute(e.mrp, e.offer_price))
         cur = (_round_money(float(p.get("mrp") or 0)), _round_money(float(p.get("offer_price") or 0)))
-        stored = {"mrp": p.get("mrp"), "offer_price": p.get("offer_price")}
-        if cur == was:
-            states[p["product_id"]] = ("pending", stored)
-        elif cur == new:
+        # The fence for the write: the stored values just read, version included.
+        stored = {"mrp": p.get("mrp"), "offer_price": p.get("offer_price"), "updated_at": p.get("updated_at")}
+        if p.get("bulk_write_id") == apply_id and cur == new:
             states[p["product_id"]] = ("done", stored)
+        elif cur == was and _price_version(p) == e.version:
+            states[p["product_id"]] = ("pending", stored)
         else:
-            moved.append(p.get("sku") or p["product_id"])
+            states[p["product_id"]] = ("changed", stored)
         p["mrp"], p["offer_price"] = e.mrp, e.offer_price
-    if moved:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"{len(moved)} product price(s) changed since your preview ({', '.join(moved[:5])}). "
-                "Nothing was changed: preview again."
-            ),
-        )
     return states
 
 
@@ -1546,17 +1563,23 @@ def _stored_doc(repo, pid: str) -> dict:
     return repo.collection.find_one({"product_id": pid}) or {}
 
 
-def _write_reviewed_price(repo, pid: str, stored: dict, data: dict, target: dict, row: dict) -> str:
-    """Compare-and-set one reviewed row: lands only while the stored prices
-    are still the ones just checked, so two Applies of one preview at once
-    move each row once. `data` carries this Apply's `bulk_write_id`.
+def _mark_changed_since_preview(row: dict) -> None:
+    row["applied"] = False
+    row["reason"] = "CHANGED_SINCE_PREVIEW"
+    row["message"] = "Changed since preview: left alone. Preview again to change it."
 
-    Returns "applied" (this Apply's write landed -- also when the database
-    raised after landing it: the re-read finds this Apply's write id),
-    "already" (another Apply of the preview wrote it), "refused" (someone
-    else changed it) or "uncertain" (a database error, and the row could not
-    be read back or still shows the old price: the caller answers 503 so the
-    page holds the preview and the identical retry finishes it)."""
+
+def _write_reviewed_price(repo, pid: str, stored: dict, data: dict, target: dict, row: dict) -> str:
+    """Compare-and-set one reviewed row on the version (and prices) its
+    preview showed. `data` carries this Apply's `bulk_write_id`.
+
+    Returns "applied" (this Apply's write is on the row -- also when the
+    database raised after landing it, or the identical retry racing it
+    landed the same write: the re-read finds this Apply's id at the result),
+    "refused" (someone else wrote the row: changed since preview, left
+    alone) or "uncertain" (a database error, and the row could not be read
+    back or still shows the old price and version: the caller answers 503
+    so the page holds the preview and the identical retry finishes it)."""
     raised = False
     try:
         if repo.update(pid, data, expected=stored):
@@ -1571,37 +1594,37 @@ def _write_reviewed_price(repo, pid: str, stored: dict, data: dict, target: dict
     except Exception as exc:  # noqa: BLE001
         logger.warning("[BULK-PRICING] read-back for %s failed: %s", pid, exc)
         doc = None
-    if doc is not None and all(_round_money(float(doc.get(k) or 0)) == v for k, v in target.items()):
-        if doc.get("bulk_write_id") == data["bulk_write_id"]:
-            row["applied"] = True
-            return "applied"
-        row["already_applied"] = True
-        return "already"
-    if raised or doc is None:
+    if (
+        doc is not None
+        and doc.get("bulk_write_id") == data["bulk_write_id"]
+        and all(_round_money(float(doc.get(k) or 0)) == v for k, v in target.items())
+    ):
+        row["applied"] = True
+        return "applied"
+    if doc is None or raised:
         row["reason"] = "NOT_CONFIRMED"
         row["message"] = "Not confirmed saved; retry the same Apply."
         return "uncertain"
-    row["reason"] = "CHANGED_SINCE_PREVIEW"
-    row["message"] = "This price changed while the bulk change ran; preview again."
+    _mark_changed_since_preview(row)
     return "refused"
 
 
-def _audit_bulk(action: str, user: dict, summary: dict, groups: Dict[str, List[dict]]) -> None:
-    """D84: one immutable audit entry per Apply that wrote prices, under a
-    fixed id (action + that Apply's bulk_write_id, stamped on every product
-    it wrote). Written before the request answers success; an identical
-    retry finds the entry and never writes a second, and names a landed row
-    whose own Apply never got its entry written (recovered). An entry that
-    cannot be written RAISES 503, so the page holds the preview and offers
-    the identical retry, which writes it once."""
+def _audit_bulk(action: str, user: dict, summary: dict, apply_id: str, changes: List[dict]) -> None:
+    """D84 / D94: one immutable audit entry per Apply PER PRODUCT, under a
+    fixed id (action : Apply id : product id). Written for every row the
+    Apply confirmed before the request answers -- success or 503. The
+    identical retry (same Apply id) writes only the entries still missing,
+    so a retry racing the original never hides the original's later rows
+    and never doubles one. An entry that cannot be written RAISES 503, so
+    the page holds the preview and offers the identical retry."""
     from ..dependencies import get_audit_repository
 
     audit = get_audit_repository()
     try:
         if audit is None:
             raise RuntimeError("audit repository unavailable")
-        for wid, rows in groups.items():
-            log_id = f"{action}:{wid}"
+        for change in changes:
+            log_id = f"{action}:{apply_id}:{change['product_id']}"
             if audit.collection.find_one({"log_id": log_id}, {"_id": 1}):
                 continue
             audit.create(
@@ -1609,23 +1632,17 @@ def _audit_bulk(action: str, user: dict, summary: dict, groups: Dict[str, List[d
                     "log_id": log_id,
                     "action": action,
                     "entity_type": "product_price",
-                    "entity_id": wid,
+                    "entity_id": change["product_id"],
                     "store_id": summary.get("store_id"),
                     "user_id": user.get("user_id"),
                     "severity": "WARNING",  # bulk price moves are notable events
                     "timestamp": datetime.utcnow(),
                     "created_at": datetime.utcnow(),
-                    "details": {
-                        "summary": summary,
-                        # Cap the embedded diff list so a 5,000-row op doesn't write
-                        # a multi-MB audit doc; the summary always has full counts.
-                        "changes": rows[:500],
-                        "changes_truncated": len(rows) > 500,
-                    },
+                    "details": {"apply_id": apply_id, "summary": summary, "changes": [change]},
                 }
             )
-            # create() is fail-soft (None); a racing identical retry may have
-            # written the same id -- either way the entry must now exist.
+            # create() is fail-soft (None) and the id is the _id: a racing
+            # identical retry may have written it -- either way it must exist.
             if not audit.collection.find_one({"log_id": log_id}, {"_id": 1}):
                 raise RuntimeError(f"audit entry {log_id} not written")
     except Exception as exc:  # noqa: BLE001
@@ -1639,12 +1656,12 @@ def _audit_bulk(action: str, user: dict, summary: dict, groups: Dict[str, List[d
         ) from exc
 
 
-def _finish_bulk_apply(action: str, user: dict, summary: dict, write_id: str,
+def _finish_bulk_apply(action: str, user: dict, summary: dict, apply_id: str,
                        committed: List[dict], recovered: List[dict], uncertain: int) -> None:
-    """The end of every bulk Apply (price and offer). A row whose write
-    raised and could not be confirmed answers 503 (the identical retry
-    finishes it and writes the audit); otherwise the audit entries are
-    written before success is answered (_audit_bulk)."""
+    """The end of every bulk Apply (price and offer). Every row this Apply
+    confirmed (written now, or by its earlier attempt) is audited FIRST
+    (D94(2)); then a row whose write raised and could not be confirmed
+    answers 503 (the identical retry finishes it and audits it)."""
     if committed or recovered:
         try:
             from ..services.cache import invalidate_product_lists
@@ -1652,6 +1669,7 @@ def _finish_bulk_apply(action: str, user: dict, summary: dict, write_id: str,
             invalidate_product_lists()
         except Exception:  # noqa: BLE001
             pass
+        _audit_bulk(action, user, summary, apply_id, committed + recovered)
     if uncertain:
         raise HTTPException(
             status_code=503,
@@ -1660,19 +1678,6 @@ def _finish_bulk_apply(action: str, user: dict, summary: dict, write_id: str,
                 "Press Retry the same Apply: rows already saved are not changed again."
             ),
         )
-    groups: Dict[str, List[dict]] = {write_id: committed} if committed else {}
-    unkeyed: List[dict] = []
-    for change in recovered:
-        if change.get("write_id"):
-            groups.setdefault(change["write_id"], []).append(change)
-        else:
-            unkeyed.append(change)
-    if unkeyed:  # saved before write ids existed: a fixed id from the rows
-        groups["unkeyed-" + hashlib.sha256(
-            "|".join(sorted(c["product_id"] for c in unkeyed)).encode()
-        ).hexdigest()[:24]] = unkeyed
-    if groups:
-        _audit_bulk(action, user, summary, groups)
 
 
 def _recent_bulk_change_at(product: dict) -> Optional[str]:
@@ -1787,19 +1792,21 @@ async def bulk_price_update(
             _apply_delta(offer, mode, body.amount) if target in ("OFFER", "BOTH") else offer,
         )
 
-    states = _reviewed_states(body, products, _operation) if body.apply else {}
+    # D94: this Apply's id (the same for its identical retry), stamped on
+    # every product it writes and on its per-product audit entries.
+    write_id = _bulk_apply_id("BULK_PRICE_UPDATE", current_user, body) if body.apply else ""
+    states = _reviewed_states(body, products, _operation, write_id) if body.apply else {}
 
     rows: List[dict] = []
     committed: List[dict] = []
-    # Rows an earlier Apply of this preview already saved: never written
-    # again; named in that Apply's audit entry if it never got written.
+    # Rows this Apply's earlier attempt already saved: never written again;
+    # audited now if that attempt stopped before its audit.
     recovered: List[dict] = []
-    # Stamped on every product this Apply writes: the audit entry's fixed id.
-    write_id = uuid.uuid4().hex
     uncertain = 0
     website_failed = 0
     counts = {
         "total": len(products), "valid": 0, "violations": 0, "unchanged": 0, "already_applied": 0,
+        "changed_since_preview": 0,
     }
 
     repo = get_product_repository()
@@ -1854,6 +1861,8 @@ async def bulk_price_update(
             "message": verdict["message"],
             "changed": changed,
             "recent_bulk_change_at": _recent_bulk_change_at(p),
+            # D94: an Apply sends this back; a row written since is left alone.
+            "version": _price_version(p),
         }
 
         if not verdict["ok"]:
@@ -1865,7 +1874,10 @@ async def bulk_price_update(
 
         # Commit path: only valid + actually-changed rows are written, and a
         # row an earlier Apply of this same preview already moved never is.
-        if body.apply and state == "done" and changed:
+        if body.apply and state == "changed" and changed:
+            _mark_changed_since_preview(row)
+            counts["changed_since_preview"] += 1
+        elif body.apply and state == "done" and changed:
             row["applied"] = False
             row["already_applied"] = True
             counts["already_applied"] += 1
@@ -1876,7 +1888,6 @@ async def bulk_price_update(
                     "mrp": [row["old_mrp"], row["new_mrp"]],
                     "offer_price": [row["old_offer_price"], row["new_offer_price"]],
                     "recovered": True,
-                    "write_id": p.get("bulk_write_id"),
                 }
             )
             # The earlier Apply may have stopped between the billing write and
@@ -1908,8 +1919,8 @@ async def bulk_price_update(
                 price_patch,
                 row,
             )
-            if outcome == "already":
-                counts["already_applied"] += 1
+            if outcome == "refused":
+                counts["changed_since_preview"] += 1
             elif outcome == "uncertain":
                 uncertain += 1
             elif outcome == "applied":
@@ -1980,19 +1991,21 @@ async def bulk_offer_update(
             return mrp, mrp * (1.0 - body.discount_percent / 100.0)
         return mrp, body.offer_price
 
-    states = _reviewed_states(body, products, _operation) if body.apply else {}
+    # D94: this Apply's id (the same for its identical retry), stamped on
+    # every product it writes and on its per-product audit entries.
+    write_id = _bulk_apply_id("BULK_OFFER_UPDATE", current_user, body) if body.apply else ""
+    states = _reviewed_states(body, products, _operation, write_id) if body.apply else {}
 
     rows: List[dict] = []
     committed: List[dict] = []
-    # Rows an earlier Apply of this preview already saved: never written
-    # again; named in that Apply's audit entry if it never got written.
+    # Rows this Apply's earlier attempt already saved: never written again;
+    # audited now if that attempt stopped before its audit.
     recovered: List[dict] = []
-    # Stamped on every product this Apply writes: the audit entry's fixed id.
-    write_id = uuid.uuid4().hex
     uncertain = 0
     website_failed = 0
     counts = {
         "total": len(products), "valid": 0, "violations": 0, "unchanged": 0, "already_applied": 0,
+        "changed_since_preview": 0,
     }
 
     repo = get_product_repository()
@@ -2043,6 +2056,8 @@ async def bulk_offer_update(
             "message": verdict["message"],
             "changed": changed,
             "recent_bulk_change_at": _recent_bulk_change_at(p),
+            # D94: an Apply sends this back; a row written since is left alone.
+            "version": _price_version(p),
         }
 
         if not verdict["ok"]:
@@ -2052,7 +2067,10 @@ async def bulk_offer_update(
         else:
             counts["valid"] += 1
 
-        if body.apply and state == "done" and changed:
+        if body.apply and state == "changed" and changed:
+            _mark_changed_since_preview(row)
+            counts["changed_since_preview"] += 1
+        elif body.apply and state == "done" and changed:
             row["applied"] = False
             row["already_applied"] = True
             counts["already_applied"] += 1
@@ -2062,7 +2080,6 @@ async def bulk_offer_update(
                     "sku": p.get("sku"),
                     "offer_price": [row["old_offer_price"], row["new_offer_price"]],
                     "recovered": True,
-                    "write_id": p.get("bulk_write_id"),
                 }
             )
             # See bulk_price_update: re-carry the website copy only.
@@ -2087,8 +2104,8 @@ async def bulk_offer_update(
                 price_patch,
                 row,
             )
-            if outcome == "already":
-                counts["already_applied"] += 1
+            if outcome == "refused":
+                counts["changed_since_preview"] += 1
             elif outcome == "uncertain":
                 uncertain += 1
             elif outcome == "applied":

@@ -35,6 +35,19 @@ const inr = (n: number | undefined | null): string =>
 // ----------------------------------------------------------------------------
 
 function CapChip({ row }: { row: BulkRowResult }) {
+  // D94: someone changed this row after the preview; the Apply left it alone.
+  if (row.reason === 'CHANGED_SINCE_PREVIEW' || row.reason === 'NOT_CONFIRMED') {
+    const changed = row.reason === 'CHANGED_SINCE_PREVIEW';
+    return (
+      <span
+        title={row.message || undefined}
+        className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-[11px] font-medium bg-amber-100 text-amber-800"
+      >
+        <AlertTriangle className="w-3 h-3" />
+        {changed ? 'Changed since preview: not saved' : 'Not confirmed'}
+      </span>
+    );
+  }
   if (!row.ok) {
     const luxe = row.reason === 'CAP_EXCEEDED';
     return (
@@ -245,7 +258,9 @@ function PreviewTable({ rows, kind }: { rows: BulkRowResult[]; kind: 'price' | '
 // not land, never moves a saved row again, and re-carries its website copy.
 // A fresh Preview instead starts a new change from the prices as they are now.
 const reviewedRowsOf = (rows: BulkRowResult[]): BulkReviewedRow[] =>
-  rows.map((r) => ({ product_id: r.product_id, mrp: r.old_mrp ?? r.mrp ?? 0, offer_price: r.old_offer_price }));
+  rows.map((r) => ({
+    product_id: r.product_id, mrp: r.old_mrp ?? r.mrp ?? 0, offer_price: r.old_offer_price, version: r.version ?? '',
+  }));
 
 function useReviewedBulk(
   inputKey: string,
@@ -349,6 +364,9 @@ function BulkPriceTab({ categories, brands, stores }: { categories: string[]; br
     toast.success(`Applied ${res.summary.committed} price change${res.summary.committed === 1 ? '' : 's'}` +
       (res.summary.counts.violations ? ` · ${res.summary.counts.violations} skipped (cap)` : '') +
       (res.summary.counts.already_applied ? ` · ${res.summary.counts.already_applied} already saved by an earlier Apply` : ''));
+    if (res.summary.counts.changed_since_preview) {
+      toast.warning(`${res.summary.counts.changed_since_preview} row(s) changed since your preview and were left alone: preview again to change them`);
+    }
     if (res.summary.website_failed) {
       toast.warning(`${res.summary.website_failed} saved for billing but not on the website yet: save those products again`);
     }
@@ -453,6 +471,9 @@ function BulkOfferTab({ categories, brands, stores }: { categories: string[]; br
     toast.success(`Applied ${res.summary.committed} offer change${res.summary.committed === 1 ? '' : 's'}` +
       (res.summary.counts.violations ? ` · ${res.summary.counts.violations} skipped (cap)` : '') +
       (res.summary.counts.already_applied ? ` · ${res.summary.counts.already_applied} already saved by an earlier Apply` : ''));
+    if (res.summary.counts.changed_since_preview) {
+      toast.warning(`${res.summary.counts.changed_since_preview} row(s) changed since your preview and were left alone: preview again to change them`);
+    }
     if (res.summary.website_failed) {
       toast.warning(`${res.summary.website_failed} saved for billing but not on the website yet: save those products again`);
     }

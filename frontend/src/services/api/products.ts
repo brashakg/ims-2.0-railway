@@ -814,6 +814,8 @@ export interface BulkReviewedRow {
   product_id: string;
   mrp: number;
   offer_price: number;
+  // D94: the row's version in the preview; a row written since is left alone.
+  version: string;
 }
 
 export interface BulkRowResult {
@@ -842,6 +844,8 @@ export interface BulkRowResult {
   website_synced?: boolean;
   // When a bulk Apply moved this row's price in the last hour (UTC ISO), else null.
   recent_bulk_change_at?: string | null;
+  // D94: the row's version; an Apply sends it back with the reviewed row.
+  version?: string;
 }
 
 export interface BulkSummary {
@@ -851,7 +855,11 @@ export interface BulkSummary {
   brand?: string | null;
   reason?: string | null;
   applied: boolean;
-  counts: { total: number; valid: number; violations: number; unchanged: number; already_applied?: number };
+  counts: {
+    total: number; valid: number; violations: number; unchanged: number; already_applied?: number;
+    // D94: rows written by someone since the preview, left alone by the Apply.
+    changed_since_preview?: number;
+  };
   committed: number;
   website_failed?: number;
   [k: string]: unknown;

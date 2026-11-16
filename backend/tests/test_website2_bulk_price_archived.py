@@ -67,7 +67,7 @@ async def _reviewed(fn, body, user=ADMIN):
     pre = await fn(body.model_copy(update={"apply": False}), user)
     exp = [
         products_mod.BulkReviewedRow(
-            product_id=r["product_id"], mrp=r.get("old_mrp", r.get("mrp")), offer_price=r["old_offer_price"]
+            product_id=r["product_id"], mrp=r.get("old_mrp", r.get("mrp")), offer_price=r["old_offer_price"], version=r.get("version", "")
         )
         for r in pre["rows"]
     ]
@@ -363,7 +363,7 @@ def test_a_retried_apply_carries_the_website_copy_but_never_the_price_twice(db, 
     body = products_mod.BulkPriceRequest(target="BOTH", mode="PERCENT", amount=10)
     pre = _run(products_mod.bulk_price_update(body, ADMIN))
     exp = [
-        products_mod.BulkReviewedRow(product_id=r["product_id"], mrp=r["old_mrp"], offer_price=r["old_offer_price"])
+        products_mod.BulkReviewedRow(product_id=r["product_id"], mrp=r["old_mrp"], offer_price=r["old_offer_price"], version=r.get("version", ""))
         for r in pre["rows"]
     ]
     apply = body.model_copy(update={"apply": True, "expected": exp})
@@ -492,7 +492,7 @@ def test_a_retried_offer_apply_carries_the_website_copy_but_never_the_offer_twic
     body = products_mod.BulkOfferRequest(action="SET", discount_percent=10)
     pre = _run(products_mod.bulk_offer_update(body, ADMIN))
     exp = [
-        products_mod.BulkReviewedRow(product_id=r["product_id"], mrp=r["mrp"], offer_price=r["old_offer_price"])
+        products_mod.BulkReviewedRow(product_id=r["product_id"], mrp=r["mrp"], offer_price=r["old_offer_price"], version=r.get("version", ""))
         for r in pre["rows"]
     ]
     apply = body.model_copy(update={"apply": True, "expected": exp})
@@ -521,7 +521,7 @@ def test_a_retried_apply_whose_website_copy_fails_again_counts_it_once(db, monke
         pre = _run(fn(body, ADMIN))
         exp = [
             products_mod.BulkReviewedRow(
-                product_id=r["product_id"], mrp=r.get("old_mrp", r.get("mrp")), offer_price=r["old_offer_price"]
+                product_id=r["product_id"], mrp=r.get("old_mrp", r.get("mrp")), offer_price=r["old_offer_price"], version=r.get("version", "")
             )
             for r in pre["rows"]
         ]
@@ -556,7 +556,7 @@ def _reviewed_apply(db, fn, body):
     pre = _run(fn(body, ADMIN))
     exp = [
         products_mod.BulkReviewedRow(
-            product_id=r["product_id"], mrp=r.get("old_mrp", r.get("mrp")), offer_price=r["old_offer_price"]
+            product_id=r["product_id"], mrp=r.get("old_mrp", r.get("mrp")), offer_price=r["old_offer_price"], version=r.get("version", "")
         )
         for r in pre["rows"]
     ]
@@ -567,8 +567,10 @@ def _audits(db, action):
     return list(db["audit_logs"].find({"action": action}))
 
 
-def _named(entry):
-    return sorted(c["product_id"] for c in entry["details"]["changes"])
+def _named(db, action):
+    """D94(3): one entry per Apply per product -- every product a bulk audit
+    entry names, as often as it is named (a doubled entry shows twice)."""
+    return sorted(c["product_id"] for a in _audits(db, action) for c in a["details"]["changes"])
 
 
 def _prices(db, pid):
@@ -601,8 +603,7 @@ def test_a_lost_acknowledgement_is_committed_audited_and_reaches_the_website(db,
     restore()
     assert out["summary"]["committed"] == 2
     assert {r["product_id"]: r["applied"] for r in out["rows"]} == {"P1": True, "P2": True}
-    (entry,) = _audits(db, action)
-    assert _named(entry) == ["P1", "P2"]
+    assert _named(db, action) == ["P1", "P2"]
     assert _prices(db, "P1") == want
     assert (_twin(db)["mrp"], _twin(db)["offer_price"]) == want
 
@@ -632,11 +633,11 @@ def test_a_write_that_cannot_be_confirmed_answers_503_and_the_retry_finishes_it_
     assert ei.value.status_code == 503 and "Retry the same Apply" in ei.value.detail
     restore()
     monkeypatch.setattr(products_mod, "_stored_doc", real_read, raising=False)
-    assert _audits(db, action) == []
+    # D94(2): P2 was confirmed, so it is audited before the 503 for P1.
+    assert _named(db, action) == ["P2"]
     again = _run(fn(apply, ADMIN))
     assert again["summary"]["committed"] == 0 and again["summary"]["counts"]["already_applied"] == 2
-    (entry,) = _audits(db, action)
-    assert _named(entry) == ["P1", "P2"]
+    assert _named(db, action) == ["P1", "P2"]
     assert _prices(db, "P1") == want and _prices(db, "P2") == want
 
 
@@ -661,8 +662,7 @@ def test_an_audit_that_cannot_be_written_answers_503_and_the_retry_writes_it_onc
     for _ in range(2):
         again = _run(fn(apply, ADMIN))
         assert again["summary"]["counts"]["already_applied"] == 2
-        (entry,) = _audits(db, action)
-        assert _named(entry) == ["P1", "P2"]
+        assert _named(db, action) == ["P1", "P2"]
     assert _prices(db, "P1") == want and _prices(db, "P2") == want
 
 
@@ -675,9 +675,8 @@ def test_a_retried_apply_never_writes_a_second_audit_entry(db, monkeypatch, fn, 
     assert first["summary"]["committed"] == 2
     again = _run(fn(apply, ADMIN))
     assert again["summary"]["committed"] == 0
-    (entry,) = _audits(db, action)
-    assert _named(entry) == ["P1", "P2"]
-    assert not any(c.get("recovered") for c in entry["details"]["changes"])
+    assert _named(db, action) == ["P1", "P2"]
+    assert not any(c.get("recovered") for a in _audits(db, action) for c in a["details"]["changes"])
 
 
 def test_a_new_change_back_to_the_same_prices_is_audited_again(db, monkeypatch):
@@ -689,7 +688,7 @@ def test_a_new_change_back_to_the_same_prices_is_audited_again(db, monkeypatch):
     _run(fn(apply, ADMIN))
     db["products"].update_many({}, {"$set": {"mrp": 5000.0, "offer_price": 4500.0}})
     _run(_reviewed(fn, body.model_copy(update={"apply": True})))
-    assert len(_audits(db, action)) == 2
+    assert _named(db, action) == ["P1", "P1", "P2", "P2"]
 
 
 def test_a_fresh_preview_shows_rows_a_bulk_apply_changed_in_the_last_hour(db):
@@ -711,3 +710,71 @@ def test_a_fresh_preview_shows_rows_a_bulk_apply_changed_in_the_last_hour(db):
     old = _dt.datetime.utcnow() - _dt.timedelta(hours=2)
     db["products"].update_many({}, {"$set": {"price_updated_at": old}})
     assert {r["recent_bulk_change_at"] for r in _run(fn(body, ADMIN))["rows"]} == {None}
+
+
+# ===========================================================================
+# D94 (PR-1429, head 516ad51f): an Apply never rewrites a row written since
+# its preview (ABA), and a retry racing the original never hides a row.
+# ===========================================================================
+
+_WAS = (5000.0, 4500.0)
+
+
+@pytest.mark.parametrize("fn,body,action,want", _BOTH_DOORS)
+def test_a_row_moved_back_to_its_old_price_is_never_reapplied(db, monkeypatch, fn, body, action, want):
+    """D94(1): W1 lands, someone edits P1 back to its previewed price
+    through the ordinary edit door, then W1's identical retry arrives. The
+    price equals the preview again, but the row was written since: it is
+    reported 'changed since preview' and left alone (it used to be moved a
+    second time). P2, which W1 landed, is recognised as W1's own."""
+    apply = _reviewed_apply(db, fn, body)
+    assert _run(fn(apply, ADMIN))["summary"]["committed"] == 2
+    assert products_mod.get_product_repository().update("P1", {"mrp": _WAS[0], "offer_price": _WAS[1]})
+    again = _run(fn(apply, ADMIN))
+    rows = {r["product_id"]: r for r in again["rows"]}
+    assert rows["P1"]["reason"] == "CHANGED_SINCE_PREVIEW" and rows["P1"]["applied"] is False
+    assert rows["P2"]["already_applied"] is True
+    assert again["summary"]["committed"] == 0
+    assert again["summary"]["counts"]["changed_since_preview"] == 1
+    assert _prices(db, "P1") == _WAS and _prices(db, "P2") == want
+    assert _named(db, action) == ["P1", "P2"]
+
+
+@pytest.mark.parametrize("fn,body,action,want", _BOTH_DOORS)
+def test_a_retry_racing_the_original_never_hides_the_original_s_rows(db, monkeypatch, fn, body, action, want):
+    """D94(3): the original Apply A has written P1 and is about to write P2
+    when its identical retry B runs: B reads (P1 landed, P2 not yet), A's P2
+    write lands, B's own P2 write is refused, and B writes its audit first.
+    Every row A landed is still audited, each exactly once (it used to be
+    one entry per Apply that B wrote with P1 only, so A's P2 was hidden)."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    apply = _reviewed_apply(db, fn, body)
+    repo_type = type(products_mod.get_product_repository())
+    real_update = repo_type.update
+    seen = {"a_p2": False}
+
+    def a_update(self, pid, data, **kw):
+        if pid != "P2" or seen["a_p2"]:
+            return real_update(self, pid, data, **kw)
+        seen["a_p2"] = True
+        held = {}
+
+        def b_update(self2, pid2, data2, **kw2):
+            if pid2 == "P2" and "a" not in held:
+                held["a"] = real_update(self2, pid2, data, **kw)  # A's write lands first
+            return real_update(self2, pid2, data2, **kw2)
+
+        monkeypatch.setattr(repo_type, "update", b_update)
+        with ThreadPoolExecutor(1) as ex:
+            ex.submit(lambda: _run(fn(apply, ADMIN))).result()
+        monkeypatch.setattr(repo_type, "update", a_update)
+        return held["a"]
+
+    monkeypatch.setattr(repo_type, "update", a_update)
+    _run(fn(apply, ADMIN))
+    monkeypatch.setattr(repo_type, "update", real_update)
+    assert seen["a_p2"]
+    assert _named(db, action) == ["P1", "P2"]
+    assert _prices(db, "P1") == want and _prices(db, "P2") == want
+
