@@ -60,7 +60,7 @@ def _job_in_reach(job, current_user: dict) -> bool:
     return bool(job) and bool(_jobs_in_reach([job], current_user))
 
 
-def _jobs_in_reach(jobs, current_user: dict) -> list:
+def _jobs_in_reach(jobs, current_user: dict, strict: bool = False) -> list:
     """THE store rule of a workshop job (PR #1376 F3): the job's own shop AND
     its ORDER's shop (the canonical owner) must both be the caller's. A legacy
     job stamped with one shop but attached to another shop's order -- the
@@ -68,17 +68,25 @@ def _jobs_in_reach(jobs, current_user: dict) -> list:
     resolved are therefore admin-only until an authorized repair; a correct
     same-shop job is unchanged. SUPERADMIN/ADMIN reach every job. One order
     read for the whole list, so a rollup can run it over a shop's jobs; an
-    unreadable order store hides the jobs (fail closed)."""
+    unreadable order store hides the jobs (fail closed); with `strict` it
+    raises instead, so a count is never an unreadable zero."""
     jobs = [j for j in (jobs or []) if j]
     is_cross, stores = user_store_scope(current_user)
     if is_cross:
         return jobs
     mine = [j for j in jobs if can_access_store_scoped(j.get("store_id"), current_user)]
     order_repo = get_order_repository()
-    if not mine or order_repo is None:
+    if not mine:
         return []
-    owned = order_repo.ids_in_stores(
-        {j.get("order_id") for j in mine if j.get("order_id")}, stores
+    if order_repo is None:
+        if strict:
+            raise RuntimeError("order store unavailable")
+        return []
+    ids = {j.get("order_id") for j in mine if j.get("order_id")}
+    owned = (
+        order_repo.ids_in_stores(ids, stores, strict=True)
+        if strict
+        else order_repo.ids_in_stores(ids, stores)
     )
     return [j for j in mine if j.get("order_id") in owned]
 

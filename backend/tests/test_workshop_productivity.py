@@ -69,40 +69,42 @@ def _mk_job(
     return doc
 
 
-class FakeRepo:
+class FakeJobsColl:
+    """workshop_jobs: find({"store_id": s} | {}, projection). `fail` makes the
+    read raise, as a dropped connection does."""
+
     def __init__(self, jobs: List[Dict[str, Any]]):
         self._jobs = jobs
+        self.fail = False
 
-    def find_by_store(self, store_id):
-        # None = every shop, as the real repo (an admin with no shop named).
-        return [j for j in self._jobs if store_id is None or j.get("store_id") == store_id]
+    def find(self, flt=None, projection=None):
+        if self.fail:
+            raise RuntimeError("AutoReconnect: workshop_jobs read failed")
+        store_id = (flt or {}).get("store_id")
+        # No store filter = every shop (an admin with no shop named).
+        return [dict(j) for j in self._jobs if store_id is None or j.get("store_id") == store_id]
 
 
 class FakeDB:
     def __init__(self, jobs):
         self.is_connected = True
-        self._jobs = jobs
+        self.jobs = FakeJobsColl(jobs)
 
     def get_collection(self, name):
-        return None  # endpoint constructs the repo via a patched class
+        assert name == "workshop_jobs"
+        return self.jobs
 
 
 @pytest.fixture
 def install(monkeypatch):
-    """Patch the reports endpoint's get_db + WorkshopJobRepository to a fake."""
+    """Patch the reports endpoint's get_db to a fake serving `jobs`."""
 
     def _install(jobs: List[Dict[str, Any]]):
         fake_db = FakeDB(jobs)
-        fake_repo = FakeRepo(jobs)
         from api.routers import reports as reports_module
 
         monkeypatch.setattr(reports_module, "get_db", lambda: fake_db)
-        from database.repositories import workshop_repository as wr_module
-
-        monkeypatch.setattr(
-            wr_module, "WorkshopJobRepository", lambda _coll: fake_repo
-        )
-        return fake_repo
+        return fake_db
 
     return _install
 
@@ -125,11 +127,9 @@ def test_sales_staff_forbidden(client, staff_headers, install):
     assert resp.status_code == 403
 
 
-def test_admin_allowed_empty(client, auth_headers, monkeypatch):
-    """No DB -> honest empty envelope, never raises."""
-    from api.routers import reports as reports_module
-
-    monkeypatch.setattr(reports_module, "get_db", lambda: None)
+def test_admin_allowed_empty(client, auth_headers, install):
+    """No jobs -> honest empty envelope (no fabricated average)."""
+    install([])
     resp = client.get(URL, headers=auth_headers)
     assert resp.status_code == 200
     body = resp.json()
@@ -137,6 +137,24 @@ def test_admin_allowed_empty(client, auth_headers, monkeypatch):
     assert body["totals"]["jobs_completed"] == 0
     assert body["totals"]["avg_turnaround_days"] is None
     assert "from_date" in body and "to_date" in body
+
+
+def test_no_db_is_503_not_a_zero_report(client, auth_headers, monkeypatch):
+    """Codex PR-1425 failure class: an unreadable job store is NOT "nobody
+    closed a job" -- the report refuses 503 instead of 200 with zeros."""
+    from api.routers import reports as reports_module
+
+    monkeypatch.setattr(reports_module, "get_db", lambda: None)
+    resp = client.get(URL, headers=auth_headers)
+    assert resp.status_code == 503
+
+
+def test_jobs_read_failure_is_503_not_a_zero_report(client, auth_headers, install):
+    db = install([_mk_job("J1", completed_days_ago=1)])
+    assert client.get(URL, headers=auth_headers).json()["totals"]["jobs_completed"] == 1
+    db.jobs.fail = True
+    resp = client.get(URL, headers=auth_headers)
+    assert resp.status_code == 503
 
 
 # ---------------------------------------------------------------------------
@@ -316,3 +334,27 @@ def test_last_second_of_the_ist_day_stays_on_that_day(client, auth_headers, inst
     assert both["jobs_completed"] == 2
     assert on_3rd["on_time_rate"] == 1.0
     assert on_4th["on_time_rate"] == 1.0
+
+
+def test_store_rule_strict_raises_on_unreadable_order_store(monkeypatch):
+    """For a shop-scoped caller the report's store rule reads each job's
+    ORDER shop. An unreadable order store hides the jobs on a normal read
+    (fail closed); in the report (strict) it raises, so the report answers
+    503 rather than zero jobs."""
+    from api.routers.workshop import helpers
+    from database.repositories.order_repository import OrderRepository
+
+    class Down:
+        def find(self, *a, **k):
+            raise RuntimeError("AutoReconnect: orders read failed")
+
+    monkeypatch.setattr(helpers, "get_order_repository", lambda: OrderRepository(Down()))
+    user = {"user_id": "u-sm", "roles": ["STORE_MANAGER"], "store_ids": [STORE], "active_store_id": STORE}
+    jobs = [_mk_job("J1")]
+    assert helpers._jobs_in_reach(jobs, user) == []
+    with pytest.raises(Exception):
+        helpers._jobs_in_reach(jobs, user, strict=True)
+    monkeypatch.setattr(helpers, "get_order_repository", lambda: None)
+    assert helpers._jobs_in_reach(jobs, user) == []
+    with pytest.raises(RuntimeError):
+        helpers._jobs_in_reach(jobs, user, strict=True)

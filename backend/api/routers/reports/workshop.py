@@ -1,6 +1,8 @@
 """Staff ranking, workshop pending / productivity and daily stock count."""
 
-from fastapi import Depends, Query
+import logging
+
+from fastapi import Depends, HTTPException, Query
 from typing import Any, Dict, Optional
 from datetime import date, datetime, timedelta
 from ...utils.event_time import parse_event_utc_naive
@@ -32,6 +34,8 @@ from ._shared import (
     _stock_category_map,
     router,
 )
+
+logger = logging.getLogger(__name__)
 
 # ============================================================================
 # STAFF & CLINICAL REPORTS
@@ -282,11 +286,10 @@ async def workshop_productivity(
         utilization        -- this tech's jobs_completed / busiest tech's
                               jobs_completed (0-1; relative load index)
 
-    Plus store totals over the same window. Fail-soft: no DB / no jobs -> an
-    honest empty envelope (never a fabricated average), never raises.
+    Plus store totals over the same window. No jobs -> an honest empty
+    envelope (never a fabricated average); jobs that cannot be READ -> 503,
+    never a zero that reads as "nobody closed anything" (Codex PR-1425).
     """
-    from database.repositories.workshop_repository import WorkshopJobRepository  # lazy
-
     active_store = store_in_view(store_id, current_user)
 
     # Window: default to the last 30 days ending today (IST business date).
@@ -310,15 +313,26 @@ async def workshop_productivity(
         },
     }
 
+    unreadable = HTTPException(
+        status_code=503,
+        detail="Could not read workshop jobs for this report. Please try again.",
+    )
     db = get_db()
     if db is None or not getattr(db, "is_connected", True):
-        return empty
+        raise unreadable
 
     try:
-        repo = WorkshopJobRepository(db.get_collection("workshop_jobs"))
-        all_jobs = _jobs_in_reach(repo.find_by_store(active_store), current_user)
-    except Exception:
-        return empty
+        # Read directly, not through find_many (which answers [] on a read
+        # error); the store rule runs strict for the same reason.
+        jobs = list(
+            db.get_collection("workshop_jobs").find(
+                {"store_id": active_store} if active_store else {}, {"_id": 0}
+            )
+        )
+        all_jobs = _jobs_in_reach(jobs, current_user, strict=True)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[REPORTS] workshop productivity read failed: %s", exc)
+        raise unreadable
 
     def _to_dt(v):
         """A CALENDAR field (expected_date) as a naive datetime, or None: its
