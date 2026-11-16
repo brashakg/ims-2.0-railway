@@ -180,7 +180,7 @@ def supplied_cl_lines(order: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def latest_supplies(
-    orders_coll, query: Dict[str, Any], limit: int
+    orders_coll, query: Dict[str, Any], limit: Optional[int] = None
 ) -> List[tuple]:
     """(order, supplied CL line) pairs -- one per kept CL line -- newest order
     first, for the orders matching ``query``. Only received orders WITH a CL
@@ -206,8 +206,9 @@ def latest_supplies(
             },
         )
         .sort("created_at", -1)
-        .limit(int(limit))
     )
+    if limit is not None:
+        cursor = cursor.limit(int(limit))
     out = []
     for order in cursor:
         for line in supplied_cl_lines(order):
@@ -230,17 +231,25 @@ def earliest_refill(
 ) -> Optional[Dict[str, Any]]:
     """THE refill for one customer, from their (order, line) supplies newest
     first (D50). Each product / eye keeps its own clock from its LATEST
-    received line (an older line for the same clock is ignored; lines of the
-    same order all count); the EARLIEST-due clock drives the reminder. None
-    when there is no supply. Pure."""
+    received order (an older order for the same clock is ignored); lines of
+    that order for the same product and eye are ADDED into one supply (D69:
+    two one-box lines = one two-box supply). The EARLIEST-due clock drives the
+    reminder. None when there is no supply. Pure."""
     now = now or datetime.utcnow()
-    clock_order: Dict[tuple, int] = {}
-    best: Optional[Dict[str, Any]] = None
-    best_days: Optional[int] = None
+    clocks: Dict[tuple, tuple] = {}
     for order, line in supplies:
         key = _clock_key(line)
-        if clock_order.setdefault(key, id(order)) != id(order):
-            continue  # an older supply of a clock a newer order already set
+        held = clocks.get(key)
+        if held is None:
+            clocks[key] = (order, dict(line))
+        elif held[0] is order:
+            held[1]["quantity"] = int(held[1].get("quantity") or 1) + int(
+                line.get("quantity") or 1
+            )
+        # else: an older supply of a clock a newer order already set
+    best: Optional[Dict[str, Any]] = None
+    best_days: Optional[int] = None
+    for order, line in clocks.values():
         refill = compute_refill(
             line, order.get("created_at") or order.get("order_date"), now=now
         )
@@ -259,10 +268,17 @@ def scan_due_refills(
     store_id: Optional[str] = None,
     *,
     due_within_days: int = DEFAULT_DUE_WITHIN_DAYS,
-    scan_limit: int = 2000,
+    scan_limit: Optional[int] = None,
     now: Optional[datetime] = None,
 ) -> List[Dict[str, Any]]:
     """Worklist of customers whose CL refill is DUE (<= horizon) or overdue.
+
+    Reads the store's WHOLE received-CL history by default (Codex PR-1428 r2:
+    a 2000-order window silently dropped an overdue patient the per-customer
+    door still showed), so both doors answer from the same complete history.
+    # ponytail: one projected scan of received CL orders per request; switch
+    # to a per-customer/clock $group aggregation if a store's CL orders reach
+    # the hundreds of thousands.
 
     Scans recent RECEIVED CL orders (optionally store-scoped; latest_supplies),
     groups them per customer, takes THE refill (earliest_refill: per product /
