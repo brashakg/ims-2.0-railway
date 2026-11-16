@@ -912,7 +912,7 @@ class NexusAgent(JarvisAgent):
                 # (the row carries intent_applied_at). Raises when unapplied.
                 from api.routers.webhooks import _process_whatsapp_message
 
-                outcome = await _process_whatsapp_message(coll, doc)
+                outcome = await _process_whatsapp_message(coll, doc, claim)
             else:
                 # Explicit terminal skip: no retry can grow a handler.
                 terminal = True

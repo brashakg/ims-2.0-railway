@@ -2035,7 +2035,9 @@ def _extract_message_parts(body: Dict[str, Any]) -> list[Dict[str, Any]]:
     return messages
 
 
-async def _process_whatsapp_message(coll, row: Dict[str, Any]) -> Dict[str, Any]:
+async def _process_whatsapp_message(
+    coll, row: Dict[str, Any], claim: Optional[str] = None
+) -> Dict[str, Any]:
     """THE interpreter of ONE stored inbound WhatsApp message: a webhook_inbox
     row with vendor="whatsapp", event_id = Meta's message id and payload = the
     extracted message; `coll` is the inbox collection holding it. The row is
@@ -2057,7 +2059,10 @@ async def _process_whatsapp_message(coll, row: Dict[str, Any]) -> Dict[str, Any]
                         (follow-up, hand-off) or is a plain flag (STOP), so a
                         run that died between the write and the mark cannot
                         write it twice;
-      3. the reply      sent only by the run that set the mark: at most once;
+      3. the reply      sent only by the run that set the mark, and the mark
+                        lands only while the row still carries THIS run's
+                        `claim` (the receiver's, or the drain's): a run that
+                        outlived its lease cannot mark or reply -- at most once;
       4. ad-click stamp best-effort, as before.
     """
     from ..services.whatsapp_intents import (
@@ -2066,6 +2071,9 @@ async def _process_whatsapp_message(coll, row: Dict[str, Any]) -> Dict[str, Any]
         send_intent_reply,
     )
 
+    claim = claim or row.get("claim")
+    if not claim:
+        raise RuntimeError("no claim on the inbox row: refusing an unfenced run")
     msg = row.get("payload") or {}
     phone = msg.get("from_phone") or ""
 
@@ -2089,8 +2097,16 @@ async def _process_whatsapp_message(coll, row: Dict[str, Any]) -> Dict[str, Any]
             send_reply=False,
         )
         reply_text = result.pop("reply_text", None)
+        # Fenced on THIS run's claim and on "not applied yet" (Codex round 2,
+        # D57): a run whose lease ran out while another took the row over and
+        # marked it must not mark it again -- the mark is what licenses the
+        # reply, so only one run can ever send it.
         marked = coll.update_one(
-            {"webhook_id": row.get("webhook_id")},
+            {
+                "webhook_id": row.get("webhook_id"),
+                "claim": claim,
+                "intent_applied_at": {"$exists": False},
+            },
             {
                 "$set": {
                     "intent_applied_at": datetime.now(timezone.utc),
@@ -2099,7 +2115,13 @@ async def _process_whatsapp_message(coll, row: Dict[str, Any]) -> Dict[str, Any]
             },
         )
         if not marked.matched_count:
-            raise RuntimeError("inbox row missing: the intent could not be marked applied")
+            now_row = coll.find_one({"webhook_id": row.get("webhook_id")}) or {}
+            if now_row.get("intent_applied_at"):
+                # Another run applied, marked and owns the reply: no reply here.
+                return dict(now_row.get("intent_result") or {})
+            raise RuntimeError(
+                "inbox row missing or taken over: the intent could not be marked applied"
+            )
         if reply_text:
             result["reply_text"] = reply_text
             await send_intent_reply(phone, _WABA_DEFAULT_STORE_ID, result)
@@ -2278,7 +2300,7 @@ async def receive_whatsapp_inbound(request: Request):
         result: Dict[str, Any] = {}
         handler_error = ""
         try:
-            result = await _process_whatsapp_message(coll, row)
+            result = await _process_whatsapp_message(coll, row, claim)
             logger.info(
                 "[WA_INBOUND] phone=...%s intent=%s reply_sent=%s",
                 last4,

@@ -629,6 +629,127 @@ def test_reply_goes_out_at_most_once_and_only_after_the_intent_is_marked(client,
     assert wa.follow_ups.count_documents({}) == 1
 
 
+# ---------------------------------------------------------------------------
+# Codex round 2 (PR-1416-round2.md, D57): an expired claim let both runs reply
+# ---------------------------------------------------------------------------
+# The receiver is paused after its intent and before its "applied" mark; its
+# lease runs out and NEXUS takes the row over, applies, marks and replies.
+# The receiver then resumes. Its mark used to be keyed on the row alone, so it
+# matched too and the customer was sent the same reply twice.
+
+
+@pytest.mark.parametrize("lease_expired", [True, False], ids=["takeover", "lease_current"])
+def test_a_run_whose_lease_ran_out_never_sends_a_second_reply(client, wa, monkeypatch, lease_expired):
+    monkeypatch.setattr(whatsapp_intents, "auto_reply_allowed", lambda _s: (True, "test"))
+    sent = AsyncMock(return_value=MagicMock(ok=True, status="SIMULATED"))
+    wa_id = "wamid.ZZ-OVERLAP"
+    real = whatsapp_intents.dispatch_intent
+    calls = {"n": 0}
+
+    async def paused_past_the_lease(**kw):
+        calls["n"] += 1
+        out = await real(**kw)
+        if calls["n"] == 1:  # the receiver, before it marks the intent applied
+            assert _wa_row(wa, wa_id)["status"] == "processing"
+            if lease_expired:
+                _age_the_lease(wa, wa_id)
+            await NexusAgent(db=wa)._retry_failed_webhooks()
+        return out
+
+    with patch.object(providers, "send_whatsapp", new=sent), \
+            patch.object(whatsapp_intents, "dispatch_intent", new=paused_past_the_lease):
+        r = _post_inbound(client, _meta_body("book an eye test", wa_id=wa_id))
+        assert r.status_code == 200
+        assert sent.await_count == 1  # one message, one reply attempt
+        _post_inbound(client, _meta_body("book an eye test", wa_id=wa_id))
+        asyncio.run(NexusAgent(db=wa)._retry_failed_webhooks())
+        assert sent.await_count == 1
+    assert calls["n"] == (2 if lease_expired else 1)
+    assert wa.follow_ups.count_documents({}) == 1
+    row = _wa_row(wa, wa_id)
+    assert row["status"] == "succeeded" and row["intent_applied_at"]
+
+
+def test_a_run_without_a_claim_is_refused_before_it_writes(wa):
+    """The fence needs the run's claim; an unfenced call must not apply."""
+    row = {"webhook_id": "wh-zz", "event_id": "wamid.ZZ-NOCLAIM",
+           "payload": {"from_phone": "91" + PHONE, "text": "book an eye test"}}
+    with pytest.raises(RuntimeError, match="no claim"):
+        asyncio.run(webhooks._process_whatsapp_message(wa.webhook_inbox, row))
+    assert wa.follow_ups.count_documents({}) == 0
+    assert wa.whatsapp_conversations.count_documents({}) == 0
+
+
+# D57: one follow-up per inbound message is held by a UNIQUE index, so two
+# overlapping runs of one message can never both insert it.
+
+
+def _follow_up(message_id, strict=True):
+    customer = {"customer_id": "CUST-ZZ-A", "name": "Asha Synthetic", "mobile": PHONE}
+    return whatsapp_intents._create_follow_up(
+        customer, "eye_test_reminder", "n", "ST-A", message_id=message_id, strict=strict
+    )
+
+
+def test_the_follow_up_message_key_is_unique_in_the_database(client, wa):
+    _post_inbound(client, _meta_body("book an eye test", wa_id="wamid.ZZ-IDX"))
+    idx = wa.follow_ups.index_information()[whatsapp_intents._FOLLOW_UP_MESSAGE_INDEX]
+    assert idx["unique"] is True
+    assert [k for k, _ in idx["key"]] == ["source", "source_message_id"]
+    with pytest.raises(pymongo.errors.DuplicateKeyError):
+        wa.follow_ups.insert_one({"source": "whatsapp_inbound", "source_message_id": "wamid.ZZ-IDX"})
+    # Follow-ups made anywhere else (no message id) are not constrained.
+    wa.follow_ups.insert_many([{"source": "manual"}, {"source": "manual"}])
+
+
+def test_an_overlapping_run_that_loses_the_insert_race_reuses_the_first_follow_up(wa):
+    first = _follow_up("wamid.ZZ-RACE")
+    real = type(wa.follow_ups).update_one
+
+    def lost_race(self, *a, **k):  # the other run's insert landed in between
+        if self.name == "follow_ups":
+            raise pymongo.errors.DuplicateKeyError("E11000 duplicate key")
+        return real(self, *a, **k)
+
+    with patch.object(type(wa.follow_ups), "update_one", lost_race):
+        assert _follow_up("wamid.ZZ-RACE") == first
+    assert wa.follow_ups.count_documents({"source_message_id": "wamid.ZZ-RACE"}) == 1
+
+
+def test_concurrent_runs_of_one_message_store_one_follow_up_each(wa):
+    if not isinstance(wa, pymongo.database.Database):
+        pytest.skip("a real concurrency race needs the native database")
+    import threading
+
+    ids = [f"wamid.ZZ-CONC-{i}" for i in range(25)]
+    for mid in ids:
+        gate = threading.Barrier(4)
+
+        def run(mid=mid, gate=gate):
+            gate.wait()
+            _follow_up(mid)
+
+        workers = [threading.Thread(target=run) for _ in range(4)]
+        for w in workers:
+            w.start()
+        for w in workers:
+            w.join(10)
+    counts = {mid: wa.follow_ups.count_documents({"source_message_id": mid}) for mid in ids}
+    assert set(counts.values()) == {1}, counts
+
+
+def test_without_its_unique_index_a_booking_is_not_applied_and_is_retried(client, wa):
+    wa_id = "wamid.ZZ-NOIDX"
+    body = _meta_body("book an eye test", wa_id=wa_id)
+    with _outage(wa, "follow_ups", "create_index"):
+        first = _post_inbound(client, body)
+    assert first.status_code == 200 and "error" in first.json()["results"][0]
+    assert wa.follow_ups.count_documents({}) == 0
+    assert _wa_row(wa, wa_id)["status"] == "failed"
+    assert _post_inbound(client, body).json()["results"][0]["redispatched"] is True
+    _assert_applied_once(wa, "BOOK", wa_id)
+
+
 
 # ===========================================================================
 # L1-F24 -- the WhatsApp inbox is shop-scoped

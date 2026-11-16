@@ -37,7 +37,7 @@ from ..utils.ist import ist_date_str
 # no follow-up). The copy is gone: the messaging services share the one helper
 # that never truth-tests a pymongo object. Tests still patch
 # `api.services.whatsapp_intents._get_db`.
-from .message_events import _get_db
+from .message_events import _get_db, _is_duplicate_key_error
 
 logger = logging.getLogger(__name__)
 
@@ -288,6 +288,26 @@ def _get_last_cl_order(
         return None
 
 
+_FOLLOW_UP_MESSAGE_INDEX = "uniq_whatsapp_follow_up_message"
+
+
+def _ensure_follow_up_index(coll, strict: bool) -> None:
+    """One follow-up per inbound WhatsApp message, enforced by Mongo: unique
+    over (source, source_message_id), PARTIAL so follow-ups written anywhere
+    else (no source_message_id) are untouched. Idempotent; strict raises."""
+    try:
+        coll.create_index(
+            [("source", 1), ("source_message_id", 1)],
+            unique=True,
+            partialFilterExpression={"source_message_id": {"$type": "string"}},
+            name=_FOLLOW_UP_MESSAGE_INDEX,
+        )
+    except Exception as e:  # noqa: BLE001
+        if strict:
+            raise IntentNotApplied(f"follow-up unique index unavailable: {e}") from e
+        logger.warning("[WA_INTENTS] follow-up unique index not ensured: %s", e)
+
+
 def _create_follow_up(
     customer: Dict[str, Any],
     follow_up_type: str,
@@ -327,14 +347,23 @@ def _create_follow_up(
         }
         coll = db.get_collection("follow_ups")
         if message_id:
-            # ponytail: find-or-insert in one upsert with no unique index
-            # behind it -- the inbox row's claim keeps two runs of one message
-            # apart. Add a partial unique index on source_message_id if two
-            # runs can ever overlap.
+            # Find-or-insert, backed by a unique index (D57): two runs of one
+            # message that overlap (a lease ran out while the first was still
+            # alive) meet the index, never a second follow-up. Without the
+            # index the guarantee is gone, so a strict run refuses to go on.
+            _ensure_follow_up_index(coll, strict)
             key = {"source": "whatsapp_inbound", "source_message_id": message_id}
             doc["source_message_id"] = message_id
-            coll.update_one(key, {"$setOnInsert": doc}, upsert=True)
-            return (coll.find_one(key, {"follow_up_id": 1}) or {}).get("follow_up_id")
+            try:
+                coll.update_one(key, {"$setOnInsert": doc}, upsert=True)
+            except Exception as e:  # noqa: BLE001
+                if not _is_duplicate_key_error(e):
+                    raise
+                # The overlapping run inserted it first: that one is ours too.
+            found = coll.find_one(key, {"follow_up_id": 1})
+            if found is None:
+                raise IntentNotApplied("follow-up not found after its upsert")
+            return found.get("follow_up_id")
         coll.insert_one(doc)
         logger.info(
             "[WA_INTENTS] created follow_up %s type=%s for customer %s",
