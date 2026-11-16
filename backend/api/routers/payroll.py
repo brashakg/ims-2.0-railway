@@ -796,8 +796,8 @@ async def get_salary_sheet(
     """
     _assert_salary_admin(current_user)
     db = _get_db()
-    if db is None:
-        return {"salaries": [], "total": 0, "store_id": store_id}
+    if db is None:  # an unreadable sheet is not an empty month
+        raise HTTPException(status_code=503, detail="Database not available")
 
     active_store = store_in_view(store_id, current_user)
     payroll_period_guard.sweep_stranded(db, year, month)
@@ -1183,11 +1183,11 @@ async def get_payslip(
     / STORE_MANAGER now only gets their own row there.
     """
     # Authorize BEFORE touching the DB so the answer is the same whether or not
-    # Mongo is reachable (the fail-soft branch below returns 200/None).
+    # Mongo is reachable (with no database the read answers 503).
     _assert_self_or_salary_admin(employee_id, current_user)
     db = _get_db()
-    if db is None:
-        return {"payslip": None}
+    if db is None:  # an unreadable payslip is not "no payslip"
+        raise HTTPException(status_code=503, detail="Database not available")
 
     try:
         employee = _get_employee_details(db, employee_id)
@@ -1257,8 +1257,8 @@ async def get_latest_payslip(
     """
     _assert_self_or_salary_admin(employee_id, current_user)
     db = _get_db()
-    if db is None:
-        return {"payslip": None}
+    if db is None:  # an unreadable payslip is not "no payslip"
+        raise HTTPException(status_code=503, detail="Database not available")
 
     try:
         return _latest_payslip(

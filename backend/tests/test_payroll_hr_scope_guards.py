@@ -418,14 +418,14 @@ def test_floor_roles_never_reach_these_routes_at_all(payroll_client, template):
 
 
 def test_payslip_gate_applies_before_the_db_is_touched(monkeypatch):
-    """With Mongo down the routes fail soft (200/None). Authorization must not
-    depend on the database being up."""
+    """With Mongo down the routes answer 503 (never a false "no payslip",
+    batch b27). Authorization must not depend on the database being up."""
     monkeypatch.setattr(payroll_mod, "_get_db", lambda: None)
     c = TestClient(_mounted(payroll_mod.router, "/payroll"))
     tok = _token(["ACCOUNTANT"], user_id=SELF_ID, store_ids=[STORE_A])
     assert c.get(f"/payroll/payslip/{OTHER_ID}", headers=_auth(tok)).status_code == 403
     own = c.get(f"/payroll/payslip/{SELF_ID}", headers=_auth(tok))
-    assert own.status_code == 200 and own.json() == {"payslip": None}
+    assert own.status_code == 503
 
 
 def test_unauthenticated_still_401(payroll_client):

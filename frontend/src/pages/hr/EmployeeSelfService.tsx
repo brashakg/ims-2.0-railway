@@ -102,6 +102,8 @@ export function EmployeeSelfService() {
   const [payslip, setPayslip] = useState<MyPayslip | null>(null);
   // A newer month whose payroll is still a draft: said plainly, no figures.
   const [payslipNotReady, setPayslipNotReady] = useState<{ month: number; year: number } | null>(null);
+  // The payslip read failed: never shown as "no payslip" (one may be saved).
+  const [payslipFailed, setPayslipFailed] = useState(false);
   const [leaves, setLeaves] = useState<MyLeaves | null>(null);
   const [loadingMonth, setLoadingMonth] = useState(false);
   const [loadingStatic, setLoadingStatic] = useState(true);
@@ -126,9 +128,10 @@ export function EmployeeSelfService() {
     setLoadingStatic(true);
     try {
       const [slip, lv] = await Promise.all([
-        hrApi.getMyPayslip().catch(() => ({ payslip: null, not_ready: undefined })),
+        hrApi.getMyPayslip().catch(() => null),
         hrApi.getMyLeaves({ year: now.getFullYear() }).catch(() => null),
       ]);
+      setPayslipFailed(slip === null);
       setPayslip(slip?.payslip ?? null);
       setPayslipNotReady(slip?.not_ready ?? null);
       setLeaves(lv);
@@ -359,6 +362,13 @@ export function EmployeeSelfService() {
           </h2>
           {loadingStatic ? (
             <CardSpinner />
+          ) : payslipFailed ? (
+            <div role="alert" className="text-sm text-red-700">
+              Your payslip could not be loaded just now.{' '}
+              <button type="button" className="underline" onClick={() => loadStatic()}>
+                Try again
+              </button>
+            </div>
           ) : payslip ? (
             <div>
               {notReadyNote && <div className="mb-3">{notReadyNote}</div>}
