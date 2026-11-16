@@ -41,6 +41,19 @@ export interface PermissionOptions {
   discount_cap_field: string;
   role_deltas: Record<string, { defaults: string[]; commonOverrides: DeltaRow[] }>;
   grantable: string[];
+  /** Role standard discount per role (server role_caps table). */
+  role_discount_caps?: Record<string, number>;
+}
+
+/** The role standard discount for a SET of roles: the highest of their
+ *  standards (the server's role_baseline_cap). null when not known yet. */
+export function roleStandardCap(
+  roles: readonly string[],
+  options: PermissionOptions | null | undefined,
+): number | null {
+  const caps = options?.role_discount_caps;
+  if (!caps || roles.length === 0) return null;
+  return Math.max(0, ...roles.map((r) => caps[r] ?? 0));
 }
 
 export type CapabilityOverride = {
@@ -119,6 +132,10 @@ export function PermissionDeltaEditor({
         }]
       : roleRows;
 
+  // The standard comes from ALL the person's roles (an Accountant who is also
+  // Sales Staff has 10), never from the highest role's preset row.
+  const standard = roleStandardCap(roles, options);
+
   const grants = permissions.grant || {};
   const denies = permissions.deny || {};
 
@@ -194,15 +211,18 @@ export function PermissionDeltaEditor({
                 >
                   <span className="text-sm text-gray-700 flex-1">
                     {row.label}
-                    <span className="block text-xs text-gray-400">
-                      Role standard: {String(row.default)}%. A lower number does not reduce it.
-                    </span>
+                    {standard != null && (
+                      <span className="block text-xs text-gray-400">
+                        Role standard: {standard}%. A lower number does not reduce it.
+                      </span>
+                    )}
                   </span>
                   <input
                     type="number"
                     min={0}
                     max={100}
-                    value={discountCap ?? (row.default as number) ?? 0}
+                    aria-label={row.label}
+                    value={discountCap ?? standard ?? (row.default as number) ?? 0}
                     onChange={(e) =>
                       onDiscountCapChange(parseInt(e.target.value || '0', 10))
                     }

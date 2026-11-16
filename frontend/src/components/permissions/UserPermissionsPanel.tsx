@@ -70,6 +70,7 @@ export function UserPermissionsPanel({
 
   const [permissions, setPermissions] = useState<CapabilityOverride>({});
   const [discountCap, setDiscountCap] = useState<number | undefined>(undefined);
+  const [loadedCap, setLoadedCap] = useState<number | undefined>(undefined);
   const [moduleAccess, setModuleAccess] = useState<Record<string, boolean>>({});
   const [history, setHistory] = useState<HistoryRow[]>([]);
 
@@ -79,6 +80,7 @@ export function UserPermissionsPanel({
       const data = await adminUserApi.getUserPermissions(userId);
       setPermissions(data.permissions || {});
       setDiscountCap(data.discount_cap == null ? undefined : data.discount_cap);
+      setLoadedCap(data.discount_cap == null ? undefined : data.discount_cap);
       setModuleAccess(data.module_access || {});
       setHistory(Array.isArray(data.history) ? (data.history as HistoryRow[]) : []);
     } catch {
@@ -98,7 +100,9 @@ export function UserPermissionsPanel({
       // Send only the override-bearing fields. The backend escalation-guards +
       // audits each (PUT /users/{id} with exclude_unset on the server side).
       await adminUserApi.updateUser(userId, {
-        discountCap,
+        // Only a changed cap: re-sending the loaded one would make a
+        // role-standard cap look typed and stop it following the role (D70).
+        discountCap: discountCap !== loadedCap ? discountCap : undefined,
         moduleAccess,
         permissions,
       });

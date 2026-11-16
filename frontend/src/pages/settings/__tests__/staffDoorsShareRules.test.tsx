@@ -25,7 +25,7 @@ vi.mock('../../../context/AuthContext', async (orig) => ({
 vi.mock('../../../services/api', async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
   adminUserApi: {
-    getUsers: () => Promise.resolve({ users: listed }),
+    getUsers: () => Promise.resolve(listed),
     createUser: (...a: unknown[]) => createUser(...a),
     updateUser: vi.fn(),
     resetPassword: vi.fn(),

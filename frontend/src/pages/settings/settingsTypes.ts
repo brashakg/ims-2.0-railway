@@ -64,6 +64,9 @@ export interface UserData {
   discountCap?: number;
   /** The cap the server actually enforces (role standard vs override). */
   effectiveDiscountCap?: number;
+  /** D70: true = the stored cap was filled in by the role standard and follows
+   *  the role on a role change; false/undefined = typed or legacy, kept. */
+  discountCapIsRoleDefault?: boolean;
   isActive: boolean;
   createdAt: string;
   /** Per-user deny-only module override (canonical module key -> bool). A key

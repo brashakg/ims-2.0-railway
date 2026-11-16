@@ -161,13 +161,34 @@ export const adminStoreApi = {
 // ============================================================================
 
 export const adminUserApi = {
-  getUsers: async (params?: { storeId?: string; role?: string; status?: string }) => {
+  /** EVERY user the caller may see, page by page (the server answers 100 at
+   *  most per call; one call used to stop at 50, so staff past the first page
+   *  could not be found). A failed page throws -- never a short list. */
+  getUsers: async (params?: { storeId?: string; role?: string; activeOnly?: boolean }) => {
     // Convert camelCase storeId -> snake_case store_id; the backend Query param
     // is store_id, so passing storeId raw silently dropped the store filter.
-    const { storeId, ...rest } = params ?? {};
-    const apiParams = { ...rest, ...(storeId ? { store_id: storeId } : {}) };
-    const response = await api.get('/users', { params: apiParams });
-    return response.data;
+    const { storeId, activeOnly, ...rest } = params ?? {};
+    const base = {
+      ...rest,
+      ...(storeId ? { store_id: storeId } : {}),
+      ...(activeOnly === false ? { active_only: false } : {}),
+    };
+    const PAGE = 100;
+    const all: Array<Record<string, unknown>> = [];
+    const seen = new Set<unknown>();
+    // ponytail: 200 pages (20,000 staff) ceiling; a chain this size is far off.
+    for (let page = 0; page < 200; page++) {
+      const response = await api.get('/users', { params: { ...base, skip: page * PAGE, limit: PAGE } });
+      const rows: Array<Record<string, unknown>> = Array.isArray(response.data)
+        ? response.data
+        : response.data?.users ?? [];
+      for (const r of rows) {
+        const id = r.user_id ?? r._id;
+        if (!seen.has(id)) { seen.add(id); all.push(r); }
+      }
+      if (rows.length < PAGE) return all;
+    }
+    throw new Error('Too many users to list in one screen.');
   },
 
   getUser: async (userId: string) => {
@@ -265,6 +286,8 @@ export const adminUserApi = {
     storeIds: string[];
     primaryStoreId: string;
     discountCap: number;
+    /** D70: set the cap to the (new) role standard instead of keeping it. */
+    discountCapFollowRole: boolean;
     status: string;
     moduleAccess: Record<string, boolean>;
     permissions: { grant?: Record<string, boolean>; deny?: Record<string, boolean> };
@@ -291,7 +314,8 @@ export const adminUserApi = {
       payload.store_ids = storeIds;
       payload.primary_store_id = data.primaryStoreId || storeIds[0];
     }
-    if (data.discountCap != null) payload.discount_cap = data.discountCap;
+    if (data.discountCapFollowRole) payload.discount_cap_follow_role = true;
+    else if (data.discountCap != null) payload.discount_cap = data.discountCap;
     if (data.status !== undefined) payload.is_active = data.status === 'ACTIVE';
     // Only include module_access when explicitly provided so an unrelated edit
     // never wipes an existing grant (backend update uses exclude_unset too).
@@ -323,6 +347,7 @@ export const adminUserApi = {
         }>;
       }>;
       grantable: string[];
+      role_discount_caps?: Record<string, number>;
     };
   },
 

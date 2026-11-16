@@ -12,7 +12,8 @@ import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { validatePhone } from '../../utils/validators';
 import { adminUserApi, adminStoreApi } from '../../services/api';
-import { PermissionDeltaEditor } from '../../components/permissions/PermissionDeltaEditor';
+import { PermissionDeltaEditor, roleStandardCap } from '../../components/permissions/PermissionDeltaEditor';
+import type { PermissionOptions } from '../../components/permissions/PermissionDeltaEditor';
 import { UserPermissionsPanel } from '../../components/permissions/UserPermissionsPanel';
 import type { StoreData, UserData } from './settingsTypes';
 import {
@@ -67,6 +68,7 @@ const transformUser = (u: any): UserData => ({
   // missing (the role standard applies) -- L1-F03.
   discountCap: u.discount_cap ?? u.discountCap ?? undefined,
   effectiveDiscountCap: u.effective_discount_cap ?? undefined,
+  discountCapIsRoleDefault: u.discount_cap_is_role_default === true,
   isActive: u.is_active !== false,
   createdAt: u.created_at || u.createdAt || '',
   // Load existing deny-only module override so editing a user preserves it
@@ -75,6 +77,9 @@ const transformUser = (u: any): UserData => ({
   // Two-sided capability override (council ruling sec.2). Default {} -> DARK.
   permissions: u.permissions || {},
 });
+
+/** The Add/Edit form's data plus the D70 "use the new role's standard" choice. */
+type UserFormData = Partial<UserData> & { discountCapFollowRole?: boolean };
 
 // ============================================================================
 // User Management Section
@@ -86,6 +91,8 @@ export function UserManagementSection() {
 
   const [isLoading, setIsLoading] = useState(false);
   const [users, setUsers] = useState<UserData[]>([]);
+  // A failed staff read is not "no staff": the list says so and offers Retry.
+  const [usersLoadFailed, setUsersLoadFailed] = useState(false);
   const [stores, setStores] = useState<StoreData[]>([]);
   const [showAddUserModal, setShowAddUserModal] = useState(false);
   const [editingUser, setEditingUser] = useState<UserData | null>(null);
@@ -102,7 +109,9 @@ export function UserManagementSection() {
   const [search, setSearch] = useState('');
   const [roleFilter, setRoleFilter] = useState('');
   const [storeFilter, setStoreFilter] = useState('');
-  const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'inactive'>('all');
+  // Default Active: the list now also holds deactivated staff (so the
+  // Inactive filter can find them) but opens on the same view as before.
+  const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'inactive'>('active');
 
   useEffect(() => {
     loadData();
@@ -112,15 +121,13 @@ export function UserManagementSection() {
     setIsLoading(true);
     try {
       const [usersResponse, storesResponse] = await Promise.all([
-        adminUserApi.getUsers().catch(() => ({ users: [] })),
+        // Every page, active and inactive (the status filter is on screen).
+        adminUserApi.getUsers({ activeOnly: false }).catch(() => null),
         adminStoreApi.getStores().catch(() => ({ stores: [] })),
       ]);
 
-      if (usersResponse?.users) {
-        setUsers(usersResponse.users.map(transformUser));
-      } else if (Array.isArray(usersResponse)) {
-        setUsers(usersResponse.map(transformUser));
-      }
+      setUsersLoadFailed(usersResponse == null);
+      setUsers(Array.isArray(usersResponse) ? usersResponse.map(transformUser) : []);
 
       if (storesResponse?.stores) {
         setStores(storesResponse.stores.map(transformStore));
@@ -142,7 +149,7 @@ export function UserManagementSection() {
   const [savingUser, setSavingUser] = useState(false);
   const savingUserRef = useRef(false);
 
-  const handleSaveUser = async (userData: Partial<UserData>, password?: string) => {
+  const handleSaveUser = async (userData: UserFormData, password?: string) => {
     const phoneErr = validatePhone(userData.phone);
     if (phoneErr) { toast.error(phoneErr); return; }
     if (savingUserRef.current) return; // one save at a time (a second Enter/click)
@@ -159,7 +166,11 @@ export function UserManagementSection() {
         roles: userData.roles && userData.roles.length ? userData.roles : ['SALES_STAFF'],
         storeIds: userData.accessibleStores || [],
         primaryStoreId: userData.accessibleStores?.[0],
-        discountCap: userData.discountCap,
+        // Only a cap the editor actually changed is sent: re-sending the loaded
+        // value would turn a role-standard cap into a typed one (D70).
+        discountCap:
+          userData.discountCap !== editingUser?.discountCap ? userData.discountCap : undefined,
+        discountCapFollowRole: userData.discountCapFollowRole === true,
         username: (userData as { username?: string }).username,
         password: password,
         status: userData.isActive ? 'ACTIVE' : 'INACTIVE',
@@ -269,7 +280,11 @@ export function UserManagementSection() {
     });
   }, [visibleUsers, search, roleFilter, storeFilter, statusFilter]);
 
+  // Edit / permissions / reset / delete are ADMIN/SUPERADMIN-only on the
+  // server (require_admin), so a Store Manager is never offered them -- the
+  // same actor rule as Add User -- and never above the actor's own level.
   const canManageUser = (targetUser: UserData) => {
+    if (!canAddUsers) return false;
     const targetRoleLevel = getHighestRoleLevel(targetUser.roles);
     return currentUserRoleLevel > targetRoleLevel;
   };
@@ -352,9 +367,16 @@ export function UserManagementSection() {
           </select>
         </div>
 
-        <div className="text-xs text-gray-500 mb-2">
-          Showing {filteredUsers.length} of {visibleUsers.length} users
-        </div>
+        {usersLoadFailed ? (
+          <div role="alert" className="flex items-center gap-3 text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg p-3 mb-2">
+            Could not load the staff list. Nothing is hidden on purpose; try again.
+            <button type="button" onClick={loadData} className="btn-outline">Retry</button>
+          </div>
+        ) : (
+          <div className="text-xs text-gray-500 mb-2">
+            Showing {filteredUsers.length} of {visibleUsers.length} users
+          </div>
+        )}
 
         <div className="overflow-x-auto">
           <table className="w-full">
@@ -369,7 +391,7 @@ export function UserManagementSection() {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-200">
-              {filteredUsers.length === 0 ? (
+              {filteredUsers.length === 0 && !usersLoadFailed ? (
                 <tr>
                   <td colSpan={6} className="px-4 py-12 text-center text-gray-500">
                     {canAddUsers
@@ -836,7 +858,7 @@ function UserModal({
   user: UserData | null;
   stores: StoreData[];
   onClose: () => void;
-  onSave: (data: Partial<UserData>, password?: string) => void;
+  onSave: (data: UserFormData, password?: string) => void;
   saving?: boolean;
   currentUserRole: string;
   currentUserRoles: string[];
@@ -858,6 +880,30 @@ function UserModal({
     }
   );
   const [password, setPassword] = useState('');
+  // Shared with the permissions editor below (one fetch): the role standards.
+  const [permOptions, setPermOptions] = useState<PermissionOptions | null>(null);
+  useEffect(() => {
+    let alive = true;
+    adminUserApi.getPermissionOptions()
+      .then((o) => { if (alive) setPermOptions(o as PermissionOptions); })
+      .catch(() => { /* the editor shows its own load error */ });
+    return () => { alive = false; };
+  }, []);
+  // D70: on a role change, a typed/legacy cap is kept unless the editor picks
+  // the new role's standard; a role-standard cap follows the role by itself.
+  const [followRole, setFollowRole] = useState(false);
+  const formRoles = formData.roles || [];
+  const rolesChanged = !!user && (
+    formRoles.length !== user.roles.length || formRoles.some(r => !user.roles.includes(r))
+  );
+  const newStandard = roleStandardCap(formRoles, permOptions);
+  const capEdited = !!user && formData.discountCap !== user.discountCap;
+  const capChoice: null | 'follows' | 'ask' =
+    !user || !rolesChanged || capEdited || newStandard == null || user.discountCap == null
+      ? null
+      : user.discountCapIsRoleDefault
+        ? (user.discountCap === newStandard ? null : 'follows')
+        : (user.discountCap === newStandard ? null : 'ask');
 
   const allowedRoles = assignableRolesFor(currentUserRoles);
   const allowedStores = currentUserRole === 'STORE_MANAGER'
@@ -1017,7 +1063,33 @@ function UserModal({
               abilities. Owner sees SENTENCES, never raw capability keys; items
               above the actor's level are shown grayed-with-reason. The SAME
               component is reused on the onboarding wizard step 4. */}
+          {capChoice === 'follows' && (
+            <p className="text-sm text-gray-600 bg-gray-50 border border-gray-200 rounded-lg p-3">
+              This person&apos;s discount cap ({user?.discountCap}%) is their role standard, so it
+              follows the new role: it becomes {newStandard}%.
+            </p>
+          )}
+          {capChoice === 'ask' && (
+            <fieldset className="text-sm bg-amber-50 border border-amber-200 rounded-lg p-3 space-y-2">
+              <legend className="sr-only">Discount cap after the role change</legend>
+              <p className="text-gray-700">
+                This person&apos;s discount cap is {user?.discountCap}% (they can give up to{' '}
+                {user?.effectiveDiscountCap ?? user?.discountCap}% now). The new role&apos;s standard
+                is {newStandard}%.
+              </p>
+              <label className="flex items-center gap-2">
+                <input type="radio" name="cap-after-role-change" checked={!followRole} onChange={() => setFollowRole(false)} />
+                Keep {user?.discountCap}% (they can give up to {Math.max(newStandard ?? 0, user?.discountCap ?? 0)}%)
+              </label>
+              <label className="flex items-center gap-2">
+                <input type="radio" name="cap-after-role-change" checked={followRole} onChange={() => setFollowRole(true)} />
+                Use the new role&apos;s standard ({newStandard}%)
+              </label>
+            </fieldset>
+          )}
+
           <PermissionDeltaEditor
+            options={permOptions ?? undefined}
             roles={formData.roles || []}
             permissions={formData.permissions || {}}
             onPermissionsChange={(next) => setFormData(prev => ({ ...prev, permissions: next }))}
@@ -1032,7 +1104,11 @@ function UserModal({
           <button onClick={onClose} className="btn-outline">
             Cancel
           </button>
-          <button onClick={() => onSave(formData, password)} disabled={saving} className="btn-primary">
+          <button
+            onClick={() => onSave({ ...formData, discountCapFollowRole: capChoice === 'ask' && followRole }, password)}
+            disabled={saving}
+            className="btn-primary"
+          >
             {saving ? 'Saving…' : user ? 'Update User' : 'Create User'}
           </button>
         </div>
