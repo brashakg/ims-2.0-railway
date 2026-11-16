@@ -12,6 +12,26 @@ import { useToast } from '../../context/ToastContext';
 import { settingsApi } from '../../services/api';
 import { authApi } from '../../services/api/auth';
 import { getErrorMessage } from '../../utils/errorHandler';
+import { useLoadedSettings, settingsLoadErrorText } from '../../hooks/useLoadedSettings';
+import { SettingsLoadError } from '../../components/settings/SettingsLoadError';
+
+// A real switch (keyboard + screen reader), not a clickable icon (L1-F09).
+function PrefSwitch({ label, on, busy, onToggle }: { label: string; on: boolean; busy: boolean; onToggle: () => void }) {
+  const Icon = on ? ToggleRight : ToggleLeft;
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      aria-label={label}
+      disabled={busy}
+      onClick={onToggle}
+      className="shrink-0 rounded disabled:opacity-50"
+    >
+      <Icon className={`w-8 h-8 ${on ? 'text-green-600' : 'text-gray-500'}`} />
+    </button>
+  );
+}
 
 // ============================================================================
 // Profile Tab
@@ -97,7 +117,9 @@ export function ProfileSection() {
     }
   };
 
-  const persistPreferences = async (next: { email_notifications: boolean; sms_notifications: boolean }) => {
+  // Only the switch that was pressed is sent (the server merges it), so a
+  // switch whose stored value never loaded is not written back as a default.
+  const persistPreferences = async (next: { email_notifications?: boolean; sms_notifications?: boolean }) => {
     setSavingPrefs(true);
     try {
       await settingsApi.updatePreferences(next);
@@ -112,13 +134,13 @@ export function ProfileSection() {
   const toggleEmailNotifications = () => {
     const value = !emailNotifications;
     setEmailNotifications(value);
-    persistPreferences({ email_notifications: value, sms_notifications: smsNotifications });
+    persistPreferences({ email_notifications: value });
   };
 
   const toggleSmsNotifications = () => {
     const value = !smsNotifications;
     setSmsNotifications(value);
-    persistPreferences({ email_notifications: emailNotifications, sms_notifications: value });
+    persistPreferences({ sms_notifications: value });
   };
 
   return (
@@ -145,8 +167,9 @@ export function ProfileSection() {
 
           <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-gray-600 mb-1">Full Name</label>
+              <label htmlFor="profile-full-name" className="block text-sm font-medium text-gray-600 mb-1">Full Name</label>
               <input
+                id="profile-full-name"
                 type="text"
                 value={profileData?.full_name || user?.name || ''}
                 onChange={e => setProfileData(prev => prev ? { ...prev, full_name: e.target.value } : null)}
@@ -154,8 +177,9 @@ export function ProfileSection() {
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-600 mb-1">Email</label>
+              <label htmlFor="profile-email" className="block text-sm font-medium text-gray-600 mb-1">Email</label>
               <input
+                id="profile-email"
                 type="email"
                 value={profileData?.email || ''}
                 onChange={e => setProfileData(prev => prev ? { ...prev, email: e.target.value } : null)}
@@ -163,8 +187,9 @@ export function ProfileSection() {
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-600 mb-1">Phone</label>
+              <label htmlFor="profile-phone" className="block text-sm font-medium text-gray-600 mb-1">Phone</label>
               <input
+                id="profile-phone"
                 type="tel"
                 value={profileData?.phone || ''}
                 onChange={e => setProfileData(prev => prev ? { ...prev, phone: e.target.value } : null)}
@@ -176,13 +201,15 @@ export function ProfileSection() {
           <div className="flex gap-3">
             <button
               onClick={async () => {
+                if (!profileData) return; // nothing loaded, nothing to save
                 try {
-                  await settingsApi.updateProfile(profileData || {});
+                  await settingsApi.updateProfile(profileData);
                   toast.success('Profile updated successfully');
                 } catch {
                   toast.error('Failed to update profile');
                 }
               }}
+              disabled={!profileData}
               className="btn-primary"
             >
               <Save className="w-4 h-4 mr-2" />
@@ -259,34 +286,14 @@ export function ProfileSection() {
               <p className="font-medium text-gray-900">Email Notifications</p>
               <p className="text-sm text-gray-500">Receive email alerts for important updates</p>
             </div>
-            {emailNotifications ? (
-              <ToggleRight
-                className={`w-8 h-8 text-green-600 ${savingPrefs ? 'opacity-50 pointer-events-none' : 'cursor-pointer'}`}
-                onClick={toggleEmailNotifications}
-              />
-            ) : (
-              <ToggleLeft
-                className={`w-8 h-8 text-gray-500 ${savingPrefs ? 'opacity-50 pointer-events-none' : 'cursor-pointer'}`}
-                onClick={toggleEmailNotifications}
-              />
-            )}
+            <PrefSwitch label="Email Notifications" on={emailNotifications} busy={savingPrefs} onToggle={toggleEmailNotifications} />
           </div>
           <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
             <div>
               <p className="font-medium text-gray-900">SMS Notifications</p>
               <p className="text-sm text-gray-500">Receive SMS for urgent alerts</p>
             </div>
-            {smsNotifications ? (
-              <ToggleRight
-                className={`w-8 h-8 text-green-600 ${savingPrefs ? 'opacity-50 pointer-events-none' : 'cursor-pointer'}`}
-                onClick={toggleSmsNotifications}
-              />
-            ) : (
-              <ToggleLeft
-                className={`w-8 h-8 text-gray-500 ${savingPrefs ? 'opacity-50 pointer-events-none' : 'cursor-pointer'}`}
-                onClick={toggleSmsNotifications}
-              />
-            )}
+            <PrefSwitch label="SMS Notifications" on={smsNotifications} busy={savingPrefs} onToggle={toggleSmsNotifications} />
           </div>
         </div>
       </div>
@@ -301,28 +308,32 @@ export function ProfileSection() {
 export function BusinessSection() {
   const toast = useToast();
 
-  const [businessSettings, setBusinessSettings] = useState<{
-    company_name: string;
-    company_short_name: string;
-    tagline: string;
-    logo_url: string;
-    primary_color: string;
-    secondary_color: string;
-    support_email: string;
-    support_phone: string;
-    website: string;
-    address: string;
-  } | null>(null);
+  // The stored profile must be read before it can be edited or saved (the
+  // shared settings rule, audit L1-F05): a failed read used to leave a blank
+  // form whose Save sent {} over the saved company profile.
+  const { data: businessSettings, status: loadStatus, reload: loadBusiness, setData: setBusinessSettings } =
+    useLoadedSettings<{
+      company_name: string;
+      company_short_name: string;
+      tagline: string;
+      logo_url: string;
+      primary_color: string;
+      secondary_color: string;
+      support_email: string;
+      support_phone: string;
+      website: string;
+      address: string;
+    }>(async () => {
+      const res = await settingsApi.getBusinessSettings();
+      if (!res) throw new Error('empty settings answer');
+      return res;
+    });
 
   // Logo upload + inline preview. The serve endpoint needs the JWT, so we
   // fetch the bytes as a blob and render an object URL (not a raw <img src>).
   const [logoPreview, setLogoPreview] = useState<string | null>(null);
   const [uploadingLogo, setUploadingLogo] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    loadBusiness();
-  }, []);
 
   // Whenever logo_url changes, (re)load the preview blob. Revoke the old
   // object URL on cleanup to avoid leaking blobs.
@@ -353,16 +364,6 @@ export function BusinessSection() {
     };
   }, [businessSettings?.logo_url]);
 
-  const loadBusiness = async () => {
-    try {
-      const businessRes = await settingsApi.getBusinessSettings().catch(() => null);
-      if (businessRes) {
-        setBusinessSettings(businessRes);
-      }
-    } catch {
-      // Use defaults
-    }
-  };
 
   const handleLogoSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -394,6 +395,18 @@ export function BusinessSection() {
       setUploadingLogo(false);
     }
   };
+
+  if (loadStatus === 'loading') {
+    return (
+      <div className="flex items-center justify-center h-48 text-gray-500">
+        <Loader2 className="w-5 h-5 animate-spin mr-2" />
+        <span className="text-sm">Loading company profile…</span>
+      </div>
+    );
+  }
+  if (loadStatus === 'error' || !businessSettings) {
+    return <SettingsLoadError message={settingsLoadErrorText('company profile')} onRetry={() => void loadBusiness()} />;
+  }
 
   return (
     <div className="space-y-4">
@@ -440,8 +453,9 @@ export function BusinessSection() {
 
           <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-gray-600 mb-1">Company Name</label>
+              <label htmlFor="profile-company-name" className="block text-sm font-medium text-gray-600 mb-1">Company Name</label>
               <input
+                id="profile-company-name"
                 type="text"
                 value={businessSettings?.company_name || ''}
                 onChange={e => setBusinessSettings(prev => prev ? { ...prev, company_name: e.target.value } : null)}
@@ -449,8 +463,9 @@ export function BusinessSection() {
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-600 mb-1">Short Name</label>
+              <label htmlFor="profile-short-name" className="block text-sm font-medium text-gray-600 mb-1">Short Name</label>
               <input
+                id="profile-short-name"
                 type="text"
                 value={businessSettings?.company_short_name || ''}
                 onChange={e => setBusinessSettings(prev => prev ? { ...prev, company_short_name: e.target.value } : null)}
@@ -458,8 +473,9 @@ export function BusinessSection() {
               />
             </div>
             <div className="col-span-2">
-              <label className="block text-sm font-medium text-gray-600 mb-1">Tagline</label>
+              <label htmlFor="profile-tagline" className="block text-sm font-medium text-gray-600 mb-1">Tagline</label>
               <input
+                id="profile-tagline"
                 type="text"
                 value={businessSettings?.tagline || ''}
                 onChange={e => setBusinessSettings(prev => prev ? { ...prev, tagline: e.target.value } : null)}
@@ -467,8 +483,9 @@ export function BusinessSection() {
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-600 mb-1">Support Email</label>
+              <label htmlFor="profile-support-email" className="block text-sm font-medium text-gray-600 mb-1">Support Email</label>
               <input
+                id="profile-support-email"
                 type="email"
                 value={businessSettings?.support_email || ''}
                 onChange={e => setBusinessSettings(prev => prev ? { ...prev, support_email: e.target.value } : null)}
@@ -476,8 +493,9 @@ export function BusinessSection() {
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-600 mb-1">Support Phone</label>
+              <label htmlFor="profile-support-phone" className="block text-sm font-medium text-gray-600 mb-1">Support Phone</label>
               <input
+                id="profile-support-phone"
                 type="tel"
                 value={businessSettings?.support_phone || ''}
                 onChange={e => setBusinessSettings(prev => prev ? { ...prev, support_phone: e.target.value } : null)}
@@ -485,8 +503,9 @@ export function BusinessSection() {
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-600 mb-1">Website</label>
+              <label htmlFor="profile-website" className="block text-sm font-medium text-gray-600 mb-1">Website</label>
               <input
+                id="profile-website"
                 type="url"
                 value={businessSettings?.website || ''}
                 onChange={e => setBusinessSettings(prev => prev ? { ...prev, website: e.target.value } : null)}
@@ -494,15 +513,17 @@ export function BusinessSection() {
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-600 mb-1">Primary Color</label>
+              <label htmlFor="profile-primary-color" className="block text-sm font-medium text-gray-600 mb-1">Primary Color</label>
               <div className="flex gap-2">
                 <input
                   type="color"
+                  aria-label="Primary Color picker"
                   value={businessSettings?.primary_color || '#ba8659'}
                   onChange={e => setBusinessSettings(prev => prev ? { ...prev, primary_color: e.target.value } : null)}
                   className="w-12 h-10 rounded border cursor-pointer"
                 />
                 <input
+                  id="profile-primary-color"
                   type="text"
                   value={businessSettings?.primary_color || '#ba8659'}
                   onChange={e => setBusinessSettings(prev => prev ? { ...prev, primary_color: e.target.value } : null)}
@@ -511,8 +532,9 @@ export function BusinessSection() {
               </div>
             </div>
             <div className="col-span-2">
-              <label className="block text-sm font-medium text-gray-600 mb-1">Address</label>
+              <label htmlFor="profile-address" className="block text-sm font-medium text-gray-600 mb-1">Address</label>
               <textarea
+                id="profile-address"
                 value={businessSettings?.address || ''}
                 onChange={e => setBusinessSettings(prev => prev ? { ...prev, address: e.target.value } : null)}
                 rows={2}
@@ -524,7 +546,7 @@ export function BusinessSection() {
           <button
             onClick={async () => {
               try {
-                await settingsApi.updateBusinessSettings(businessSettings || {});
+                await settingsApi.updateBusinessSettings(businessSettings);
                 toast.success('Business settings saved');
               } catch {
                 toast.error('Failed to save settings');
