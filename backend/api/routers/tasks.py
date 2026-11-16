@@ -121,6 +121,7 @@ def _named_target(user_id: str, task: dict, *, any_shop: bool = False) -> dict:
 
 
 _TASKS_DOWN = "Task records are not available right now. Try again."
+_SOPS_DOWN = "Checklists and SOPs could not be loaded right now. Try again."
 
 
 def _strict(repo, op: str, *args, detail: str = _TASKS_DOWN, **kwargs):
@@ -598,7 +599,7 @@ async def create_task(
     fingerprint = _create_fingerprint(task, assignee, due_at, store_id) if request_key else None
     task_id = _keyed_task_id(user_id, request_key) if request_key else generate_task_id()
     if request_key:
-        existing = _strict(repo, "find_one", {"task_id": task_id})
+        existing = _keyed_existing(repo, task_id, user_id, request_key)
         if existing:
             return _replay_or_conflict(existing, fingerprint)
 
@@ -653,7 +654,7 @@ async def create_task(
         result = repo.create(task_data, raise_on_duplicate=True) if request_key else repo.create(task_data)
     except Exception as exc:  # noqa: BLE001 -- only DuplicateKeyError is re-raised
         # The overlapping submit that lost the insert: answer from the winner.
-        existing = _strict(repo, "find_one", {"task_id": task_id})
+        existing = _keyed_existing(repo, task_id, user_id, request_key) if request_key else None
         if existing:
             return _replay_or_conflict(existing, fingerprint)
         raise HTTPException(status_code=503, detail=_TASKS_DOWN) from exc
@@ -676,27 +677,67 @@ def _keyed_task_id(user_id, request_key: str) -> str:
     return f"TASK-R{digest[:12].upper()}"
 
 
+def _keyed_existing(repo, task_id: str, user_id, request_key: str):
+    """The task one person's one request key already made: the keyed id, OR a
+    row saved before keyed ids existed (a random id carrying the same
+    (assigned_by, client_request_id)) -- so a form whose reply was lost
+    across the upgrade still gets ONE task (Codex #1431 round 2)."""
+    return _strict(repo, "find_one", {
+        "$or": [
+            {"task_id": task_id},
+            {"assigned_by": user_id, "client_request_id": request_key},
+        ]
+    })
+
+
+def _fingerprint(material: dict) -> str:
+    due = material["due_at"]
+    if isinstance(due, datetime):
+        # Mongo keeps naive UTC to the millisecond: compare at that precision.
+        due = due.astimezone(timezone.utc).replace(tzinfo=None) if due.tzinfo else due
+        due = due.replace(microsecond=due.microsecond // 1000 * 1000).isoformat()
+    material = {**material, "due_at": due}
+    return hashlib.sha256(json.dumps(material, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+
+
 def _create_fingerprint(task: "TaskCreate", assignee: str, due_at: datetime, store_id) -> str:
     """What the person asked for in one create, so a retry can be told apart
     from an edited form sent under the same key."""
-    due = due_at.astimezone(timezone.utc) if due_at.tzinfo else due_at
-    material = {
+    return _fingerprint({
         "title": task.title,
         "description": task.description,
         "category": task.category or "General",
         "priority": task.priority,
         "assigned_to": assignee,
-        "due_at": due.isoformat(),
+        "due_at": due_at,
         "source": canon_source(task.source or task.type),
         "attachment_file_id": (task.attachment_file_id or "").strip() or None,
         "store_id": store_id,
-    }
-    return hashlib.sha256(json.dumps(material, sort_keys=True).encode("utf-8")).hexdigest()
+    })
+
+
+def _row_fingerprint(row: dict) -> str:
+    """The same fingerprint worked out from a stored task -- for a keyed row
+    saved before fingerprints were stored."""
+    assignee = str(row.get("assigned_to") or "").strip()
+    return _fingerprint({
+        "title": row.get("title"),
+        "description": row.get("description"),
+        "category": row.get("category") or "General",
+        "priority": row.get("priority"),
+        "assigned_to": assignee.upper() if assignee.upper() in VALID_ROLES else assignee,
+        "due_at": row.get("due_at"),
+        "source": canon_source(row.get("source")),
+        "attachment_file_id": ((row.get("attachment") or {}).get("file_id") or None),
+        "store_id": row.get("store_id"),
+    })
 
 
 def _replay_or_conflict(existing: dict, fingerprint) -> dict:
     task_id = existing.get("task_id")
-    if existing.get("request_fingerprint") == fingerprint:
+    # The stored fingerprint, or (a row from before fingerprints, or from an
+    # earlier encoding) the one its saved content gives.
+    if fingerprint in (existing.get("request_fingerprint"), _row_fingerprint(existing)):
         return {"task_id": task_id, "message": "Task already created", "replayed": True}
     raise HTTPException(
         status_code=409,
@@ -2078,7 +2119,7 @@ async def list_sop_templates(
     """List SOP templates. Filter by category, store, active state."""
     col = _sop_collection()
     if col is None:
-        return {"templates": [], "total": 0}
+        raise HTTPException(status_code=503, detail=_SOPS_DOWN)
 
     filter_dict: dict = {}
     if category:
@@ -2094,12 +2135,12 @@ async def list_sop_templates(
     if active_only:
         filter_dict["is_active"] = {"$ne": False}
 
+    # R26: a failed read is a 503 -- "no checklist is set up" must mean none is.
     try:
         templates = list(col.find(filter_dict, {"_id": 0}).sort("updated_at", -1))
-    except Exception as e:
-        logger = __import__("logging").getLogger(__name__)
-        logger.warning(f"[SOP] list failed: {e}")
-        templates = []
+    except Exception as exc:  # noqa: BLE001 -- any driver error is "unavailable"
+        logger.warning("[SOP] list failed: %s", exc)
+        raise HTTPException(status_code=503, detail=_SOPS_DOWN) from exc
     return {"templates": templates, "total": len(templates)}
 
 

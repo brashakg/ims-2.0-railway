@@ -262,3 +262,55 @@ def test_an_offset_aware_deadline_hours_ahead_is_not_past_on_any_host_clock(worl
     # A deadline really in the past is still refused.
     past = (datetime.now(timezone.utc) - timedelta(hours=1)).astimezone(timezone(timedelta(hours=14)))
     assert client.post("/tasks", json=_body(None, due_date=past.isoformat())).status_code == 422
+
+
+# ------------------------------------------- Codex #1431 round 2 corrections --
+
+def _old_format_row(key, title="Count display pieces"):
+    """A row as the first reviewed version (91b7c35c) saved it: a random id,
+    the key and creator on the row, no fingerprint, the deadline as Mongo
+    keeps it (naive UTC, milliseconds)."""
+    due = datetime.fromisoformat(DUE).astimezone(timezone.utc).replace(tzinfo=None)
+    return {"task_id": "TASK-0LD0F0RM", "title": title, "description": None, "category": "General",
+            "priority": "P3", "status": "OPEN", "source": "USER", "assigned_to": "same-shop",
+            "assigned_by": "manager", "created_via": "manual", "store_id": "S1",
+            "due_at": due.replace(microsecond=due.microsecond // 1000 * 1000), "attachment": None,
+            "client_request_id": key}
+
+
+def test_identical_retry_of_a_task_saved_before_keyed_ids_returns_that_task(world):
+    client, db, _ = world
+    db.tasks.insert_one(_old_format_row("k-old"))
+    again = client.post("/tasks", json=_body("k-old"))
+    assert again.status_code == 201, again.text
+    assert again.json() == {"task_id": "TASK-0LD0F0RM", "message": "Task already created", "replayed": True}
+    assert [r["task_id"] for r in _rows(db, "k-old")] == ["TASK-0LD0F0RM"]
+
+
+def test_changed_retry_of_a_task_saved_before_keyed_ids_is_a_conflict(world):
+    client, db, _ = world
+    db.tasks.insert_one(_old_format_row("k-old2"))
+    changed = client.post("/tasks", json=_body("k-old2", "Edited after the upgrade"))
+    assert changed.status_code == 409, changed.text
+    assert "TASK-0LD0F0RM" in changed.json()["detail"]
+    assert [r["task_id"] for r in _rows(db, "k-old2")] == ["TASK-0LD0F0RM"]
+
+
+def test_another_persons_old_row_with_the_same_key_is_not_theirs(world):
+    client, db, _ = world
+    db.tasks.insert_one({**_old_format_row("k-shared"), "assigned_by": "someone-else"})
+    made = client.post("/tasks", json=_body("k-shared"))
+    assert made.status_code == 201 and made.json()["task_id"] != "TASK-0LD0F0RM"
+    assert "replayed" not in made.json()
+
+
+@pytest.mark.parametrize("broken", ["read", "no-collection"])
+def test_checklist_template_list_outage_is_503_not_no_checklist(world, monkeypatch, broken):
+    client, db, _ = world
+    db.sop_templates.insert_one({"template_id": "TPL-9", "title": "Open the shop", "is_active": True,
+                                 "frequency": "DAILY", "store_id": "S1", "steps": []})
+    assert client.get("/tasks/sop-templates?store_id=S1").json()["total"] == 1
+    monkeypatch.setattr(tasks, "_sop_collection",
+                        (lambda: Flaky(db.sop_templates, "find")) if broken == "read" else (lambda: None))
+    down = client.get("/tasks/sop-templates?store_id=S1")
+    assert down.status_code == 503, down.text
