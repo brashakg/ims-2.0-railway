@@ -119,6 +119,27 @@ def _enforce_promo_window(template_id: str) -> None:
         )
 
 
+def _queued_or_raise(result: dict) -> dict:
+    """The queue writer's verdict, told truthfully to the caller (Codex 1419
+    round 1): a message refused for an unfilled placeholder is a 422 (D56),
+    a row that did not reach storage is a 503, never "Notification queued"."""
+    if (result or {}).get("status") == "REFUSED":
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Message not queued: the template needs "
+                + ", ".join(result.get("missing_variables") or [])
+                + " and it was not supplied."
+            ),
+        )
+    if not (result or {}).get("persisted"):
+        raise HTTPException(
+            status_code=503,
+            detail="Message could not be saved to the queue. Nothing was queued - try again.",
+        )
+    return result
+
+
 # Indian mobile: 10 digits starting with 6-9.
 _INDIA_MOBILE_RE = re.compile(r"^[6-9]\d{9}$")
 
@@ -228,16 +249,23 @@ async def send_marketing_notification(
                 )
 
     active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id", "")
-    result = await send_notification(
-        store_id=active_store,
-        customer_id=req.customer_id,
-        customer_phone=req.customer_phone,
-        customer_name=req.customer_name,
-        template_id=req.template_id,
-        channel=req.channel,
-        variables=req.variables,
-        category=req.category,
-        triggered_by=current_user.get("user_id", "unknown"),
+    # The category is NOT the caller's to choose for a promotional template
+    # (Codex 1419 round 1): this endpoint already treats every template outside
+    # _TRANSACTIONAL_TEMPLATES as promotional (quiet hours, consent above), so
+    # the stored row says MARKETING too and the drain's STOP check applies.
+    category = req.category if req.template_id in _TRANSACTIONAL_TEMPLATES else "MARKETING"
+    result = _queued_or_raise(
+        await send_notification(
+            store_id=active_store,
+            customer_id=req.customer_id,
+            customer_phone=req.customer_phone,
+            customer_name=req.customer_name,
+            template_id=req.template_id,
+            channel=req.channel,
+            variables=req.variables,
+            category=category,
+            triggered_by=current_user.get("user_id", "unknown"),
+        )
     )
     return {"message": "Notification queued", "notification": result}
 
@@ -307,7 +335,12 @@ async def send_bulk_notifications(
                 category="MARKETING",
                 triggered_by=current_user.get("user_id", "unknown"),
             )
-            results.append({"phone": r.phone, "status": "queued", "result": res})
+            if res.get("status") == "REFUSED":
+                results.append({"phone": r.phone, "status": "failed", "error": "unfilled_placeholder", "result": res})
+            elif not res.get("persisted"):
+                results.append({"phone": r.phone, "status": "failed", "error": "not_saved", "result": res})
+            else:
+                results.append({"phone": r.phone, "status": "queued", "result": res})
         except Exception as e:
             results.append({"phone": r.phone, "status": "failed", "error": str(e)})
     queued = sum(1 for r in results if r["status"] == "queued")
@@ -372,7 +405,7 @@ async def send_review_request(
         db.get_collection("customers").find_one({"customer_id": customer_id}) or {}
     )
 
-    result = await send_notification(
+    result = _queued_or_raise(await send_notification(
         store_id=order.get("store_id", current_user.get("active_store_id", "")),
         customer_id=customer_id,
         customer_phone=customer.get("mobile", order.get("customer_phone", "")),
@@ -387,7 +420,7 @@ async def send_review_request(
         triggered_by=current_user.get("user_id", "unknown"),
         related_entity_type="order",
         related_entity_id=order_id,
-    )
+    ))
     return {"message": "Review request sent", "notification": result}
 
 
@@ -513,7 +546,10 @@ async def send_rx_reminder(
     # once in a 24-hour window.  Repeat clicks (or UI retries) must not spam
     # the customer.  Only PENDING/SENT/SIMULATED logs count; FAILED entries
     # do NOT block a retry (the previous attempt didn't reach the customer).
-    cutoff_24h = (datetime.now() - timedelta(hours=24)).isoformat()
+    # Rows are stamped utc_now_iso() ("...+00:00"); a naive host-clock cutoff
+    # (datetime.now() on an IST host) compared as a string shortened the 24 h
+    # window to 18.5 h. Both sides are UTC ISO now.
+    cutoff_24h = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
     recent = db.get_collection("notification_logs").find_one(
         {
             "customer_id": customer_id,
@@ -558,7 +594,7 @@ async def send_rx_reminder(
                     ist_date_str(expiry), "%Y-%m-%d"
                 ).strftime("%d %b %Y")
 
-    result = await send_notification(
+    result = _queued_or_raise(await send_notification(
         store_id=store_id,
         customer_id=customer_id,
         customer_phone=phone,
@@ -570,11 +606,13 @@ async def send_rx_reminder(
             "store_phone": store.get("phone", ""),
             "expiry_date": expiry_date_str,
         },
-        category="REMINDER",
+        # D56: a hand-sent recall is about the customer, not one specific
+        # prescription -> promotional (needs consent; STOP wins at the drain).
+        category="MARKETING",
         triggered_by=current_user.get("user_id", "unknown"),
         related_entity_type="prescription",
         related_entity_id=customer_id,
-    )
+    ))
     return {"message": "Rx reminder sent", "notification": result}
 
 

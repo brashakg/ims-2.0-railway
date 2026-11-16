@@ -17,6 +17,21 @@ What is shared (per recipient, in this order):
   4. queue          send_notification (PENDING; DISPATCH_MODE-gated drain)
   5. cap ledger     reminder_rail.record_outbound
 
+Ownership (Codex 1419 round 1). A ONE_TIME (or unscheduled) campaign reaches
+each recipient ONCE, whichever door runs and however often: every row carries
+dedupe_ref "campaign:<campaign_id>:<customer or phone>", backed by the unique
+partial index uniq_notification_dedupe_ref on notification_logs. A recipient
+already queued for the campaign is reported "already_queued" (not re-gated,
+not re-capped, not counted again); two doors racing on one recipient are
+settled by the index (the loser sees a duplicate). A legacy RECURRING /
+TRIGGERED campaign has no ref: a hand re-send of it is deliberate.
+
+Durability. A recipient counts as queued (and consumes the 30-day cap) only
+when the queue writer reports the row ON DISK (`persisted`); a storage failure
+is "failed" with retryable=True so the door can leave the campaign open for a
+safe retry, and an unfilled placeholder (D56) is "failed" with
+reason unfilled_placeholder (not retryable: the template itself is wrong).
+
 What stays with the caller, on purpose: the per-user rate limit and the
 quiet-hours answer (the manual door REFUSES outside the promo window, the
 scheduled tick DEFERS to the next morning), and the campaign status / counter
@@ -45,7 +60,8 @@ async def fan_out_campaign(
     """Resolve the campaign's segment and queue one message per eligible
     recipient. Returns the counts and the per-recipient result list:
 
-        {"audience": n, "sent": n, "skipped": n, "failed": n, "results": [...]}
+        {"audience": n, "sent": n, "skipped": n, "failed": n,
+         "already_queued": n, "retryable": n, "results": [...]}
 
     `send_notification` is passed in so each door keeps its own (test-patchable)
     reference to the one queue writer. A recipient failure is counted, never
@@ -58,6 +74,23 @@ async def fan_out_campaign(
     campaign_id = campaign.get("campaign_id", "")
     template_id = campaign.get("template_id", "")
     primary_channel = (campaign.get("channels") or ["WHATSAPP"])[0]
+    kind = ((campaign.get("schedule") or {}).get("kind") or "ONE_TIME").upper()
+    once_per_recipient = kind == "ONE_TIME"
+    logs = db.get_collection("notification_logs")
+    if once_per_recipient:
+        # The unique backstop must exist BEFORE anything is queued; without it
+        # two doors could each insert a row. Same index the SMS fallback uses.
+        try:
+            logs.create_index(
+                "dedupe_ref",
+                unique=True,
+                partialFilterExpression={"dedupe_ref": {"$type": "string"}},
+                name="uniq_notification_dedupe_ref",
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(
+                f"campaign queue index unavailable, nothing queued: {exc}"
+            ) from exc
 
     audience = seg.resolve_segment(
         db,
@@ -67,7 +100,7 @@ async def fan_out_campaign(
     )
 
     results: List[Dict[str, Any]] = []
-    sent = skipped = failed = 0
+    sent = skipped = failed = already = retryable = 0
 
     def _skip(cid, reason: str) -> None:
         nonlocal skipped
@@ -76,6 +109,30 @@ async def fan_out_campaign(
 
     for r in audience:
         cid = r.get("customer_id")
+        phone = r.get("phone") or ""
+        ref = (
+            f"campaign:{campaign_id}:{cid or phone}"
+            if once_per_recipient and (cid or phone)
+            else None
+        )
+        # Already queued for this campaign (another door, an earlier try, a
+        # lost acknowledgement): nothing to do. A read failure here is a
+        # failed recipient, never a guess.
+        if ref:
+            try:
+                if logs.find_one({"dedupe_ref": ref}, {"_id": 1}):
+                    already += 1
+                    results.append(
+                        {"customer_id": cid, "status": "already_queued"}
+                    )
+                    continue
+            except Exception as exc:  # noqa: BLE001
+                failed += 1
+                retryable += 1
+                results.append(
+                    {"customer_id": cid, "status": "failed", "error": str(exc)}
+                )
+                continue
         # Consent gate (full is_opted_out): flag OR a STOP/OPT_OUT ledger entry.
         # Ad-hoc rows w/o customer_id send (no consent record to check).
         if cid and is_opted_out(cid, db):
@@ -86,7 +143,6 @@ async def fan_out_campaign(
         if cid and not rail.check_frequency_cap(db, cid, category="MARKETING"):
             _skip(cid, "freqcap")
             continue
-        phone = r.get("phone") or ""
         if not phone:
             _skip(cid, "no_phone")
             continue
@@ -103,19 +159,35 @@ async def fan_out_campaign(
                 triggered_by=triggered_by,
                 related_entity_type="campaign",
                 related_entity_id=campaign_id,
+                # Stamped AT INSERT (one write): the campaign tag and the
+                # once-per-recipient ref the unique index enforces.
+                extra={"campaign_id": campaign_id, **({"dedupe_ref": ref} if ref else {})},
             )
-            # Tag the just-queued notification_logs row with campaign_id so
-            # analytics can aggregate it. send_notification doesn't take a
-            # campaign_id, so we stamp it on the row it created.
+            if res.get("duplicate"):
+                # Another door queued this recipient between our check and
+                # our insert; the unique index kept it to ONE row.
+                already += 1
+                results.append({"customer_id": cid, "status": "already_queued"})
+                continue
+            if res.get("status") == "REFUSED":
+                failed += 1
+                results.append(
+                    {
+                        "customer_id": cid,
+                        "status": "failed",
+                        "reason": "unfilled_placeholder",
+                        "missing_variables": res.get("missing_variables"),
+                    }
+                )
+                continue
+            if not res.get("persisted"):
+                failed += 1
+                retryable += 1
+                results.append(
+                    {"customer_id": cid, "status": "failed", "reason": "not_saved"}
+                )
+                continue
             nid = res.get("notification_id")
-            if nid:
-                try:
-                    db.get_collection("notification_logs").update_one(
-                        {"notification_id": nid},
-                        {"$set": {"campaign_id": campaign_id}},
-                    )
-                except Exception:  # noqa: BLE001
-                    pass
             # Record the cap ledger row so this send counts against the shared
             # 30-day cap (transactional categories are skipped inside).
             if cid:
@@ -132,6 +204,7 @@ async def fan_out_campaign(
             )
         except Exception as exc:  # noqa: BLE001
             failed += 1
+            retryable += 1
             results.append({"customer_id": cid, "status": "failed", "error": str(exc)})
             logger.debug("campaign %s recipient failed: %s", campaign_id, exc)
 
@@ -140,5 +213,7 @@ async def fan_out_campaign(
         "sent": sent,
         "skipped": skipped,
         "failed": failed,
+        "already_queued": already,
+        "retryable": retryable,
         "results": results,
     }

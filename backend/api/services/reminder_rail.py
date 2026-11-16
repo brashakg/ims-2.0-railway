@@ -221,6 +221,52 @@ def record_outbound(
 
 
 # ---------------------------------------------------------------------------
+# Cadence (D56): a CRON rule fires once per period, at or after its IST time
+# ---------------------------------------------------------------------------
+
+_IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def parse_cron(cron: Optional[str]) -> Optional[Tuple[str, int, int]]:
+    """'DAILY 09:00' / 'WEEKLY 10:00' -> (kind, hour, minute); anything else
+    -> None (a rule with an unknown cadence never fires on its own)."""
+    parts = (cron or "").strip().upper().split()
+    if len(parts) != 2 or parts[0] not in ("DAILY", "WEEKLY"):
+        return None
+    hm = parts[1].split(":")
+    if len(hm) != 2 or not all(x.isdigit() for x in hm):
+        return None
+    hour, minute = int(hm[0]), int(hm[1])
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    return parts[0], hour, minute
+
+
+def cron_period_due(cron: Optional[str], now: datetime) -> Optional[str]:
+    """The period key ('D2026-11-16' / 'W2026-47', IST) this rule may fire for
+    at `now`, or None when it is not yet its time today / this week or the
+    cadence is unknown. DAILY HH:MM fires once per IST day at or after HH:MM,
+    WEEKLY HH:MM once per IST (ISO) week at or after Monday HH:MM, whatever
+    the evaluation interval (MEGAPHONE ticks every 30 min). The caller claims
+    the key atomically on the rule (last_fired_period) so a second tick, or a
+    second worker, in the same period queues nothing."""
+    parsed = parse_cron(cron)
+    if parsed is None:
+        return None
+    kind, hour, minute = parsed
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    ist = now.astimezone(_IST)
+    if (ist.hour, ist.minute) < (hour, minute):
+        if kind == "DAILY" or ist.isoweekday() == 1:
+            return None
+    if kind == "DAILY":
+        return "D" + ist.date().isoformat()
+    year, week, _ = ist.isocalendar()
+    return f"W{year}-{week:02d}"
+
+
+# ---------------------------------------------------------------------------
 # Gate stack
 # ---------------------------------------------------------------------------
 
@@ -533,6 +579,11 @@ async def evaluate_rule(
                 related_entity_type="reminder_rule",
                 related_entity_id=rule.get("rule_id"),
             )
+            # Honest count (Codex 1419): a refused (unfilled placeholder, D56)
+            # or unsaved row is an error, never "queued", and uses no cap.
+            if isinstance(res, dict) and res.get("persisted") is False:
+                result["errors"] += 1
+                continue
             # Stamp rule_id + scheduled_for (defer) on the just-queued row.
             nid = res.get("notification_id") if isinstance(res, dict) else None
             if nid:

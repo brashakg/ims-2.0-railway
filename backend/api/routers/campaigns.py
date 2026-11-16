@@ -744,22 +744,38 @@ async def send_campaign(
     # ONE fan-out loop for both doors (L1-F27): this manual send and
     # MEGAPHONE's scheduled tick share consent (flag + STOP ledger), the 30-day
     # frequency cap and its comms_ledger row. See services/campaign_dispatch.
-    out = await fan_out_campaign(
-        db,
-        doc,
-        send_store_id=doc.get("store_id") or current_user.get("active_store_id", ""),
-        triggered_by=current_user.get("user_id", "unknown"),
-        send_notification=send_notification,
-    )
+    # A ONE_TIME campaign reaches each recipient once whichever door runs and
+    # however often it is pressed (dedupe_ref + unique index, see
+    # services/campaign_dispatch): this send, the scheduled tick and a retry
+    # after a lost reply cannot queue a second message to the same person.
+    try:
+        out = await fan_out_campaign(
+            db,
+            doc,
+            send_store_id=doc.get("store_id") or current_user.get("active_store_id", ""),
+            triggered_by=current_user.get("user_id", "unknown"),
+            send_notification=send_notification,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Campaign queue unavailable. Nothing was queued - try again.",
+        ) from exc
     audience_count = out["audience"]
     sent, skipped, failed = out["sent"], out["skipped"], out["failed"]
+    already = out.get("already_queued", 0)
     results = out["results"]
 
-    # ONE_TIME -> COMPLETED. A legacy RECURRING/TRIGGERED row stays ACTIVE so
-    # staff can send it again by hand; nothing re-sends it automatically.
+    # ONE_TIME -> COMPLETED only when nothing is left to retry: a recipient
+    # whose row did not reach storage keeps the campaign ACTIVE so Send now
+    # can be pressed again (it queues only the missing recipients). A legacy
+    # RECURRING/TRIGGERED row stays ACTIVE so staff can send it again by hand;
+    # nothing re-sends it automatically.
     sched = doc.get("schedule") or {}
     kind = (sched.get("kind") or "ONE_TIME") if sched else "ONE_TIME"
-    new_status = "COMPLETED" if kind == "ONE_TIME" else "ACTIVE"
+    new_status = (
+        "COMPLETED" if kind == "ONE_TIME" and not out.get("retryable") else "ACTIVE"
+    )
 
     db.get_collection("campaigns").update_one(
         {"campaign_id": campaign_id},
@@ -787,12 +803,17 @@ async def send_campaign(
             "queued": sent,
             "skipped": skipped,
             "failed": failed,
+            "already_queued": already,
             "status": new_status,
         },
     )
     msg = f"{sent}/{audience_count} queued"
+    if already:
+        msg += f" ({already} already queued earlier)"
     if skipped:
         msg += f" ({skipped} skipped)"
+    if failed:
+        msg += f" ({failed} not queued - press Send now again to retry them)" if out.get("retryable") else f" ({failed} not queued)"
     return {
         "message": msg,
         "campaign_id": campaign_id,
@@ -801,6 +822,7 @@ async def send_campaign(
         "queued": sent,
         "skipped": skipped,
         "failed": failed,
+        "already_queued": already,
         "results": results,
     }
 

@@ -64,14 +64,26 @@ DISPATCH_LEASE_MINUTES = 15
 
 def _needs_marketing_consent(row: Dict[str, Any]) -> bool:
     """True when this queued row is only allowed to go out on the customer's
-    marketing consent (L1-F20). The row's own recorded consent_basis decides;
-    an older row without one is classified by the SAME rule the queue writer
-    uses (notification_service._default_consent_basis), so OTP / service /
-    transactional / reminder rows keep their exemption."""
-    from api.services.notification_service import _default_consent_basis
+    marketing consent (L1-F20, D56). The STRICTER of the row's recorded
+    consent_basis and THE shared rule re-derived from the row itself
+    (notification_service.consent_basis_for: template, category, related
+    entity) decides, so a promotional template stamped SERVICE by a caller, or
+    an older row written before the rule, still meets the STOP check. OTP /
+    service / order-, Rx- or appointment-specific reminder rows keep their
+    exemption."""
+    from api.services.notification_service import consent_basis_for
 
-    basis = row.get("consent_basis") or _default_consent_basis(row.get("category"))
-    return basis != "transactional"
+    if row.get("consent_basis") == "marketing_consent":
+        return True
+    derived = consent_basis_for(
+        row.get("category"),
+        row.get("template_id"),
+        row.get("related_entity_type"),
+        row.get("related_entity_id"),
+    )
+    if derived == "marketing_consent":
+        return True
+    return row.get("consent_basis") not in (None, "", "transactional")
 
 
 class MegaphoneAgent(JarvisAgent):
@@ -631,6 +643,34 @@ class MegaphoneAgent(JarvisAgent):
             return stats
 
         for rule in rules:
+            # D56 cadence: 'DAILY 09:00' fires once per IST day at or after
+            # 09:00, whatever the 30-min tick. The period is CLAIMED on the rule
+            # atomically before anything is queued, so a later tick or a second
+            # worker in the same period queues nothing. A run that fails after
+            # its claim waits for the next period (a missed day, never a
+            # duplicate message).
+            period = reminder_rail.cron_period_due(
+                (rule.get("trigger") or {}).get("cron"), now
+            )
+            if period is None:
+                continue
+            try:
+                claimed = coll.update_one(
+                    {
+                        "rule_id": rule.get("rule_id"),
+                        "last_fired_period": {"$ne": period},
+                    },
+                    {"$set": {"last_fired_period": period}},
+                ).modified_count
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[MEGAPHONE] reminder rule %s claim failed: %s",
+                    rule.get("rule_id"),
+                    exc,
+                )
+                continue
+            if not claimed:
+                continue
             try:
                 res = await reminder_rail.evaluate_rule(self.db, rule, now=now)
             except Exception as exc:  # noqa: BLE001
@@ -830,6 +870,10 @@ class MegaphoneAgent(JarvisAgent):
             send_notification=send_notification,
         )
         sent, skipped, failed = out["sent"], out["skipped"], out["failed"]
+        # A recipient whose row did not reach storage is retried on the next
+        # tick (back to SCHEDULED); recipients already queued are never queued
+        # again (dedupe_ref + unique index in the shared loop).
+        final_status = "SCHEDULED" if out.get("retryable") else "COMPLETED"
 
         # ONE_TIME -> COMPLETED after send; update counters.
         try:
@@ -837,7 +881,7 @@ class MegaphoneAgent(JarvisAgent):
                 {"campaign_id": campaign_id},
                 {
                     "$set": {
-                        "status": "COMPLETED",
+                        "status": final_status,
                         "audience_count": out["audience"],
                         "last_sent_at": datetime.now(timezone.utc).isoformat(),
                         "updated_at": datetime.now(timezone.utc).isoformat(),
