@@ -1148,8 +1148,12 @@ def _given_back_elsewhere(db, order: Dict[str, Any], refund_id: str) -> Optional
         # COMPLETED yet: its KEPT refund hold is its record (the same rule as
         # returns._live_refund_holds) -- counted at its amount, and its own
         # credit line through it, never twice.
+        # A door's hold (online post, admin note, advance refund) is never its
+        # record: its own doc or ledger row counts it, and while it is live it
+        # refuses every other pricer -- counted here it would count twice
+        # once a failed release left it kept (internal review of D79).
         for hrid, hold in (order.get("refund_holds") or {}).items():
-            if (hold or {}).get("kept") and _norm(hrid) not in completed:
+            if (hold or {}).get("kept") and not (hold or {}).get("door") and _norm(hrid) not in completed:
                 total += _f((hold or {}).get("amount"))
                 doc_entries.add(_norm(f"{hrid}:credit"))
         for row in db.get_collection(_REVIEW_COLLECTION).find({"order_id": order_id}):
@@ -1453,6 +1457,20 @@ def _hold_order_for_online(db, order_id: Any, refund_id: str, amount: float) -> 
 
     return take_bill_hold(db.get_collection("orders"), order_id, f"{ONLINE_HOLD_PREFIX}{refund_id}",
                           _f(amount), door="online", ttl=_CLAIM_STALE_SECONDS)
+
+
+def _fence_online_hold(db, order_id: Any, refund_id: str) -> bool:
+    """This post's hold is still its own and live, and is now kept until the
+    post ends (returns.fence_bill_hold, D79). False (or unreadable): book
+    nothing, retried."""
+    from ..routers.returns import ONLINE_HOLD_PREFIX, fence_bill_hold
+
+    try:
+        return fence_bill_hold(db.get_collection("orders"), order_id, f"{ONLINE_HOLD_PREFIX}{refund_id}")
+    except Exception:  # noqa: BLE001 -- unknown: book nothing
+        logger.warning("[SHOPIFY_REFUND] hold of refund=%s on order=%s could not be fenced", refund_id,
+                       order_id, exc_info=True)
+        return False
 
 
 def _release_online_hold(db, order_id: Any, refund_id: str) -> None:
@@ -2095,6 +2113,10 @@ def _post_credit_and_restock(
         if expect_store_credit is not None and allowance[0] != expect_store_credit:
             return {"status": "review", "refund_id": refund_id, "order_id": order_id,
                     "store_credit": allowance[0], "store_credit_reason": allowance[1]}
+        # D79: the fence before the first write -- a post that stalled until its
+        # hold aged out or another door took the bill over books nothing.
+        if token is not None and not _fence_online_hold(db, order_id, refund_id):
+            return busy
         return _post_locked(
             db, refund_id=refund_id, order=order, return_lines=return_lines,
             credit_note=credit_note, restock_store=restock_store,

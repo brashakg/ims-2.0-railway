@@ -725,7 +725,7 @@ async def superadmin_invoice_change(
     _amount = round(float(delta.get("abs_delta") or 0), 2)
     _door = (bill_money_door(db, getattr(repo, "collection", None), order_id, f"credit-note:{sacn_id}",
                              _amount, door="credit_note") if is_cn else nullcontext())
-    with _door:
+    with _door as _fence:
         if is_cn:
             room = bill_room_left(db, repo.find_by_id(order_id) or order)
             if room is not None and _amount > room + 0.01:
@@ -734,6 +734,10 @@ async def superadmin_invoice_change(
                     f"(returns, refunds and credit notes so far), so a credit note of Rs {_amount:.2f} "
                     "cannot be issued. Nothing was issued."))
         marker = utc_now_iso()
+        if is_cn:
+            # D79: the hold is still this press's (not aged out, not taken
+            # over) and kept from here, else 409 and nothing is written.
+            _fence()
         if is_cn and not repo.update_if(
             order_id, {"advance_refund_id": None, "status": order.get("status")},
             {"post_invoice_credit_note_at": marker},
