@@ -96,6 +96,9 @@ def _drain(db, webhook_id):
     return db.webhook_inbox.find_one({"webhook_id": webhook_id})
 
 
+_REAL_FIND_ONE = mongomock.collection.Collection.find_one
+
+
 def _lookup_outage(*collections):
     """The database is up for everything EXCEPT a find_one on `collections`
     (a storage outage / timeout on the lookup the handler depends on)."""
@@ -868,15 +871,15 @@ def test_two_drains_raising_the_alert_at_once_open_one_task(db, an_admin, monkey
 
     monkeypatch.setattr(task_triggers, "active_tasks", both_read_before_either_writes)
 
-    def last_try(wid):
-        with _lookup_outage("orders"):
-            _drain(db, wid)
-
-    threads = [threading.Thread(target=last_try, args=(w,)) for w in ("race-1", "race-2")]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
+    # ONE patch around both threads: a patch entered per thread restores in
+    # the wrong order and leaks the outage into later tests.
+    threads = [threading.Thread(target=_drain, args=(db, w)) for w in ("race-1", "race-2")]
+    with _lookup_outage("orders"):
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    assert mongomock.collection.Collection.find_one is _REAL_FIND_ONE
 
     tasks = _open_dead_tasks(db)
     assert len(tasks) == 1, [t["task_id"] for t in tasks]
