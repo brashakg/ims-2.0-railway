@@ -538,6 +538,124 @@ def test_the_history_import_does_not_rebook_a_refund_it_could_not_check(db):
 
 
 # ---------------------------------------------------------------------------
+# D55: the RETRY CLAIM of a stale, never-credited refund. A claim write that
+# failed, or landed with its answer lost, is unfinished work -- never a
+# duplicate acknowledged as done while no credit note exists.
+# ---------------------------------------------------------------------------
+
+
+def _dead_first_run(db):
+    """A run claimed the refund 30 minutes ago and died before posting."""
+    db.returns.insert_one({
+        "return_id": "RET-DEAD", "order_id": "ORD-AUDIT-1", "shopify_refund_id": _REFUND_ID,
+        "customer_id": "CUST-1", "status": "PENDING", "credit_note_issued": False,
+        "created_at": (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat(),
+    })
+
+
+def _claim_write(mode):
+    """The returns collection's find_one_and_update (the retry claim) fails:
+    'fails' writes nothing, 'ack_lost' writes and then loses the answer."""
+    real = mongomock.collection.Collection.find_one_and_update
+    hits = []
+
+    def flaky(self, *args, **kwargs):
+        if self.name != "returns" or hits:
+            return real(self, *args, **kwargs)
+        if mode == "fails":
+            hits.append(1)
+            raise TimeoutError("synthetic retry-claim write timeout")
+        out = real(self, *args, **kwargs)
+        if out is not None:
+            hits.append(1)
+            raise TimeoutError("synthetic lost claim acknowledgement")
+        return out
+
+    return patch.object(mongomock.collection.Collection, "find_one_and_update", flaky), hits
+
+
+@pytest.mark.parametrize("mode", ["fails", "ack_lost"])
+def test_a_failed_retry_claim_is_a_retryable_failure_not_a_duplicate(db, monkeypatch, mode):
+    """Codex 1412-round1 P2, both shapes of a failed claim write. Before: the
+    handler answered "duplicate", NEXUS stored succeeded/processed and the
+    refund was never credited by that event again."""
+    monkeypatch.setenv("SHOPIFY_REFUND_AUTO", "1")
+    _refund_order(db)
+    _dead_first_run(db)
+    _inbox_row(db, "refund-claim-" + mode, "refunds/create", _refund_payload())
+    ledger_before = db.credit_note_ledger.count_documents({})
+
+    fault, hits = _claim_write(mode)
+    with fault:
+        row = _drain(db, "refund-claim-" + mode)
+    assert hits, "the retry claim was not exercised"
+    assert row["processed"] is False and row["status"] == "failed", row
+    assert "claim held or unverified" in row["handler_error"]
+    assert db.credit_note_ledger.count_documents({}) == ledger_before
+    ret = db.returns.find_one({"shopify_refund_id": _REFUND_ID})
+    assert ret["credit_note_issued"] is False
+
+    if mode == "ack_lost":
+        # The claim it wrote is fresh: another drain must still not post or
+        # acknowledge it (single winner) until the claim goes stale.
+        row = _drain(db, "refund-claim-" + mode)
+        assert row["processed"] is False and row["status"] == "failed", row
+        assert db.credit_note_ledger.count_documents({}) == ledger_before
+        db.returns.update_one({"shopify_refund_id": _REFUND_ID}, {"$set": {
+            "reprocessing_at": (datetime.now(timezone.utc) - timedelta(minutes=20)).isoformat()}})
+
+    # Storage recovered: the SAME event re-drains, wins the claim and posts
+    # (this in-memory double has no credit ledger, so the post lands on the
+    # accountant's queue as CREDIT_FAILED; the native probe shows the credit).
+    row = _drain(db, "refund-claim-" + mode)
+    ret = db.returns.find_one({"shopify_refund_id": _REFUND_ID})
+    assert ret["status"] != "PENDING" and ret.get("reprocessing_at") is None, ret
+    assert row["processed"] is True and row["status"] == "succeeded", row
+    assert ret["credit_note_issued"] is True or db.shopify_refund_review.find_one(
+        {"shopify_refund_id": _REFUND_ID, "status": "CREDIT_FAILED"}), ret
+
+
+def test_a_claim_check_that_cannot_read_is_a_failure_not_a_duplicate(db, monkeypatch):
+    """No claim was won and the "is the credit note there?" read fails: that
+    is not a duplicate either."""
+    monkeypatch.setenv("SHOPIFY_REFUND_AUTO", "1")
+    _refund_order(db)
+    _dead_first_run(db)
+    db.returns.update_one({"shopify_refund_id": _REFUND_ID}, {"$set": {
+        "reprocessing_at": datetime.now(timezone.utc).isoformat()}})
+    real = mongomock.collection.Collection.find_one
+    calls = []
+
+    def last_read_fails(self, *args, **kwargs):
+        if self.name == "returns" and args and args[0] == {"shopify_refund_id": _REFUND_ID}:
+            calls.append(1)
+            if len(calls) > 2:  # the guard's two reads work; the claim check does not
+                raise TimeoutError("synthetic read outage")
+        return real(self, *args, **kwargs)
+
+    with patch.object(mongomock.collection.Collection, "find_one", last_read_fails):
+        result = handle_shopify_refund(db, _refund_payload(), topic="refunds/create")
+    assert result["status"] == "error", result
+
+
+def test_a_really_credited_refund_is_still_a_duplicate(db, monkeypatch):
+    monkeypatch.setenv("SHOPIFY_REFUND_AUTO", "1")
+    _refund_order(db)
+    db.returns.insert_one({
+        "return_id": "RET-DONE", "order_id": "ORD-AUDIT-1", "shopify_refund_id": _REFUND_ID,
+        "status": "COMPLETED", "credit_note_issued": True,
+        "created_at": (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat(),
+    })
+    from api.services import shopify_refund as S
+
+    assert S._post_locked(
+        db, refund_id=_REFUND_ID, order=db.orders.find_one({"order_id": "ORD-AUDIT-1"}),
+        return_lines=[], credit_note={"gross_refund": 1000.0}, restock_store=None,
+        settled_externally=False, restock_unverified=False,
+        allowance=(None, "", None, False))["status"] == "duplicate"
+
+
+# ---------------------------------------------------------------------------
 # D13(a): a webhook parked dead is retried by nothing - an admin must see it.
 # ONE open task per provider on the Tasks board; later dead webhooks join it.
 # ---------------------------------------------------------------------------
@@ -650,3 +768,118 @@ def test_a_task_that_cannot_be_written_never_stops_the_drain(db, monkeypatch):
     _order(db)
     _park_dead(db, "dead-9")
     assert db.tasks.count_documents({}) == 0
+
+
+# ---------------------------------------------------------------------------
+# D55: the dead-letter alert is OWED until an open task names the webhook.
+# ---------------------------------------------------------------------------
+
+
+def _task_insert(mode):
+    """The tasks insert fails for as long as the patch holds ('fails':
+    nothing written), or lands once with its answer lost ('ack_lost')."""
+    real = mongomock.collection.Collection.insert_one
+    hits = []
+
+    def flaky(self, doc, *args, **kwargs):
+        if self.name != "tasks" or (hits and mode == "ack_lost"):
+            return real(self, doc, *args, **kwargs)
+        hits.append(1)
+        if mode == "ack_lost":
+            real(self, doc, *args, **kwargs)
+        raise TimeoutError("synthetic task write outage")
+
+    return patch.object(mongomock.collection.Collection, "insert_one", flaky), hits
+
+
+def _park_dead_with_task_fault(db, webhook_id, mode):
+    _inbox_row(db, webhook_id, "orders/delete", {"id": int(_SHOPIFY_ORDER_ID)})
+    fault, hits = _task_insert(mode)
+    with _lookup_outage("orders"):
+        for _ in range(NexusAgent.WEBHOOK_MAX_ATTEMPTS - 1):
+            _drain(db, webhook_id)
+        with fault:
+            row = _drain(db, webhook_id)
+    assert hits and row["status"] == "dead", row
+    return row
+
+
+def _open_dead_tasks(db):
+    return list(db.tasks.find({"source_ref": _DEAD_REF, "status": "OPEN"}))
+
+
+@pytest.mark.parametrize("retry", ["drain", "sweep"])
+def test_a_failed_alert_task_insert_is_raised_again(db, an_admin, retry):
+    """Codex 1412-round1 P2. Before: the row was dead, the task insert failed
+    and nothing ever raised the alert again (the dead row is never claimed)."""
+    _order(db)
+    row = _park_dead_with_task_fault(db, "dead-lost", "fails")
+    assert row["alert_pending"] is True
+    assert _open_dead_tasks(db) == []
+
+    if retry == "drain":
+        row = _drain(db, "dead-lost")
+    else:
+        asyncio.run(NexusAgent(db=db)._retry_failed_webhooks())
+        row = db.webhook_inbox.find_one({"webhook_id": "dead-lost"})
+    tasks = _open_dead_tasks(db)
+    assert len(tasks) == 1 and "id dead-lost." in tasks[0]["description"], tasks
+    assert "alert_pending" not in row and row["status"] == "dead"
+    # Owed once: later drains and sweeps add nothing.
+    _drain(db, "dead-lost")
+    asyncio.run(NexusAgent(db=db)._retry_failed_webhooks())
+    assert db.tasks.count_documents({}) == 1
+
+
+def test_a_task_insert_whose_answer_was_lost_is_not_duplicated(db, an_admin):
+    _order(db)
+    _park_dead_with_task_fault(db, "dead-ack", "ack_lost")
+    asyncio.run(NexusAgent(db=db)._retry_failed_webhooks())
+    tasks = _open_dead_tasks(db)
+    assert len(tasks) == 1, tasks
+    assert tasks[0]["description"].count("id dead-ack.") == 1
+    assert "alert_pending" not in db.webhook_inbox.find_one({"webhook_id": "dead-ack"})
+
+
+def test_two_drains_raising_the_alert_at_once_open_one_task(db, an_admin, monkeypatch):
+    """D55 unique key: both drains read "no open task" before either writes.
+    Before: two open tasks. Now the second insert is refused (same episode id)
+    and it joins the first."""
+    import threading
+
+    import api.services.task_triggers as task_triggers
+
+    _order(db)
+    for wid in ("race-1", "race-2"):
+        _inbox_row(db, wid, "orders/delete", {"id": int(_SHOPIFY_ORDER_ID)})
+        with _lookup_outage("orders"):
+            for _ in range(NexusAgent.WEBHOOK_MAX_ATTEMPTS - 1):
+                _drain(db, wid)
+    gate = threading.Barrier(2, timeout=10)
+    real_active = task_triggers.active_tasks
+    first_reads = []
+
+    def both_read_before_either_writes(repo, ref):
+        rows = real_active(repo, ref)
+        if len(first_reads) < 2:
+            first_reads.append(1)
+            gate.wait()
+        return rows
+
+    monkeypatch.setattr(task_triggers, "active_tasks", both_read_before_either_writes)
+
+    def last_try(wid):
+        with _lookup_outage("orders"):
+            _drain(db, wid)
+
+    threads = [threading.Thread(target=last_try, args=(w,)) for w in ("race-1", "race-2")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    tasks = _open_dead_tasks(db)
+    assert len(tasks) == 1, [t["task_id"] for t in tasks]
+    for wid in ("race-1", "race-2"):
+        assert f"id {wid}." in tasks[0]["description"]
+        assert "alert_pending" not in db.webhook_inbox.find_one({"webhook_id": wid})
