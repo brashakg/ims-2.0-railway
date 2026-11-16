@@ -33,7 +33,7 @@ import asyncio
 import os
 import sys
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from unittest.mock import patch
 
@@ -55,6 +55,11 @@ from api.services.task_sla import MAX_ESCALATION_LEVEL  # noqa: E402
 
 
 STORE = "S1"
+
+
+def _utcnow() -> datetime:
+    """The stored naive-UTC frame (RUN-02), so fixtures match the scans on any host."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 # ===========================================================================
@@ -231,7 +236,7 @@ class TestPaymentVarianceDateWindow:
         """THE F13 REGRESSION: a POS order whose created_at is a real BSON Date
         (what every live write path stores) must be scanned. Against the old
         ISO-STRING-only cutoff this matched nothing and the scan was dead."""
-        recent = datetime.now() - timedelta(days=2)
+        recent = _utcnow() - timedelta(days=2)
         body, _repo, task_repo = _run_variance_scan([_order("O-DATE", recent)])
 
         assert body["scanned"] == 1
@@ -243,7 +248,7 @@ class TestPaymentVarianceDateWindow:
 
     def test_legacy_iso_string_order_inside_window_is_also_matched(self):
         """The dual window keeps legacy ISO-string created_at rows visible."""
-        recent_iso = (datetime.now() - timedelta(days=2)).isoformat()
+        recent_iso = (_utcnow() - timedelta(days=2)).isoformat()
         body, _repo, _tasks = _run_variance_scan([_order("O-STR", recent_iso)])
 
         assert body["scanned"] == 1
@@ -251,7 +256,7 @@ class TestPaymentVarianceDateWindow:
         assert body["details"][0]["order_id"] == "O-STR"
 
     def test_both_typings_matched_in_one_scan(self):
-        now = datetime.now()
+        now = _utcnow()
         body, _repo, _tasks = _run_variance_scan(
             [
                 _order("O-DATE", now - timedelta(days=1)),
@@ -263,7 +268,7 @@ class TestPaymentVarianceDateWindow:
 
     def test_orders_older_than_window_are_excluded(self):
         """The window must still WORK -- both arms bound the low end."""
-        old = datetime.now() - timedelta(days=40)
+        old = _utcnow() - timedelta(days=40)
         body, _repo, _tasks = _run_variance_scan(
             [_order("O-OLD-DATE", old), _order("O-OLD-STR", old.isoformat())],
             days=7,
@@ -275,8 +280,8 @@ class TestPaymentVarianceDateWindow:
     def test_other_store_orders_are_excluded(self):
         body, _repo, _tasks = _run_variance_scan(
             [
-                _order("O-MINE", datetime.now() - timedelta(hours=6)),
-                _order("O-THEIRS", datetime.now() - timedelta(hours=6), store_id="S2"),
+                _order("O-MINE", _utcnow() - timedelta(hours=6)),
+                _order("O-THEIRS", _utcnow() - timedelta(hours=6), store_id="S2"),
             ]
         )
         assert body["scanned"] == 1
@@ -284,7 +289,7 @@ class TestPaymentVarianceDateWindow:
 
     def test_filter_carries_both_window_arms_and_a_deterministic_sort(self):
         _body, repo, _tasks = _run_variance_scan(
-            [_order("O-DATE", datetime.now() - timedelta(days=1))]
+            [_order("O-DATE", _utcnow() - timedelta(days=1))]
         )
         filters = repo.calls[0]["filters"]
         arms = filters["$or"]
@@ -302,7 +307,7 @@ class TestPaymentVarianceDateWindow:
 
 def _breached_task(idx: int, *, priority="P0", minutes_over=600) -> Dict[str, Any]:
     """An OPEN task well past its due_at + grace -> must escalate."""
-    due = datetime.now() - timedelta(minutes=minutes_over)
+    due = _utcnow() - timedelta(minutes=minutes_over)
     return {
         "task_id": f"TSK-BREACH-{idx:05d}",
         "title": f"breached {idx}",
@@ -319,7 +324,7 @@ def _breached_task(idx: int, *, priority="P0", minutes_over=600) -> Dict[str, An
 
 def _healthy_task(idx: int) -> Dict[str, Any]:
     """A young P4 task: not past due, ack clock (3 days) not breached."""
-    now = datetime.now()
+    now = _utcnow()
     return {
         "task_id": f"TSK-OK-{idx:05d}",
         "title": f"healthy {idx}",
@@ -430,7 +435,7 @@ class TestAutoEscalateScanCompleteness:
         maxed = _breached_task(1)
         maxed["escalation_level"] = MAX_ESCALATION_LEVEL
         maxed["status"] = "ESCALATED"
-        maxed["escalated_at"] = datetime.now() - timedelta(days=30)
+        maxed["escalated_at"] = _utcnow() - timedelta(days=30)
 
         body, escalated, _repo = _run_auto_escalate([maxed])
         assert body["scanned"] == 0
@@ -442,7 +447,7 @@ class TestAutoEscalateScanCompleteness:
         flt = tasks_mod.build_escalation_candidate_filter(STORE)
         assert "due_at" not in flt and "created_at" not in flt
 
-        now = datetime.now()
+        now = _utcnow()
         not_yet_due = {
             "task_id": "TSK-ACK-1",
             "title": "unacknowledged P0",
@@ -596,7 +601,7 @@ class TestTaskmasterEscalationScan:
         maxed = _breached_task(1)
         maxed["escalation_level"] = MAX_ESCALATION_LEVEL
         maxed["status"] = "ESCALATED"
-        maxed["escalated_at"] = datetime.now() - timedelta(days=30)
+        maxed["escalated_at"] = _utcnow() - timedelta(days=30)
         agent, _coll, _colls = _taskmaster_with([maxed])
         assert asyncio.run(agent._escalate_overdue_tasks()) == []
 
@@ -630,7 +635,7 @@ def test_real_mongo_dual_window_matches_both_typings():
     client, db, name = _real_mongo_db()
     try:
         coll = db["orders"]
-        now = datetime.now()
+        now = _utcnow()
         cutoff_dt = now - timedelta(days=7)
         cutoff_iso = cutoff_dt.isoformat()
         coll.insert_many(
@@ -667,7 +672,7 @@ def test_real_mongo_escalation_candidate_filter_and_sort():
     client, db, name = _real_mongo_db()
     try:
         coll = db["tasks"]
-        now = datetime.now()
+        now = _utcnow()
         coll.insert_many(
             [
                 {"task_id": "T-NOFIELD", "status": "OPEN", "store_id": STORE},

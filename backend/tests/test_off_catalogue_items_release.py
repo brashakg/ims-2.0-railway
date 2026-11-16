@@ -1501,6 +1501,11 @@ def _escalate_after(world, monkeypatch, engine, hours):
         def now(cls, tz=None):
             return real.now(tz) + vd.timedelta(hours=hours)
 
+    # RUN-02: both engines read the shared UTC event clock, not the host's.
+    from datetime import timezone as _tz
+    from api.utils import event_time as _et
+
+    monkeypatch.setattr(_et, "utc_now", lambda: real.now(_tz.utc) + vd.timedelta(hours=hours))
     if engine == "taskmaster":
         from agents.implementations import taskmaster as _tm
 
@@ -5141,6 +5146,10 @@ def test_r8_the_auto_escalate_answer_counts_a_merge_as_a_merge(world, monkeypatc
             return real.now(tz) + vd.timedelta(hours=25)
 
     monkeypatch.setattr(_tasks, "datetime", _Later)
+    from datetime import timezone as _tz
+    from api.utils import event_time as _et
+
+    monkeypatch.setattr(_et, "utc_now", lambda: real.now(_tz.utc) + vd.timedelta(hours=25))
     body = _run(_tasks.auto_escalate_overdue_tasks(store_id=None, current_user=ADMIN))
     stored = sorted(t.get("status") for t in world.db.tasks.find({"category": "Catalogue"}))
     finding(
