@@ -165,6 +165,8 @@ describe('D70: discount cap on a role change', () => {
     const sent = updateUser.mock.calls[0][1];
     expect(sent.discountCapFollowRole).toBe(false);
     expect(sent.discountCap).toBeUndefined();
+    // D93: held to the roles the form was opened with (server 409s otherwise).
+    expect(sent.expectedRoles).toEqual(['SALES_STAFF']);
   });
 
   it('a role-standard cap: says it follows the role, and the old value is not re-sent', async () => {

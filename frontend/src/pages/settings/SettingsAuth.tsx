@@ -171,6 +171,8 @@ export function UserManagementSection() {
         discountCap:
           userData.discountCap !== editingUser?.discountCap ? userData.discountCap : undefined,
         discountCapFollowRole: userData.discountCapFollowRole === true,
+        // D93: the save lands only on the roles this form was opened with.
+        expectedRoles: editingUser?.roles,
         username: (userData as { username?: string }).username,
         password: password,
         status: userData.isActive ? 'ACTIVE' : 'INACTIVE',

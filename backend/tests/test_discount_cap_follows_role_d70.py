@@ -318,7 +318,8 @@ def test_a_failed_revert_is_marked_not_applied(monkeypatch):
     target = _two_cap_edits(c, uid)
     monkeypatch.setattr(repo, "update", lambda *a, **k: False)  # nothing lands
     r = c.post(f"/api/v1/users/{uid}/permissions/revert", json={"audit_log_id": target})
-    assert r.status_code == 500, r.text
+    # D93: the revert is a compare-and-set now; "did not land" reads as 409.
+    assert r.status_code == 409, r.text
     assert _stored(repo, uid) == (15.0, False)
     hist = _history(c, uid)
     rev = [h for h in hist if h["action"] == "PERMISSIONS_REVERT"]
@@ -338,3 +339,140 @@ def test_lost_ack_on_a_landed_revert_is_success(monkeypatch):
     assert _stored(repo, uid) == (12.0, False)
     hist = _history(c, uid)
     assert not [h for h in hist if h.get("not_applied")]
+
+
+# --- D93 (head 237c1570 reviewers, 2026-11-16) ------------------------------
+
+
+def _write_between_reads(monkeypatch, repo, uid, change):
+    """Another admin's write lands right after the FIRST read of ``uid`` (the
+    side door's own read), so update_user's second read already sees it."""
+    real_find = repo.find_by_id
+    seen = {"n": 0}
+
+    def find(i):
+        d = real_find(i)
+        if i == uid:
+            seen["n"] += 1
+            if seen["n"] == 1:
+                repo.collection.update_one({"user_id": uid}, change)
+        return d
+
+    monkeypatch.setattr(repo, "find_by_id", find)
+    return real_find
+
+
+def test_side_doors_hold_the_write_to_their_own_read(monkeypatch):
+    """D93(1): a role added between the side door's read and update_user's
+    read must not be silently dropped from the list the door computed."""
+    for door in ("add", "remove", "assign"):
+        repo = _repo()
+        c, _ = _client_with_audit(repo, _SUPER, monkeypatch)
+        start = ["SALES_STAFF", "ACCOUNTANT"] if door == "remove" else ["SALES_STAFF"]
+        uid = _create(c, f"door{door}", start)
+        real_find = _write_between_reads(
+            monkeypatch, repo, uid, {"$push": {"roles": "WORKSHOP_STAFF"}})
+        if door == "add":
+            r = c.post(f"/api/v1/users/{uid}/roles/OPTOMETRIST")
+        elif door == "remove":
+            r = c.delete(f"/api/v1/users/{uid}/roles/ACCOUNTANT")
+        else:
+            r = c.post(f"/api/v1/users/{uid}/assign-store",
+                       json={"store_id": "S1", "role": "OPTOMETRIST"})
+        assert r.status_code == 409, (door, r.status_code, r.text)
+        assert real_find(uid)["roles"] == start + ["WORKSHOP_STAFF"], door
+        monkeypatch.setattr(repo, "find_by_id", real_find)
+        # Retried after a reload, the door works and keeps the other role.
+        if door == "add":
+            assert c.post(f"/api/v1/users/{uid}/roles/OPTOMETRIST").status_code == 200
+            assert real_find(uid)["roles"] == start + ["WORKSHOP_STAFF", "OPTOMETRIST"]
+
+
+def test_a_typed_cap_lands_only_on_the_roles_the_editor_saw(monkeypatch):
+    """D93(2): the permissions panel sends a cap without roles. A role change
+    meanwhile (before the request, or between its read and write) is a 409."""
+    repo = _repo()
+    c, _ = _client_with_audit(repo, _SUPER, monkeypatch)
+    uid = _create(c, "seen", ["SALES_STAFF"])
+    assert c.put(f"/api/v1/users/{uid}", json={"roles": ["ACCOUNTANT"]}).status_code == 200
+    r = c.put(f"/api/v1/users/{uid}",
+              json={"discount_cap": 15, "expected_roles": ["SALES_STAFF"]})
+    assert r.status_code == 409, r.text
+    assert _stored(repo, uid) == (0.0, True)
+    # With the roles it now has, the same edit lands.
+    r = c.put(f"/api/v1/users/{uid}",
+              json={"discount_cap": 5, "expected_roles": ["ACCOUNTANT"]})
+    assert r.status_code == 200, r.text
+    assert _stored(repo, uid) == (5.0, False)
+
+    uid = _create(c, "race", ["SALES_STAFF"])
+    stale = repo.find_by_id(uid)
+    repo.collection.update_one({"user_id": uid},
+                               {"$set": {"roles": ["ACCOUNTANT"], "discount_cap": 0.0}})
+    real_find = _stale_reads(monkeypatch, repo, uid, stale)
+    r = c.put(f"/api/v1/users/{uid}", json={"discount_cap": 15})
+    assert r.status_code == 409, r.text
+    d = real_find(uid)
+    assert (d["roles"], d["discount_cap"]) == (["ACCOUNTANT"], 0.0)
+
+
+def test_revert_restores_a_role_standard_cap_as_role_standard(monkeypatch):
+    """D93(3): Sales Staff created at the 10 standard; revert to that state;
+    a later change to Accountant gives the Accountant standard (0), not 10.
+    Also for a snapshot written before the marker existed."""
+    for old in (False, True):
+        repo = _repo()
+        audit = AuditRepository(mongomock.MongoClient().db.audit_logs)
+        c, _ = _client_with_audit(repo, _SUPER, monkeypatch, audit_repo=audit)
+        uid = _create(c, "rev", ["SALES_STAFF"])
+        for body in ({"discount_cap": 12}, {"discount_cap_follow_role": True},
+                     {"discount_cap": 15}):
+            assert c.put(f"/api/v1/users/{uid}", json=body).status_code == 200
+        target = [h for h in _history(c, uid)
+                  if h["permissions_after"].get("discount_cap") == 10.0][0]
+        assert target["permissions_after"]["discount_cap_is_role_default"] is True
+        if old:
+            audit.collection.update_one(
+                {"log_id": target["log_id"]},
+                {"$unset": {"permissions_after.discount_cap_is_role_default": ""}})
+        r = c.post(f"/api/v1/users/{uid}/permissions/revert",
+                   json={"audit_log_id": target["log_id"]})
+        assert r.status_code == 200, r.text
+        assert _stored(repo, uid) == (10.0, True), old
+        assert c.put(f"/api/v1/users/{uid}", json={"roles": ["ACCOUNTANT"]}).status_code == 200
+        assert _stored(repo, uid) == (0.0, True), old
+
+
+def test_revert_of_a_typed_cap_stays_typed_and_checks_the_seen_roles(monkeypatch):
+    repo = _repo()
+    audit = AuditRepository(mongomock.MongoClient().db.audit_logs)
+    c, _ = _client_with_audit(repo, _SUPER, monkeypatch, audit_repo=audit)
+    uid = _create(c, "revt", ["SALES_STAFF"])
+    target = _two_cap_edits(c, uid)
+    r = c.post(f"/api/v1/users/{uid}/permissions/revert",
+               json={"audit_log_id": target, "expected_roles": ["STORE_MANAGER"]})
+    assert r.status_code == 409, r.text
+    assert _stored(repo, uid) == (15.0, False)
+    r = c.post(f"/api/v1/users/{uid}/permissions/revert",
+               json={"audit_log_id": target, "expected_roles": ["SALES_STAFF"]})
+    assert r.status_code == 200, r.text
+    assert _stored(repo, uid) == (12.0, False)
+
+
+def test_a_failed_history_read_is_an_error_not_an_empty_history(monkeypatch):
+    from pymongo.errors import ServerSelectionTimeoutError
+
+    repo = _repo()
+    audit = AuditRepository(mongomock.MongoClient().db.audit_logs)
+    c, _ = _client_with_audit(repo, _SUPER, monkeypatch, audit_repo=audit)
+    uid = _create(c, "hist", ["SALES_STAFF"])
+    target = _two_cap_edits(c, uid)
+
+    def boom(*a, **k):
+        raise ServerSelectionTimeoutError("down")
+
+    monkeypatch.setattr(audit.collection, "find", boom)
+    assert c.get(f"/api/v1/users/{uid}/permissions").status_code == 503
+    r = c.post(f"/api/v1/users/{uid}/permissions/revert", json={"audit_log_id": target})
+    assert r.status_code == 503, r.text
+    assert _stored(repo, uid) == (15.0, False)

@@ -111,6 +111,8 @@ export function UserPermissionsPanel({
         // Only a changed cap: re-sending the loaded one would make a
         // role-standard cap look typed and stop it following the role (D70).
         discountCap: discountCap !== loadedCap ? discountCap : undefined,
+        // D93: held to the roles on screen (409 if someone changed them).
+        expectedRoles: roles,
         moduleAccess,
         permissions,
       });
@@ -130,7 +132,7 @@ export function UserPermissionsPanel({
     }
     setRevertingId(logId);
     try {
-      await adminUserApi.revertUserPermissions(userId, logId);
+      await adminUserApi.revertUserPermissions(userId, logId, roles);
       toast.success('Reverted to the selected state.');
       await load();
     } catch (err) {

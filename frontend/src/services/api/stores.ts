@@ -288,6 +288,8 @@ export const adminUserApi = {
     discountCap: number;
     /** D70: set the cap to the (new) role standard instead of keeping it. */
     discountCapFollowRole: boolean;
+    /** D93: the roles the editor saw; the server answers 409 if they changed. */
+    expectedRoles: string[];
     status: string;
     moduleAccess: Record<string, boolean>;
     permissions: { grant?: Record<string, boolean>; deny?: Record<string, boolean> };
@@ -317,6 +319,7 @@ export const adminUserApi = {
     if (data.discountCapFollowRole) payload.discount_cap_follow_role = true;
     else if (data.discountCap != null) payload.discount_cap = data.discountCap;
     if (data.status !== undefined) payload.is_active = data.status === 'ACTIVE';
+    if (data.expectedRoles) payload.expected_roles = data.expectedRoles;
     // Only include module_access when explicitly provided so an unrelated edit
     // never wipes an existing grant (backend update uses exclude_unset too).
     if (data.moduleAccess != null) payload.module_access = data.moduleAccess;
@@ -363,9 +366,10 @@ export const adminUserApi = {
   },
 
   // Re-apply a prior snapshot THROUGH the same escalation guard + audit.
-  revertUserPermissions: async (userId: string, auditLogId: string) => {
+  revertUserPermissions: async (userId: string, auditLogId: string, expectedRoles?: string[]) => {
     const response = await api.post(`/users/${userId}/permissions/revert`, {
       audit_log_id: auditLogId,
+      ...(expectedRoles ? { expected_roles: expectedRoles } : {}),
     });
     return response.data;
   },

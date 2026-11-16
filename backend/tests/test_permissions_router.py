@@ -84,9 +84,12 @@ class _FakeUserRepo:
         self._docs[doc["user_id"]] = doc
         return dict(doc)
 
-    def update(self, user_id, update_data):
+    def update(self, user_id, update_data, expected=None):
         d = self._docs.get(user_id)
         if d is None:
+            return False
+        # compare-and-set like the real repository's update_one filter
+        if any(d.get(k) != v for k, v in (expected or {}).items()):
             return False
         d.update(update_data)
         return True
@@ -109,7 +112,7 @@ class _FakeAuditRepo:
         self.rows.append(r)
         return r
 
-    def find_many(self, flt, sort=None, limit=None):
+    def find_many(self, flt, sort=None, limit=None, strict=False):
         out = [
             dict(r)
             for r in self.rows

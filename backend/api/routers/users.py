@@ -212,6 +212,10 @@ class UserUpdate(BaseModel):
     # explicit choice on a role change). Never stored; cannot be combined with
     # discount_cap.
     discount_cap_follow_role: Optional[bool] = None
+    # D93: the roles the editor saw when they opened this person. When sent,
+    # the write lands only while the stored roles are still these (409 if a
+    # role changed meanwhile). Never stored.
+    expected_roles: Optional[List[str]] = None
     is_active: Optional[bool] = None
     # Deny-only per-user module override (see UserCreate.module_access). Only
     # persisted when explicitly provided on update so an unrelated edit (e.g. a
@@ -1123,6 +1127,11 @@ def _commit_user_write(repo, user_id, update_data, expected, actor, audit):
     return False
 
 
+_CHANGED_MEANWHILE = (
+    "This person's roles or discount cap were changed meanwhile. Reload and try again."
+)
+
+
 @router.put("/{user_id}", response_model=dict)
 async def update_user(
     user_id: str, user: UserUpdate, current_user: dict = Depends(require_admin)
@@ -1151,6 +1160,14 @@ async def update_user(
         # an unrelated edit can't wipe module_access (or any other field). When
         # module_access IS sent it round-trips through (sanitized) and overwrites.
         update_data = user.model_dump(exclude_unset=True)
+        # D93: the roles the caller computed its change from (the editor's
+        # screen, or a side door's own read). A role change since then is a
+        # 409 before anything is logged or written.
+        _seen_roles = update_data.pop("expected_roles", None)
+        if _seen_roles is not None and sorted(_seen_roles) != sorted(
+            existing.get("roles") or []
+        ):
+            raise HTTPException(status_code=409, detail=_CHANGED_MEANWHILE)
         _login_changed = _apply_login_identity_edit(repo, user_id, existing, update_data)
 
         # PRIVILEGE GUARD 2: if roles are being changed, the actor must be
@@ -1232,7 +1249,13 @@ async def update_user(
         # A role change or a cap move to the role standard lands only while
         # roles AND cap are still what was read here: two edits from the same
         # read can never mix one's roles with the other's cap (loser gets 409).
-        if "roles" in update_data or update_data.get("discount_cap_is_role_default") is True:
+        # D93(2): every discount-cap write (a typed cap too) is also held to
+        # the roles read here, so a cap never lands on a changed role.
+        if (
+            "roles" in update_data
+            or _cap_touched
+            or _seen_roles is not None
+        ):
             _expect = {
                 "roles": existing.get("roles"),
                 "discount_cap": existing.get("discount_cap"),
@@ -1278,7 +1301,7 @@ async def update_user(
         if not _updated and _expect is not None:
             raise HTTPException(
                 status_code=409,
-                detail="This person's roles or discount cap were changed meanwhile. Reload and try again.",
+                detail=_CHANGED_MEANWHILE,
             )
         if _updated:
             # F18: an edit that flips is_active must take effect immediately for
@@ -1359,7 +1382,11 @@ async def _add_role_via_update(user_id: str, existing: dict, role: str, current_
     roles = list(existing.get("roles", []) or [])
     if role not in roles:
         roles.append(role)
-    await update_user(user_id, UserUpdate(roles=roles), current_user)
+    await update_user(
+        user_id,
+        UserUpdate(roles=roles, expected_roles=list(existing.get("roles", []) or [])),
+        current_user,
+    )
 
 
 @router.post("/{user_id}/roles/{role}")
@@ -1439,8 +1466,15 @@ async def remove_role(
             )
 
         # Same single role-change door as add_role (D70 cap move + audit).
+        # D93(1): the list was computed from THIS read, so this read is the
+        # expectation (a role added meanwhile is a 409, never silently lost).
         await update_user(
-            user_id, UserUpdate(roles=[r for r in current_roles if r != role]), current_user
+            user_id,
+            UserUpdate(
+                roles=[r for r in current_roles if r != role],
+                expected_roles=list(current_roles),
+            ),
+            current_user,
         )
         return {"message": f"Role {role} removed from user"}
 
@@ -1885,6 +1919,9 @@ async def get_user_permissions(
     if existing is None:
         raise HTTPException(status_code=404, detail="User not found")
     history = _perm_audit.find_permission_history(get_audit_repository(), user_id)
+    if history is None:
+        # A failed history read is not "no changes recorded yet".
+        raise HTTPException(status_code=503, detail="Could not read the change history.")
     # Strip Mongo _id from history rows for a clean JSON response.
     clean_hist = []
     for h in history:
@@ -1902,6 +1939,8 @@ class PermissionRevertBody(BaseModel):
     # The audit log_id of the prior snapshot to re-apply. The revert re-runs the
     # SAME escalation guard + sanitize so it can never launder an escalation.
     audit_log_id: str = Field(..., min_length=1)
+    # D93: the roles the editor saw (409 if a role changed meanwhile).
+    expected_roles: Optional[List[str]] = None
 
 
 @router.post("/{user_id}/permissions/revert")
@@ -1935,6 +1974,8 @@ async def revert_user_permissions(
 
     # Locate the prior snapshot in the immutable audit trail.
     history = _perm_audit.find_permission_history(audit_repo, user_id, limit=200)
+    if history is None:
+        raise HTTPException(status_code=503, detail="Could not read the change history.")
     target = next((h for h in history if h.get("log_id") == body.audit_log_id), None)
     if target is None:
         raise HTTPException(status_code=404, detail="Audit snapshot not found")
@@ -1950,17 +1991,28 @@ async def revert_user_permissions(
     _actor_is_super = "SUPERADMIN" in set(actor_roles)
     _clean = sanitize_permissions(restore.get("permissions"), _actor_is_super)
     _guard_permission_grants(current_user, _clean)
-    _cap = _clamp_discount_cap(
-        current_user, restore.get("discount_cap"), existing.get("roles", [])
+    _roles = existing.get("roles", []) or []
+    if body.expected_roles is not None and sorted(body.expected_roles) != sorted(_roles):
+        raise HTTPException(status_code=409, detail=_CHANGED_MEANWHILE)
+    # D93(3): a role-standard cap is restored as role-standard (it follows the
+    # role again), not as a typed value. Snapshots written before the marker
+    # existed: a cap equal to the role standard is taken as role-standard.
+    # ponytail: old snapshots never recorded the role, so "the role standard"
+    # is the person's current roles (the roles this revert writes against).
+    _was_default = restore.get("discount_cap_is_role_default")
+    if _was_default is None and restore.get("discount_cap") is not None:
+        _was_default = float(restore["discount_cap"]) == role_baseline_cap(_roles)
+    _cap = (
+        None
+        if _was_default
+        else _clamp_discount_cap(current_user, restore.get("discount_cap"), _roles)
     )
 
     prior = _perm_audit.snapshot_of(existing)
     update_data = {
         "permissions": _clean or {},
         "module_access": sanitize_module_access(restore.get("module_access")) or {},
-        "discount_cap": _cap
-        if _cap is not None
-        else role_baseline_cap(existing.get("roles", [])),
+        "discount_cap": _cap if _cap is not None else role_baseline_cap(_roles),
         "discount_cap_is_role_default": _cap is None,
         "updated_by": current_user.get("user_id"),
     }
@@ -1983,7 +2035,13 @@ async def revert_user_permissions(
             status_code=500,
             detail="Could not record the revert; nothing changed.",
         )
-    _done = _commit_user_write(repo, user_id, update_data, None, current_user, audit)
+    # D93(2): the cap is written only onto the roles (and cap) read here.
+    _expect = {
+        "roles": existing.get("roles"),
+        "discount_cap": existing.get("discount_cap"),
+        "discount_cap_is_role_default": existing.get("discount_cap_is_role_default"),
+    }
+    _done = _commit_user_write(repo, user_id, update_data, _expect, current_user, audit)
     if _done:
         return {"user_id": user_id, "message": "Permissions reverted"}
     if _done is None:
@@ -1991,4 +2049,4 @@ async def revert_user_permissions(
             status_code=503,
             detail="Could not confirm the revert was saved. Reload before trying again.",
         )
-    raise HTTPException(status_code=500, detail="Failed to revert permissions")
+    raise HTTPException(status_code=409, detail=_CHANGED_MEANWHILE)

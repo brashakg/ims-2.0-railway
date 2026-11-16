@@ -27,7 +27,9 @@ from typing import Optional
 
 
 # The override-bearing fields a permission snapshot captures.
-_SNAPSHOT_FIELDS = ("permissions", "module_access", "discount_cap")
+_SNAPSHOT_FIELDS = (
+    "permissions", "module_access", "discount_cap", "discount_cap_is_role_default"
+)
 
 
 def snapshot_of(user: Optional[dict]) -> dict:
@@ -38,6 +40,8 @@ def snapshot_of(user: Optional[dict]) -> dict:
         "permissions": user.get("permissions") or {},
         "module_access": user.get("module_access") or {},
         "discount_cap": user.get("discount_cap"),
+        # D93(3): whether that cap was the role standard (Revert restores it).
+        "discount_cap_is_role_default": user.get("discount_cap_is_role_default"),
     }
 
 
@@ -113,18 +117,20 @@ def write_permission_abort(audit_repo, *, actor: dict, aborted: dict, reason: st
 
 def find_permission_history(audit_repo, target_user_id: str, limit: int = 50):
     """Return the permission-change audit rows for a user, newest first, each
-    change that never landed marked ``not_applied``. Empty list when the repo
-    is unavailable (fail-soft read)."""
+    change that never landed marked ``not_applied``. None when the repo is
+    unavailable or the read fails: an unreadable history is never shown as
+    "no changes" (and Revert cannot pick from it)."""
     if audit_repo is None:
-        return []
+        return None
     try:
         rows = audit_repo.find_many(
             {"entity_type": "user_permissions", "target_user_id": target_user_id},
             sort=[("timestamp", -1)],
             limit=limit,
+            strict=True,
         )
     except Exception:  # noqa: BLE001
-        return []
+        return None
     dead = {r.get("aborts_log_id") for r in rows if r.get("action") == ABORTED}
     for r in rows:
         if r.get("log_id") in dead:
