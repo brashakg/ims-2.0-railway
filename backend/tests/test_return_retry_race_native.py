@@ -266,14 +266,15 @@ def test_a_shopify_retry_never_reads_a_stale_booking_that_failed_as_applied(nati
     monkeypatch.setattr(SR, "_cap_restock_to_returnable", lambda lines, order, rid: (lines, None, []))
     seen = {}
 
-    def booked(order, lines, rid, restock, processing_store_id=None):
+    def booked(order, lines, rid, restock, processing_store_id=None, owner=None):
         if seen:
             return None  # B: A's booking fills the refund's mark
         seen["a"] = True
         native.returns.update_one({"return_id": RID}, {"$set": {
             "restock_started_at": (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()}})
         seen["b"] = R._retry_restock(RID, USER, STORE)
-        return {"applied": False, "restocked": [], "restock_stock_ids": []}  # A woke; its writes failed
+        # A woke; its writes failed and its booking was taken back off the line.
+        return {"applied": False, "restocked": [], "restock_stock_ids": [], "unbooked": 1.0}
 
     monkeypatch.setattr(SR, "_restock_booked", booked)
     _stale()  # A: its save misses on the token -- 409 (D79)
@@ -292,8 +293,11 @@ def test_a_shopify_retry_stopped_mid_loop_keeps_the_booking_of_the_unit_it_lande
     SOLD units are named by its OTHER lines, D43). The landed piece must stay
     booked: the Shopify doors read only the booking, so a released piece is
     put back again by the next retry (a second unit flipped or a phantom
-    minted). The next retry puts back the second piece alone, the refund's
-    mark ends at 2."""
+    minted). The second piece alone is then put back -- by the next retry
+    (renew_error), or by the taker itself (takeover, D122(3): it releases
+    only the stopped worker's booking of the piece that never landed and
+    places that piece on the slot it was given) -- and the refund's mark
+    ends at 2."""
     _seed(native, units=["U1", "U2"], qty=2)
     native.returns.update_one({"return_id": RID}, {"$set": {"shopify_refund_id": "RF-1",
                                                              "items.0.return_qty": 2}})
@@ -327,13 +331,19 @@ def test_a_shopify_retry_stopped_mid_loop_keeps_the_booking_of_the_unit_it_lande
     except Exception:  # noqa: BLE001 -- A answers 409 / 500
         pass
     monkeypatch.setattr(R, "_audit_stock_transition", real)
-    assert native.stock_units.count_documents({"status": "AVAILABLE"}) == 1
     line = native.orders.find_one({"order_id": OID})["items"][0]
-    assert float(line["restocked_refunds"]["RF-1"]) == 1, "the landed piece was un-booked"
     doc = native.returns.find_one({"return_id": RID})
-    assert doc["restock_applied"] is False and doc["restock_in_progress"] is False
-    again = R._retry_restock(RID, USER, STORE)
-    assert again["restock_applied"] is True
+    if how == "takeover":  # B finished the step: A's first piece credited, the second placed once
+        assert seen["b"]["restock_applied"] is True and doc["restock_applied"] is True
+        assert float(line["restocked_refunds"]["RF-1"]) == 2
+        assert sorted(u["return_slot"] for u in native.stock_units.find({})) == [
+            f"{RID}|back|{PID}|0", f"{RID}|back|{PID}|1"]
+    else:
+        assert native.stock_units.count_documents({"status": "AVAILABLE"}) == 1
+        assert float(line["restocked_refunds"]["RF-1"]) == 1, "the landed piece was un-booked"
+        assert doc["restock_applied"] is False and doc["restock_in_progress"] is False
+        again = R._retry_restock(RID, USER, STORE)
+        assert again["restock_applied"] is True
     assert native.stock_units.count_documents({}) == (2 if how == "takeover" else 4), (
         "a second record was added for a piece")
     assert native.stock_units.count_documents({"status": "AVAILABLE"}) == 2
@@ -352,8 +362,8 @@ def test_the_return_slot_backstop_is_in_the_apps_index_set(native):
 
 def _shopify_race(native, monkeypatch, wake):
     """Real cap, real booking, real stock writes. Retry A books U1 for refund
-    RF-1 and stalls in its flip; B takes over and runs to the end on A's
-    booking. Then A wakes and `wake()` decides its flip."""
+    RF-1 and stalls in its flip; B takes the stopped step over and runs to
+    the end. Then A wakes and `wake()` decides its flip."""
     _seed(native, units=["U1"])
     native.returns.update_one({"return_id": RID}, {"$set": {"shopify_refund_id": "RF-1"}})
     real, seen = R._flip_sold_unit, {}
@@ -375,64 +385,84 @@ def _shopify_race(native, monkeypatch, wake):
     return a, seen["b"]
 
 
-def test_a_shopify_taker_on_a_stale_booking_that_then_fails_keeps_the_step_open(native, monkeypatch):
-    """1413-R7-SHOPIFY-BOOKING on the real path (no cap or booking mocked):
-    B's own cap reads A's booking and trims its restock to nothing, so B
-    answers 'applied' -- not None. A's flip then fails and A un-books. The
-    record must reopen: U1 is still SOLD and no longer booked (D7)."""
+def _booked_rf1(db):
+    line = db.orders.find_one({"order_id": OID})["items"][0]
+    return float((line.get("restocked_refunds") or {}).get("RF-1") or 0)
+
+
+def test_a_shopify_taker_of_a_stopped_booking_places_the_unit_itself(native, monkeypatch):
+    """D122(3) on the real path (no cap or booking mocked). Before: B's cap
+    read A's booking and trimmed its restock to nothing, so B answered
+    'applied' on it; when A then failed and un-booked, the record had to be
+    reopened by A -- and a DEAD A never did (the unit stayed SOLD behind
+    'Restock applied'). Now B releases the booking of the stopped worker
+    that has no unit behind it and places U1 itself; A's failed write and
+    its un-booking (by a token that is gone) change nothing."""
     def fails(real, *a, **k):
         raise RuntimeError("socket reset")
 
     a, b = _shopify_race(native, monkeypatch, fails)
-    assert native.stock_units.find_one({"_id": "U1"})["status"] == "SOLD"
-    line = native.orders.find_one({"order_id": OID})["items"][0]
-    assert float((line.get("restocked_refunds") or {}).get("RF-1") or 0) == 0
+    assert b["restock_applied"] is True and _back(native) == ["U1"]
+    assert native.stock_units.count_documents({}) == 1 and _booked_rf1(native) == 1
     doc = native.returns.find_one({"return_id": RID})
-    assert doc["restock_applied"] is False, "record reads applied, the piece is SOLD and un-booked"
-    assert doc["restock_in_progress"] is False
-    # The next retry puts the one piece back, once.
-    again = R._retry_restock(RID, USER, STORE)
-    assert again["restock_applied"] is True
-    assert _back(native) == ["U1"]
+    assert doc["restock_applied"] is True and doc["restock_in_progress"] is False
+    assert doc["restock_applied_by_booking"] is False  # it rests on B's own unit
     assert R._retry_restock(RID, USER, STORE)["message"] == "Already restocked"
+    assert _back(native) == ["U1"] and _booked_rf1(native) == 1
 
 
-def test_a_shopify_taker_on_a_stale_booking_that_lands_stays_applied(native, monkeypatch):
-    """The same race where A's flip lands: one piece back, the record applied,
-    nothing reopened, no second unit."""
+def test_a_shopify_taker_of_a_stopped_booking_whose_holder_then_lands_stays_one_row(native, monkeypatch):
+    """The same race where A's flip goes on after B finished: U1 is no
+    longer SOLD on the bill and its slot is used. One piece back, booked
+    once, the record applied, no second unit."""
     a, b = _shopify_race(native, monkeypatch, lambda real, *a, **k: real(*a, **k))
     assert _back(native) == ["U1"]
-    assert native.stock_units.count_documents({}) == 1
+    assert native.stock_units.count_documents({}) == 1 and _booked_rf1(native) == 1
     doc = native.returns.find_one({"return_id": RID})
     assert doc["restock_applied"] is True and doc["restock_in_progress"] is False
 
 
-def test_a_stale_shopify_retry_that_fails_while_its_taker_runs_keeps_the_takers_save(native, monkeypatch):
-    """Two threads, real Mongo, real cap and booking. A books U1 and stalls in
-    its flip; B takes over and reads A's booking. While B is still running, A
-    wakes, its flip fails and it un-books. A never drops B's claim: B's own
-    save reaches the record (its ids would be lost otherwise), then the
-    record reopens because B's 'applied' rested on the booking A released."""
+# --- A taker that DID rest on a stale retry's booking: the stale retry booked LATE ---------------
+# A stalls between its intent and its booking. B takes the step over (nothing
+# of A's is booked yet), reads the order and caps; only then does A's booking
+# land. B's own booking finds the refund's mark full ("another door booked
+# them") and B saves 'applied' on A's booking. A then reaches its first unit
+# write, finds its claim taken over, writes nothing and un-books: the record
+# must reopen (1413-R7-SHOPIFY-BOOKING), whatever the order of the writes.
+
+
+def _late_booking(native, monkeypatch, b_after_booking=None):
+    """Threads, real Mongo, real cap, booking and stock writes. Returns
+    (thread A, run B, go: A holds its late booking until go is set).
+    `b_after_booking`: called in B right after its own booking found the
+    mark full, before it saves."""
     import threading
+
+    from api.services import shopify_refund as SR
 
     _seed(native, units=["U1"])
     native.returns.update_one({"return_id": RID}, {"$set": {"shopify_refund_id": "RF-1"}})
-    a_booked, b_loaded = threading.Event(), threading.Event()
-    real_flip, real_goods = R._flip_sold_unit, R._restock_good_items
-    out = {}
+    a_ready, b_capped, a_booked, go = (threading.Event() for _ in range(4))
+    real_hold, out = SR._hold_returned_qty, {}
 
-    def flip(*a, **k):
+    def hold(*a, **k):
         if threading.current_thread().name == "retry-a":
+            a_ready.set()
+            assert b_capped.wait(30)  # B has read the order and capped: A's booking is not in it
+            held = real_hold(*a, **k)
             a_booked.set()
-            assert b_loaded.wait(30)
-            raise RuntimeError("socket reset")
-        return real_flip(*a, **k)
-
-    def goods(*a, **k):
-        if threading.current_thread().name != "retry-a":
-            b_loaded.set()
-            thread_a.join(30)  # A fails and releases while B holds the claim
-        return real_goods(*a, **k)
+            assert go.wait(30)
+            return held
+        if out.get("b"):
+            return real_hold(*a, **k)  # a later run: the race is over
+        out["b"] = True
+        b_capped.set()
+        assert a_booked.wait(30)
+        held = real_hold(*a, **k)
+        assert held is None  # the refund's mark is full: A's late booking
+        if b_after_booking:
+            b_after_booking()
+        return held
 
     def run_a():
         try:
@@ -440,22 +470,60 @@ def test_a_stale_shopify_retry_that_fails_while_its_taker_runs_keeps_the_takers_
         except Exception as exc:  # noqa: BLE001
             out["a"] = exc
 
-    monkeypatch.setattr(R, "_flip_sold_unit", flip)
-    monkeypatch.setattr(R, "_restock_good_items", goods)
+    monkeypatch.setattr(SR, "_hold_returned_qty", hold)
     thread_a = threading.Thread(target=run_a, name="retry-a")
     thread_a.start()
-    assert a_booked.wait(30)
+    assert a_ready.wait(30)
     native.returns.update_one({"return_id": RID}, {"$set": {
         "restock_started_at": (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()}})
-    b = R._retry_restock(RID, USER, STORE)
-    assert not thread_a.is_alive()
+    return thread_a, (lambda: R._retry_restock(RID, USER, STORE)), go
+
+
+def _reopened_and_finished_once(native, by):
     assert native.stock_units.find_one({"_id": "U1"})["status"] == "SOLD"
+    assert _booked_rf1(native) == 0
     doc = native.returns.find_one({"return_id": RID})
     assert doc.get("restock_completed_at"), "the taker's save never reached the record"
-    assert doc["restock_applied"] is False and doc["restock_in_progress"] is False
-    again = R._retry_restock(RID, USER, STORE)
-    assert again["restock_applied"] is True and _back(native) == ["U1"]
-    assert b["return_id"] == RID
+    assert doc["restock_applied"] is False, "record reads applied, the piece is SOLD and un-booked"
+    assert doc["restock_in_progress"] is False
+    if by == "sweep":
+        # D122(3): reopened with its task closed and no label -- IMS finishes it.
+        assert R.finish_stopped_stock_steps() == 0  # reopened just now: not yet
+        ago = lambda m: (datetime.now(timezone.utc) - timedelta(minutes=m)).isoformat()  # noqa: E731
+        native.returns.update_one({"return_id": RID}, {"$set": {  # the same record, ten minutes later
+            "restock_started_at": ago(10), "restock_completed_at": ago(11)}})
+        assert R.finish_stopped_stock_steps() == 1
+    else:
+        assert R._retry_restock(RID, USER, STORE)["restock_applied"] is True
+    assert _back(native) == ["U1"] and native.stock_units.count_documents({}) == 1 and _booked_rf1(native) == 1
+    assert native.returns.find_one({"return_id": RID})["restock_applied"] is True
+    assert R._retry_restock(RID, USER, STORE)["message"] == "Already restocked"
+    assert R.finish_stopped_stock_steps() == 0
+
+
+@pytest.mark.parametrize("by", ["press", "sweep"])
+def test_a_shopify_taker_on_a_late_stale_booking_that_is_then_given_up_keeps_the_step_open(native, monkeypatch, by):
+    """B finishes first ('applied' on A's late booking); A then stops at its
+    first unit write and un-books. The record reopens; the next retry -- or
+    the hourly sweep, nobody pressing -- puts the one piece back, once."""
+    thread_a, run_b, go = _late_booking(native, monkeypatch)
+    b = run_b()
+    go.set()
+    thread_a.join(30)
+    assert not thread_a.is_alive() and b["return_id"] == RID
+    _reopened_and_finished_once(native, by)
+
+
+def test_a_stale_shopify_retry_that_gives_up_while_its_taker_runs_keeps_the_takers_save(native, monkeypatch):
+    """A un-books while B still holds the claim. A never drops B's claim:
+    B's own save reaches the record, then the record reopens because B's
+    'applied' rested on the booking A released."""
+    box = {}
+    thread_a, run_b, go = _late_booking(native, monkeypatch, lambda: (box["go"].set(), box["a"].join(30)))
+    box["a"], box["go"] = thread_a, go
+    b = run_b()
+    assert not thread_a.is_alive() and b["return_id"] == RID
+    _reopened_and_finished_once(native, "press")
 
 
 class _PausingReturns:
@@ -483,63 +551,28 @@ class _PausingReturns:
 
 
 def test_a_taker_that_saves_between_the_stale_retrys_two_reopen_writes_still_reopens(native, monkeypatch):
-    """Round-9 must-fix (correctness + money-stock lenses). A books U1, stalls
-    in its flip; B takes over on A's booking. A's flip fails, it un-books, and
+    """Round-9 must-fix (correctness + money-stock lenses). A un-books, and
     its reopen runs its FIRST write while B is still running; B then saves
     'applied' on the booking and checks for a release; only then does A run
     its SECOND write. Whatever the order, the record must reopen: U1 is SOLD
     and no longer booked, so the Retry stock step must stay (D7)."""
     import threading
 
-    _seed(native, units=["U1"])
-    native.returns.update_one({"return_id": RID}, {"$set": {"shopify_refund_id": "RF-1"}})
-    a_booked, b_loaded, a_between, b_done = (threading.Event() for _ in range(4))
-    real_flip, real_goods, real_coll = R._flip_sold_unit, R._restock_good_items, R._returns_coll
-    out = {}
-
-    def flip(*a, **k):
-        if threading.current_thread().name == "retry-a":
-            a_booked.set()
-            assert b_loaded.wait(30)
-            raise RuntimeError("socket reset")
-        return real_flip(*a, **k)
-
-    def goods(*a, **k):
-        if threading.current_thread().name != "retry-a":
-            b_loaded.set()
-            assert a_between.wait(30), "A never reached its reopen"
-        return real_goods(*a, **k)
-
-    def run_a():
-        try:
-            out["a"] = R._retry_restock(RID, USER, STORE)
-        except Exception as exc:  # noqa: BLE001
-            out["a"] = exc
-
-    monkeypatch.setattr(R, "_flip_sold_unit", flip)
-    monkeypatch.setattr(R, "_restock_good_items", goods)
+    a_between, b_done = threading.Event(), threading.Event()
+    real_coll = R._returns_coll
     monkeypatch.setattr(R, "_returns_coll", lambda: _PausingReturns(real_coll(), a_between, b_done))
-    thread_a = threading.Thread(target=run_a, name="retry-a")
-    thread_a.start()
-    assert a_booked.wait(30)
-    native.returns.update_one({"return_id": RID}, {"$set": {
-        "restock_started_at": (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()}})
+    box = {}
+    thread_a, run_b, go = _late_booking(
+        native, monkeypatch,
+        lambda: (box["go"].set(), a_between.wait(30) or pytest.fail("A never reached its reopen")))
+    box["go"] = go
     try:
-        R._retry_restock(RID, USER, STORE)  # B: its save lands between A's two writes
+        run_b()  # B: its save lands between A's two writes
     finally:
         b_done.set()
         thread_a.join(30)
     assert not thread_a.is_alive()
-    assert native.stock_units.find_one({"_id": "U1"})["status"] == "SOLD"
-    line = native.orders.find_one({"order_id": OID})["items"][0]
-    assert float((line.get("restocked_refunds") or {}).get("RF-1") or 0) == 0
-    doc = native.returns.find_one({"return_id": RID})
-    assert doc.get("restock_completed_at"), "the taker's save never reached the record"
-    assert doc["restock_applied"] is False, "record reads applied, the piece is SOLD and un-booked"
-    assert doc["restock_in_progress"] is False
-    again = R._retry_restock(RID, USER, STORE)
-    assert again["restock_applied"] is True and _back(native) == ["U1"]
-    assert R._retry_restock(RID, USER, STORE)["message"] == "Already restocked"
+    _reopened_and_finished_once(native, "press")
 
 
 def test_two_live_retries_over_a_trace_gap_put_back_one_unit_for_the_last_piece(native, monkeypatch):

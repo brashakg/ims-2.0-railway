@@ -2512,6 +2512,7 @@ def _post_locked(
             order_number=order.get("order_number"), refund_id=refund_id,
         )
     else:
+        slot_index_missing = False
         try:
             from ..routers.returns import _restock_good_items
 
@@ -2539,6 +2540,10 @@ def _post_locked(
                 processing_store_id=None,
                 order=order,
             )) or {**restock_result, "applied": True}
+        except ReturnSlotIndexMissing:
+            # D82(2): nothing booked, nothing written. The money part of the
+            # refund stands; the restock stays open and its task says why.
+            slot_index_missing = True
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "[SHOPIFY_REFUND] restock failed (recorded, not applied): %s", exc
@@ -2557,7 +2562,9 @@ def _post_locked(
                 [{"product_id": line.product_id, "sku": getattr(line, "sku", ""),
                   "product_name": getattr(line, "product_name", "")}
                  for line in return_lines if line.restock],
-                None, unread="or write this order's stock records",
+                None, unread=("or write this order's stock records safely (the database check that keeps "
+                              "one returned piece to one stock record is not installed - tell head office)"
+                              if slot_index_missing else "or write this order's stock records"),
                 historical=bool(order.get("historical")),
                 order_number=order.get("order_number"), refund_id=refund_id,
             )
@@ -2841,6 +2848,7 @@ def _restock_booked(
     order: Dict[str, Any], lines: List[Any], refund_id: str,
     restock: Callable[[List[Any]], Dict[str, Any]],
     processing_store_id: Optional[str] = None,
+    owner: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """The ONE way a Shopify refund's units go back in stock: Goods back, the
     confirm / AUTO post and the /returns/{id}/restock retry each call it with
@@ -2856,6 +2864,14 @@ def _restock_booked(
     task to add the frames through stock-in (_stock_in_task).
     None: another door booked those units first (nothing restocked).
 
+    `owner`: the claim token of the record's stock step that calls this
+    (returns._retry_claimed). Its bookings then carry tokens of its own
+    (booking_token) and a historical order's stock-in task its own ref
+    (stock_in_ref), so the worker that continues one which died between its
+    booking and its unit write -- the un-booking below is a `finally` a dead
+    process never runs -- can tell that booking from a landed one and from
+    another door's (returns._settle_stopped_booking, D122(3)).
+
     D82(2): RAISES ReturnSlotIndexMissing, before anything is booked or
     written, when the unique return-slot indexes are missing or unreadable
     (returns._return_slot_index_ok): they are what keeps one returned piece
@@ -2865,16 +2881,19 @@ def _restock_booked(
 
         if not _return_slot_index_ok():
             raise ReturnSlotIndexMissing(refund_id)
-    held = _hold_returned_qty(order, lines, refund_id)
+    held = _hold_returned_qty(order, lines, refund_id, owner)
     if held is None:
         return None
     if order.get("historical"):
-        return _stock_in_task(order, lines, held, refund_id, processing_store_id)
+        return _stock_in_task(order, lines, held, refund_id, processing_store_id, owner)
     result: Dict[str, Any] = {"applied": False}
+    unbooked = 0.0
     try:
         result = restock(lines)
     finally:
-        _release_unlanded(order, held, result, refund_id)
+        unbooked = _release_unlanded(order, held, result, refund_id)
+    # What this call took back off the order lines (returns._reopen_by_booking).
+    result["unbooked"] = unbooked
     # Its units are in the mark: a doc row of them must never add to it.
     for row in result.get("restocked") or []:
         if isinstance(row, dict):
@@ -2882,7 +2901,34 @@ def _restock_booked(
     return result
 
 
-def _hold_returned_qty(order: Dict[str, Any], lines: List[Any], refund_id: str) -> Optional[_Held]:
+def booking_token(owner: str, orig_line: Dict[str, Any], qty: float) -> str:
+    """The token of a claimed stock step's booking on ONE order line: its
+    claim, its units, the line. Deterministic, so the same worker booking the
+    same line again changes nothing, and the worker that continues it finds
+    it and knows how many units it holds."""
+    return f"{owner}|{qty:g}|{orig_line.get('item_id') or orig_line.get('id') or orig_line.get('product_id')}"
+
+
+def stock_in_ref(refund_id: str, owner: Optional[str] = None) -> str:
+    """The ref of the stock-in task one booking of a historical order's
+    refund raises: its own per booking (a claimed stock step's: its claim)."""
+    return f"historical_stock_in:{refund_id}:{owner or uuid.uuid4().hex[:8]}"
+
+
+def task_on(tasks: Any, source_ref: str) -> Optional[Dict[str, Any]]:
+    """A task under `source_ref` in ANY status (open, done or cancelled), or
+    None. RAISES on a read error: the repository's find_many swallows one
+    into [] -- "never raised" -- so its collection is read (active_tasks)."""
+    if tasks is None:
+        return None
+    coll = getattr(tasks, "collection", None)
+    if coll is not None:
+        return coll.find_one({"source_ref": source_ref})
+    return next(iter(tasks.find_many({"source_ref": source_ref}) or []), None)
+
+
+def _hold_returned_qty(order: Dict[str, Any], lines: List[Any], refund_id: str,
+                       owner: Optional[str] = None) -> Optional[_Held]:
     """Book each restock line on its order line through the counter return
     door's own atomic claim (returns._claim_returnable_qty, with this
     refund's mark, within the refund's own units on the line: all its lines
@@ -2909,7 +2955,7 @@ def _hold_returned_qty(order: Dict[str, Any], lines: List[Any], refund_id: str) 
         for orig, qty, units, pid in want.values():
             if qty <= 0:
                 continue
-            token = uuid.uuid4().hex
+            token = booking_token(owner, orig, qty) if owner else uuid.uuid4().hex
             if not _claim_returnable_qty(order.get("order_id"), orig, qty, refund_id, units, token):
                 _release_unlanded(order, held, {}, refund_id)
                 return None
@@ -2920,29 +2966,33 @@ def _hold_returned_qty(order: Dict[str, Any], lines: List[Any], refund_id: str) 
     return held
 
 
-def _release_unlanded(order: Dict[str, Any], held: _Held, result: Dict[str, Any], refund_id: str) -> None:
+def _release_unlanded(order: Dict[str, Any], held: _Held, result: Dict[str, Any], refund_id: str) -> float:
     """Un-book what did not land, by the restock's own per-product count of
     units it reactivated or minted: the line's returned_qty and the refund's
     mark drop by the units that did not land, so a landed unit is never
     restocked twice and a missing one is a restock not applied that the next
     door (the retry, Goods back) puts back. Each release goes by its claim's
-    token (returns._release_returnable_qty): once, read back on an error."""
-    from ..routers.returns import _release_returnable_qty
+    token (returns._release_qty): once, read back on an error. Returns the
+    units it took off the lines (an errored release counts: unknown is not
+    "nothing"); a booking already taken back by its token counts nothing."""
+    from ..routers.returns import _release_qty
 
     landed: Dict[str, float] = {}
     for row in (result or {}).get("restocked") or []:
         if isinstance(row, dict):
             pid = str(row.get("product_id") or "")
             landed[pid] = landed.get(pid, 0.0) + _f(row.get("reactivated")) + _f(row.get("minted"))
+    taken = 0.0
     for orig, qty, pid, token in held:
         keep = min(qty, landed.get(pid, 0.0))
         landed[pid] = landed.get(pid, 0.0) - keep
-        if keep < qty:
-            _release_returnable_qty(order.get("order_id"), orig, qty - keep, refund_id, token)
+        if keep < qty and _release_qty(order.get("order_id"), orig, qty - keep, refund_id, token) is not False:
+            taken += qty - keep
+    return taken
 
 
 def _stock_in_task(order: Dict[str, Any], lines: List[Any], held: _Held, refund_id: str,
-                   processing_store_id: Optional[str]) -> Dict[str, Any]:
+                   processing_store_id: Optional[str], owner: Optional[str] = None) -> Dict[str, Any]:
     """A historical order's booked units (raise_stock_in_task): ONE task per
     booking -- the booking is taken once, so a second door books and raises
     nothing. A task that did not land is no booking: it is released and the
@@ -2952,16 +3002,16 @@ def _stock_in_task(order: Dict[str, Any], lines: List[Any], held: _Held, refund_
     out = raise_stock_in_task(
         order, sum(row[1] for row in held),
         {str(ln.sku or ln.product_id) for ln in lines if ln.restock},
-        f"Shopify refund {refund_id}", f"historical_stock_in:{refund_id}:{uuid.uuid4().hex[:8]}",
+        f"Shopify refund {refund_id}", stock_in_ref(refund_id, owner),
         processing_store_id, refund_id=refund_id)
     if not out["applied"]:
-        _release_unlanded(order, held, {}, refund_id)
+        out["unbooked"] = _release_unlanded(order, held, {}, refund_id)
     return out
 
 
 def raise_stock_in_task(order: Dict[str, Any], units: float, items: Any, source: str, task_ref: str,
                         processing_store_id: Optional[str], refund_id: Optional[str] = None,
-                        return_id: Optional[str] = None) -> Dict[str, Any]:
+                        return_id: Optional[str] = None, task_id: Optional[str] = None) -> Dict[str, Any]:
     """THE rule for a historical order's returned frames, on every door (the
     Shopify doors through _stock_in_task, the counter return and its retry
     through returns._restock_good_items): IMS adds no stock row (the order
@@ -2972,7 +3022,16 @@ def raise_stock_in_task(order: Dict[str, Any], units: float, items: Any, source:
     person to re-run it is closed. Nothing restocked, applied: there is
     nothing left for a door to retry. A task that landed with its reply lost
     (the insert raised after the commit) is read back by its own ref; not
-    landed: applied False, reason stock_in_task_not_saved."""
+    landed: applied False, reason stock_in_task_not_saved.
+
+    ONCE EVER per `task_ref`: a task already under it, in ANY status, is the
+    task -- a second one is never raised. The counter's ref is per return,
+    and its stock step is routinely run again (D122(3): a closing stamp
+    lost, a worker that stopped): raised again after the store manager had
+    added the frame and completed the first task, the second task had the
+    same frame added to stock twice. `task_id`: a fixed id for that task, so
+    two workers raising it at one moment leave one row (the database refuses
+    the copy). A ref that cannot be read raises nothing: not saved."""
     from ..routers import returns as _r
 
     out: Dict[str, Any] = {"applied": True, "restocked": [], "restock_stock_ids": [],
@@ -2985,12 +3044,12 @@ def raise_stock_in_task(order: Dict[str, Any], units: float, items: Any, source:
     task = tasks = None
     try:
         from ..dependencies import get_task_repository, get_user_repository
-        from .task_triggers import active_tasks, create_system_task
+        from .task_triggers import create_system_task
 
         tasks = get_task_repository()
         users = get_user_repository()
         managers = (users.find_managers(shop) or []) if users is not None and shop else []
-        task = create_system_task(
+        task = task_on(tasks, task_ref) or create_system_task(
             tasks,
             title=f"Order {ref}: add {units:g} returned frame(s) through stock-in",
             description=(
@@ -3010,10 +3069,10 @@ def raise_stock_in_task(order: Dict[str, Any], units: float, items: Any, source:
                    "link": "/inventory/opening-stock",
                    "payload": {"refund_id": refund_id, "return_id": return_id,
                                "order_id": order.get("order_id")}},
+            task_id=task_id,
         )
-        # ponytail: a read-back that also fails answers not saved (a second
-        # task is possible only on two misses in a row).
-        task = task or next(iter(active_tasks(tasks, task_ref)), None)
+        # A read-back that also fails answers not saved: nothing is booked on it.
+        task = task or task_on(tasks, task_ref)
     except Exception:  # noqa: BLE001
         logger.warning("[SHOPIFY_REFUND] stock-in task failed for %s", source, exc_info=True)
     if not task:

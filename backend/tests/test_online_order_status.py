@@ -2103,7 +2103,7 @@ def test_a_booking_that_errors_part_way_releases_the_line_it_booked(monkeypatch)
         return True
 
     monkeypatch.setattr(returns_router, "_claim_returnable_qty", claim)
-    monkeypatch.setattr(returns_router, "_release_returnable_qty",
+    monkeypatch.setattr(returns_router, "_release_qty",
                         lambda oid, orig, qty, rid, token: calls.append(("release", orig["item_id"])))
     with pytest.raises(RuntimeError):
         shopify_refund._hold_returned_qty(order, lines, "R1")
