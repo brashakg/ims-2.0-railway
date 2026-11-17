@@ -439,8 +439,10 @@ def _mongomock_builds_the_refund_claim_index(monkeypatch):
     the index (every one of them is a 'duplicate' null) and then enforces
     nothing. The order-history import books nothing when that index cannot be
     confirmed (PR #1423 review F-1423-G), so build it SPARSE on mongomock: the
-    same index for docs that either carry a string refund id or none. Only
-    this one index, only on mongomock."""
+    same index for docs that either carry a string refund id or none. The
+    same for uniq_shopify_order_id on orders, which the order-history import
+    confirms before it inserts an order (decision D104(2)). Only these two
+    indexes, only on mongomock."""
     try:
         import mongomock
     except ImportError:
@@ -448,7 +450,8 @@ def _mongomock_builds_the_refund_claim_index(monkeypatch):
     real = mongomock.collection.Collection.create_index
 
     def create_index(self, keys, *args, **kwargs):
-        if kwargs.get("name") == "uniq_shopify_refund_id" and "partialFilterExpression" in kwargs:
+        if (kwargs.get("name") in ("uniq_shopify_refund_id", "uniq_shopify_order_id")
+                and "partialFilterExpression" in kwargs):
             kwargs = {k: v for k, v in kwargs.items() if k != "partialFilterExpression"}
             kwargs["sparse"] = True
         return real(self, keys, *args, **kwargs)

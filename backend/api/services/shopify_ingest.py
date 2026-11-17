@@ -2519,8 +2519,15 @@ def ingest_shopify_order(
     try:
         existing = orders_coll.find_one({"shopify_order_id": shopify_order_id})
     except Exception as exc:  # noqa: BLE001
-        logger.warning("[SHOPIFY_INGEST] dedupe lookup failed: %s", exc)
-        existing = None
+        # Decision D104(1): a dedupe read that fails is NO answer -- never
+        # "not booked yet", which would build and insert a second order for
+        # one Shopify order wherever the unique index is missing. The order
+        # is reported failed: the import's next run (the inbox retry, on the
+        # live path) books it or finds it.
+        logger.warning("[SHOPIFY_INGEST] dedupe lookup failed -- order %s not booked this "
+                       "time: %s", shopify_order_id, exc)
+        return {"status": "error", "error": f"dedupe lookup failed: {exc}",
+                "shopify_order_id": shopify_order_id}
     if existing:
         result = {
             "status": "duplicate",
@@ -2539,6 +2546,22 @@ def ingest_shopify_order(
             if refund_cn is not None:
                 result["refund_credit_notes"] = refund_cn
         return result
+
+    # Decision D104(2): the order-history import never inserts an order on
+    # the strength of a fail-soft index. uniq_shopify_order_id is what makes
+    # two runs that both read "not booked" store ONE order; if it is missing
+    # and cannot be built, or cannot be confirmed, nothing is inserted and
+    # the order is reported failed with the reason (the D82 rule: a missing
+    # index must never be able to double revenue and output GST).
+    if historical:
+        try:
+            ensure_shopify_order_index(db, strict=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[SHOPIFY_INGEST] %s -- historical order %s not booked: %s",
+                         ORDER_INDEX_UNCONFIRMED, shopify_order_id, exc)
+            return {"status": "error", "reason": "order_index_unconfirmed",
+                    "error": f"{ORDER_INDEX_UNCONFIRMED}: {exc}",
+                    "shopify_order_id": shopify_order_id}
 
     # --- Build the IMS order ------------------------------------------------
     product_repo = None
@@ -2844,8 +2867,14 @@ def ingest_shopify_order(
             existing = None
             try:
                 existing = orders_coll.find_one({"shopify_order_id": shopify_order_id})
-            except Exception:  # noqa: BLE001
-                existing = None
+            except Exception as read_exc:  # noqa: BLE001
+                # Decision D104(1): the winner's order cannot be read -- no
+                # answer, never a "duplicate" naming an order id that was
+                # never stored (and, on an import, a refund heal skipped
+                # without a word). Reported failed; the next run finds it.
+                return {"status": "error",
+                        "error": f"order exists but could not be read back: {read_exc}",
+                        "shopify_order_id": shopify_order_id}
             result = {
                 "status": "duplicate",
                 "order_id": (existing or {}).get("order_id", order_id),
@@ -3003,16 +3032,29 @@ def ingest_shopify_order(
     }
 
 
-def ensure_shopify_order_index(db) -> None:
+ORDER_INDEX_UNCONFIRMED = (
+    "The unique index uniq_shopify_order_id on orders is missing and could not be "
+    "built, or could not be confirmed, so the order-history import books no order "
+    "(two runs could store one Shopify order twice)"
+)
+
+
+def ensure_shopify_order_index(db, strict: bool = False) -> None:
     """Best-effort UNIQUE partial index on `orders.shopify_order_id` so a
     double-create is physically impossible even under a race. Idempotent;
-    never raises. Only indexes docs that actually carry the field (legacy /
-    offline orders without it are unaffected)."""
+    never raises -- unless ``strict`` (the order-history import, decision
+    D104(2)): an index that cannot be built or confirmed RAISES, and the
+    import inserts nothing. Only indexes docs that actually carry the field
+    (legacy / offline orders without it are unaffected)."""
     if db is None:
+        if strict:
+            raise RuntimeError("no database")
         return
     try:
         coll = db.get_collection("orders")
         if coll is None:
+            if strict:
+                raise RuntimeError("no orders collection")
             return
         coll.create_index(
             "shopify_order_id",
@@ -3021,4 +3063,6 @@ def ensure_shopify_order_index(db) -> None:
             name="uniq_shopify_order_id",
         )
     except Exception:  # noqa: BLE001
+        if strict:
+            raise
         logger.debug("shopify_order_id index create skipped", exc_info=True)
