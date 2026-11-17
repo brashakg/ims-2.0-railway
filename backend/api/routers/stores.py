@@ -294,6 +294,32 @@ def _validate_invoice_code(
         )
 
 
+# D73: the fields the store form marks required. A NEW store must carry each
+# (blank or whitespace-only is refused, 422 naming the field). An EDIT of an
+# older store that already has blanks is accepted; it only may not blank a
+# field that currently holds a value.
+_REQUIRED_STORE_FIELDS = {
+    "store_name": "Store name",
+    "state": "State",
+    "city": "City",
+    "pincode": "PIN code",
+    "phone": "Phone",
+    "address": "Address",
+}
+
+
+def _blank(v) -> bool:
+    return not str(v or "").strip()
+
+
+def _require_store_fields(data: dict, existing: Optional[dict]) -> None:
+    for key, label in _REQUIRED_STORE_FIELDS.items():
+        if existing is not None and key not in data:
+            continue
+        if _blank(data.get(key)) and (existing is None or not _blank(existing.get(key))):
+            raise HTTPException(status_code=422, detail=f"{label} is required")
+
+
 def _validate_store_payload(
     data: dict,
     *,
@@ -332,6 +358,7 @@ def _validate_store_payload(
     and therefore blind to a remap.
     """
     release_old: Optional[str] = None
+    _require_store_fields(data, existing)
     if data.get("pincode") and not ov.validate_pincode(data["pincode"]):
         raise HTTPException(status_code=400, detail="Invalid PIN code (6 digits)")
     if data.get("phone") and not ov.validate_phone(data["phone"]):
@@ -838,14 +865,25 @@ async def list_stores(
         if city:
             filter_dict["city"] = city
 
-        if active_only:
-            stores = repo.find_active(filter_dict if filter_dict else None)
-        else:
-            stores = repo.find_many(filter_dict, sort=[("brand", 1), ("store_name", 1)])
+        # APP-01 (#1434 round 1): a failed READ is not an empty install either.
+        # strict=True makes the repository raise instead of answering [].
+        try:
+            if active_only:
+                stores = repo.find_active(filter_dict if filter_dict else None, strict=True)
+            else:
+                stores = repo.find_many(
+                    filter_dict, sort=[("brand", 1), ("store_name", 1)], strict=True
+                )
+        except Exception as e:
+            logger.error("list_stores read failed: %s", e)
+            raise HTTPException(status_code=503, detail="Store list unavailable")
 
         return {"stores": stores, "total": len(stores)}
 
-    return {"stores": [], "total": 0}
+    # APP-01: an unreachable database is NOT "this install has no stores" --
+    # an empty list here would offer the owner first-store setup during an
+    # outage. Say the list is unavailable so the picker shows Retry.
+    raise HTTPException(status_code=503, detail="Store list unavailable")
 
 
 @router.post("", status_code=201)
@@ -870,8 +908,10 @@ async def create_store(
             entity = db.get_collection("entities").find_one(
                 {"entity_id": store.entity_id}
             )
-        except Exception:
-            entity = None
+        except Exception as e:
+            # A failed read is not "unknown entity".
+            logger.error("create_store entity read failed: %s", e)
+            raise HTTPException(status_code=503, detail="Store setup unavailable")
         if entity is None:
             raise HTTPException(
                 status_code=400,
@@ -930,7 +970,16 @@ async def create_store(
             }
         )
 
-        created = repo.create(store_data)
+        try:
+            created = repo.create(store_data, raise_on_duplicate=True)
+        except Exception as e:
+            if e.__class__.__name__ != "DuplicateKeyError":
+                raise
+            # Two creates of one code at once: the loser gets the same 409 as
+            # a later duplicate, never a 500 for a store that exists.
+            raise HTTPException(
+                status_code=409, detail=f"Store code '{code}' already exists"
+            )
         if created:
             return {
                 "store_id": created["store_id"],
@@ -941,9 +990,8 @@ async def create_store(
 
         raise HTTPException(status_code=500, detail="Failed to create store")
 
-    # No repo (DB unreachable). Still echo the human code as the store_id so the
-    # convention holds even in mock mode -- never invent a uuid.
-    return {"store_id": code, "store_code": code, "message": "Store created"}
+    # No repo (DB unreachable): nothing was stored, so never answer "created".
+    raise HTTPException(status_code=503, detail="Store setup unavailable")
 
 
 @router.get("/{store_id}")

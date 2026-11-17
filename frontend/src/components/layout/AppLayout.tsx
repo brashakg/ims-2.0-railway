@@ -14,7 +14,7 @@ import { loadHsnRates, loadPricingMode } from '../../constants/gstRuntime';
 import { ForcePasswordChange } from '../../pages/auth/ForcePasswordChange';
 import { IdleLogoutWatcher } from '../auth/IdleLogoutWatcher';
 import { UpdateAvailableBanner } from '../common/UpdateAvailableBanner';
-import { hasNoActiveStore, isMultiStoreCapable } from '../../utils/storeAccess';
+import { mustPickStoreFirst } from '../../utils/storeAccess';
 import { ProtectedRoute, gateAllows } from './ProtectedRoute';
 import { appRoutes } from '../../routes/appRoutes';
 
@@ -148,7 +148,9 @@ export function AppLayout() {
   // store users are never multi-store-capable, so they're untouched. /select-
   // store lives OUTSIDE this layout, so there's no redirect loop; and it auto-
   // proceeds when there's <=1 store, so even a degenerate case can't trap.
-  if (user && isMultiStoreCapable(user) && hasNoActiveStore(user)) {
+  // The Organization screen is exempt for SUPERADMIN / ADMIN: on an empty
+  // install it is where the first store is created (APP-01).
+  if (mustPickStoreFirst(user, location.pathname)) {
     return <Navigate to="/select-store" replace />;
   }
 

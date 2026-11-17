@@ -28,13 +28,17 @@ import { onlineStoreApi, type StorefrontPosture } from '../../services/api/onlin
 import { getBrandAssets } from '../../utils/brandAssets';
 import {
   accessibleStoresFrom,
+  canSetUpOrganization,
   hasNoActiveStore,
+  ORG_SETUP_PATH,
   type AccessibleStore,
 } from '../../utils/storeAccess';
 import { isOnlineStore } from '../../utils/storeMode';
 import { Icon } from '../../components/shell/Icon';
 
-type Phase = 'loading' | 'choose' | 'empty';
+// 'empty' = the store list was READ and holds nothing for this user;
+// 'failed' = the list could not be read, so nothing is known about it.
+type Phase = 'loading' | 'choose' | 'empty' | 'failed';
 
 interface Group {
   key: string;
@@ -185,15 +189,19 @@ export function StoreSelectPage() {
     let cancelled = false;
     (async () => {
       let accessible: AccessibleStore[] = [];
+      let listRead = false;
       try {
         const res: any = await storeApi.getStores();
-        const raw = res?.stores ?? res ?? [];
+        const raw = Array.isArray(res) ? res : res?.stores;
+        // Only a real list counts as read: a malformed body is not "no stores".
+        if (!Array.isArray(raw)) throw new Error('store list unreadable');
         accessible = accessibleStoresFrom(user, raw);
+        listRead = true;
       } catch {
         // Network/permission failure: fall back to the ids on the user object so
         // a non-admin can still pick from their assignment. An all-stores admin
-        // with no fallback ids lands on the empty state (with Retry) rather than
-        // bouncing in a redirect loop.
+        // with no fallback ids lands on the failed state (with Retry) rather than
+        // bouncing in a redirect loop -- never on the first-store setup offer.
         accessible = (user.storeIds || []).map((id) => ({ id, name: id, code: id }));
       }
       if (cancelled) return;
@@ -213,7 +221,7 @@ export function StoreSelectPage() {
         void proceed();
         return;
       }
-      setPhase('empty');
+      setPhase(listRead ? 'empty' : 'failed');
     })();
 
     return () => {
@@ -328,8 +336,13 @@ export function StoreSelectPage() {
     );
   }
 
-  // ---- No accessible store (degenerate / fetch failed) --------------------
-  if (phase === 'empty') {
+  // ---- No accessible store (confirmed empty) / list unreadable ------------
+  if (phase === 'empty' || phase === 'failed') {
+    const failed = phase === 'failed';
+    // APP-01: on a confirmed-empty list, the owner/admin is offered the
+    // Organization screen to create the entity and first store. Never on a
+    // failed read -- an outage must not look like a new installation.
+    const offerSetup = !failed && canSetUpOrganization(user);
     return (
       <div style={centredStyle}>
         <div style={emptyCardStyle}>
@@ -337,13 +350,21 @@ export function StoreSelectPage() {
             <Icon.store width={22} height={22} />
           </span>
           <h1 className="display" style={{ fontSize: 24, color: 'var(--ink)', margin: '4px 0 8px' }}>
-            No store available
+            {failed ? 'Could not load your stores' : 'No store available'}
           </h1>
           <p style={{ color: 'var(--ink-3)', fontSize: 14, lineHeight: 1.5, marginBottom: 20 }}>
-            Your account isn't assigned to an active store yet. Please ask your administrator to
-            assign you a store, then sign in again.
+            {failed
+              ? 'The store list could not be read. Check the connection and try again.'
+              : offerSetup
+                ? 'There is no active store yet. Set up your organization: add the legal entity, then its first store.'
+                : "Your account isn't assigned to an active store yet. Please ask your administrator to assign you a store, then sign in again."}
           </p>
           <div style={{ display: 'flex', gap: 10, justifyContent: 'center', flexWrap: 'wrap' }}>
+            {offerSetup && (
+              <button type="button" className="btn accent lg" onClick={() => navigate(ORG_SETUP_PATH)}>
+                Set up organization
+              </button>
+            )}
             <button
               type="button"
               className="btn lg"
@@ -354,7 +375,7 @@ export function StoreSelectPage() {
             >
               Try again
             </button>
-            <button type="button" className="btn accent lg" onClick={handleSignOut}>
+            <button type="button" className={offerSetup ? 'btn lg' : 'btn accent lg'} onClick={handleSignOut}>
               Sign out
             </button>
           </div>

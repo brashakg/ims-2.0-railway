@@ -364,7 +364,8 @@ async def list_entities(
     """List legal entities (any authenticated user can read the org structure)."""
     db = _get_db()
     if db is None:
-        return {"entities": [], "total": 0}
+        # An unreachable database is not "no legal entities yet" (#1434).
+        raise HTTPException(status_code=503, detail="Entity list unavailable")
     try:
         query = {} if include_inactive else {"is_active": True}
         entities = [_clean(e) for e in db.get_collection("entities").find(query)]

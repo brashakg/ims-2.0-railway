@@ -35,6 +35,8 @@ vi.mock('../../../services/api/onlineStore', () => ({
 }));
 const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn() }));
 vi.mock('../../../context/ToastContext', () => ({ useToast: () => toast }));
+// OrganizationPage reads the signed-in user (APP-01 choose-your-store hint).
+vi.mock('../../../context/AuthContext', () => ({ useAuth: () => ({ user: { roles: ['SUPERADMIN'], activeStoreId: 'BV-BOK-02' } }) }));
 
 import OrganizationPage from '../OrganizationPage';
 import { entitiesApi } from '../../../services/api/entities';
