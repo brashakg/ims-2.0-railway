@@ -63,6 +63,7 @@ from ...services.margin_basis import (
     line_revenue_ex_gst,
     line_unit_cost as _item_cost,
 )
+from ...services.payroll_engine import POSTED_PAYROLL_STATUSES
 from ...services.salary_visibility import (
     SALARY_RESTRICTED_MESSAGE,
     is_payroll_shaped_expense,
@@ -284,22 +285,77 @@ def _months_in_range(from_date, to_date):
     return months
 
 
-def _payroll_cost(db, store_id, from_date, to_date) -> float:
-    """Cost-to-company payroll for the months overlapping the P&L range."""
+# What a P&L reader is told when the posted payroll could not be read. No
+# figure and no name: only that the report was not worked out.
+PAYROLL_UNREADABLE = (
+    "The salary cost for this period could not be read, so the profit and "
+    "loss was not worked out. Nothing was changed. Try again."
+)
+
+
+# What a reader of the revenue or profit-and-loss reports is told when there
+# is no database handle at all (a failed connect leaves ``get_db().db`` None).
+RECORDS_UNREACHABLE = (
+    "The records could not be reached, so this report was not worked out. "
+    "Nothing was changed. Try again."
+)
+
+
+def _report_db(db):
+    """The handle a revenue / P&L report reads from, or 503 when there is
+    none. GET /finance/pnl used to answer 200 with every figure 0 here, before
+    the payroll read below was reached: the R4-A false zero by another door.
+    Takes the handle (not ``_get_db()`` itself) so each route module keeps
+    its own patchable ``_get_db``."""
+    if db is None:
+        raise HTTPException(status_code=503, detail=RECORDS_UNREACHABLE)
+    return db
+
+
+def _posted_payroll_costs(db, from_date, to_date, store_id=None) -> list:
+    """(store_id, cost-to-company) of every POSTED payroll row in the months
+    overlapping the range. The ONE payroll read behind the P&L.
+
+    Only APPROVED and PAID rows are a cost. A DRAFT is a working calculation
+    that can be rerun at will: counting it let an unapproved figure move the
+    P&L, including the P&L of a month that had since been locked.
+
+    A failed read is not "no payroll" (Codex round 4, R4-A): both P&L readers
+    used to swallow it, so posted wages left the P&L and the report answered
+    200 with payroll 0 (or dropped a payroll-only shop from the by-store
+    table). The read is taken whole here and a failure answers 503; neither
+    reader below catches anything.
+    """
+    months = _months_in_range(from_date, to_date)
+    if not months:
+        return []
+    q: dict = {
+        "$or": [{"year": y, "month": m} for (y, m) in months],
+        "status": {"$in": list(POSTED_PAYROLL_STATUSES)},
+    }
+    if store_id:
+        q["store_id"] = store_id
     try:
-        months = _months_in_range(from_date, to_date)
-        if not months:
-            return 0.0
-        q: dict = {"$or": [{"year": y, "month": m} for (y, m) in months]}
-        if store_id:
-            q["store_id"] = store_id
-        total = 0.0
-        for r in db.get_collection("payroll").find(q):
-            bd = r.get("breakdown") or {}
-            total += bd.get("ctc_cost", r.get("net_salary", 0)) or 0
-        return round(total, 2)
-    except Exception:
-        return 0.0
+        rows = list(db.get_collection("payroll").find(q))
+    except Exception as exc:
+        logger.error("Posted payroll read failed: %s", exc)
+        raise HTTPException(status_code=503, detail=PAYROLL_UNREADABLE) from exc
+    return [
+        (
+            r.get("store_id"),
+            (r.get("breakdown") or {}).get("ctc_cost", r.get("net_salary", 0)) or 0,
+        )
+        for r in rows
+    ]
+
+
+def _payroll_cost(db, store_id, from_date, to_date) -> float:
+    """Cost-to-company payroll for the months overlapping the P&L range.
+    Raises 503 when the payroll cannot be read (_posted_payroll_costs)."""
+    return round(
+        sum(c for _sid, c in _posted_payroll_costs(db, from_date, to_date, store_id)),
+        2,
+    )
 
 
 def gst_reconciliation(
@@ -434,8 +490,10 @@ def _split_output_tax(orders, store_state_by_id: dict, customer_state_by_id: dic
     return cgst, sgst, igst
 
 
-def _store_maps(db):
-    """Return (store_id -> entity_id, entity_id -> entity_name)."""
+def _store_maps(db, *, strict: bool = False):
+    """Return (store_id -> entity_id, entity_id -> entity_name). ``strict``:
+    a failed read raises instead of answering empty maps (a company filter
+    built on an empty map matches no shop at all)."""
     s2e, enames = {}, {}
     try:
         for s in db.get_collection("stores").find(
@@ -448,8 +506,38 @@ def _store_maps(db):
         ):
             enames[e.get("entity_id")] = e.get("name")
     except Exception:
-        pass
+        if strict:
+            raise
     return s2e, enames
+
+
+def _company_shop_ids(db, entity_id) -> list:
+    """The shops of ONE company: THE company filter (``entity_id``) of every
+    report that takes one -- the by-store and by-category P&L, the Tally sales
+    JV, the B2B invoice book, the tender receipt JV. The shop list decides
+    which shops are in the report, so it is read strictly: unreadable, the
+    company matched no shop and the report answered 200 with nothing in it
+    (revenue 0, a Tally file with no voucher) -- it answers 503 instead. A
+    company that has no shop still gets [] (its plain empty report)."""
+    s2e, _ = _read_or_503(_store_maps, db, strict=True)
+    return [sid for sid, eid in s2e.items() if eid == entity_id]
+
+
+def _read_or_503(read, *args, **kwargs):
+    """Run ONE read a report cannot be worked out without; a failure answers
+    503 (RECORDS_UNREACHABLE), never the report built on what an empty read
+    looks like. Decision D106: the Tally sales JV and the B2B invoice book
+    decide IGST versus CGST + SGST from the shop's and the customer's state,
+    so an unreadable shop list wrote an inter-state sale with CGST + SGST
+    ledgers on a 200. Pass the strict form of a reader that has one
+    (``_read_or_503(_store_state_map, db, strict=True)``)."""
+    try:
+        return read(*args, **kwargs)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("report read failed (%s): %s", getattr(read, "__name__", "read"), exc)
+        raise HTTPException(status_code=503, detail=RECORDS_UNREACHABLE) from exc
 
 
 def _store_state_map(db, *, strict=False) -> dict:
@@ -531,8 +619,9 @@ def pnl_by_category(orders, cost_by_product: dict, variance_by_category: Optiona
     return sorted(rows, key=lambda x: -x["revenue"])
 
 
-def is_period_locked(db, month, year) -> bool:
-    """True if the accounting period has been locked (closed)."""
+def is_period_locked(db, month, year, *, strict: bool = False) -> bool:
+    """True if the accounting period has been locked (closed). ``strict``: a
+    failed read raises instead of reading as "not locked"."""
     try:
         return (
             db.get_collection("period_locks").find_one(
@@ -541,14 +630,20 @@ def is_period_locked(db, month, year) -> bool:
             is not None
         )
     except Exception:
+        if strict:
+            raise
         return False
 
 
-def check_period_locked(db, posting_date) -> None:
+def check_period_locked(db, posting_date, *, strict: bool = False) -> None:
     """Raise HTTPException(423) if the posting_date's month/year is locked.
 
     Fail-soft: if db is None or period_locks lookup fails, does not raise.
     Used by orders/returns/vendor-bills/payments to guard financial-period closure.
+
+    ``strict`` (payroll run / approve / mark paid): a lock that cannot be read
+    refuses with 503 instead. Those writes can wait for a retry, and letting
+    them through saved and approved payroll inside a locked month.
     """
     if db is None:
         return
@@ -558,33 +653,33 @@ def check_period_locked(db, posting_date) -> None:
         if isinstance(posting_date, str):
             posting_date = date.fromisoformat(posting_date)
         month, year = posting_date.month, posting_date.year
-        if is_period_locked(db, month, year):
+        if is_period_locked(db, month, year, strict=strict):
             raise HTTPException(
                 status_code=423,
                 detail=f"Accounting period {month:02d}/{year} is locked; cannot post to a closed month.",
             )
     except HTTPException:
         raise
-    except Exception:
-        pass  # fail-soft: period check errors do not block posting
+    except Exception as exc:
+        if strict:
+            logger.error("Period lock read failed: %s", exc)
+            raise HTTPException(
+                status_code=503,
+                detail="Whether this accounting period is locked could not be "
+                "read, so nothing was saved. Try again.",
+            ) from exc
+        # fail-soft: period check errors do not block posting
 
 
-def _payroll_by_store(db, from_date, to_date) -> dict:
-    """store_id -> payroll cost-to-company over the months in the range."""
+def _payroll_by_store(db, from_date, to_date, store_ids=None) -> dict:
+    """store_id -> payroll cost-to-company over the months in the range.
+    ``store_ids`` (the by-store report's company filter): only those shops,
+    as its sales, cost of goods and expenses are. Raises 503 when the payroll
+    cannot be read (_posted_payroll_costs)."""
     out: dict = {}
-    try:
-        months = _months_in_range(from_date, to_date)
-        if not months:
-            return out
-        q = {"$or": [{"year": y, "month": m} for (y, m) in months]}
-        for r in db.get_collection("payroll").find(q):
-            sid = r.get("store_id")
-            bd = r.get("breakdown") or {}
-            out[sid] = out.get(sid, 0) + (
-                bd.get("ctc_cost", r.get("net_salary", 0)) or 0
-            )
-    except Exception:
-        pass
+    for sid, cost in _posted_payroll_costs(db, from_date, to_date):
+        if store_ids is None or sid in store_ids:
+            out[sid] = out.get(sid, 0) + cost
     return out
 
 

@@ -635,8 +635,8 @@ def test_fail_soft_no_db():
                                 entry_date=_entry_date(), description="x",
                                 lines=_two_line("5001", "2001", 100.0),
                                 maker_id="m")["ok"] is False
-    assert je_service.pnl_adjustments(None, store_id=None, from_dt=None, to_dt=None) == {
-        "je_revenue_adjustment": 0.0, "je_expense_adjustment": 0.0}
+    with pytest.raises(RuntimeError):  # D116: no journal store is not "no journals"
+        je_service.pnl_adjustments(None, store_id=None, from_dt=None, to_dt=None)
     # list_accounts falls back to the static catalogue with no DB.
     accts = je_service.list_accounts(None, manual_only=True)
     assert any(a["account_code"] == "5001" for a in accts)
