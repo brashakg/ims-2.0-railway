@@ -225,6 +225,18 @@ def test_failed_mark_leaves_the_lot_due_and_the_retry_moves_no_money_again(
     _assert_reconciled(env, "c5", {"L5": 100})
 
 
+def test_lost_reply_of_a_committed_mark_finishes_and_is_counted_in_the_same_run(
+    client, auth_headers, env, monkeypatch
+):
+    env.seed("c5b", _earn("L5b", 100, "c5b"))
+    _fail(monkeypatch, env.txns, "update_one", _is_mark, after_commit=True)
+
+    first = client.post(URL, headers=auth_headers)
+    assert first.status_code == 200 and first.json() == {"expired_txns": 1, "points_expired": 100}
+    assert client.post(URL, headers=auth_headers).json() == {"expired_txns": 0, "points_expired": 0}
+    _assert_reconciled(env, "c5b", {"L5b": 100})
+
+
 # ---------------------------------------------------------------------------
 # Partial failure across two lots; a redeem between the failure and the retry
 # ---------------------------------------------------------------------------
@@ -345,6 +357,39 @@ def test_unreadable_ledger_does_not_mark_the_lot_finished(client, auth_headers, 
     heal()
     assert client.post(URL, headers=auth_headers).json() == {"expired_txns": 1, "points_expired": 100}
     _assert_reconciled(env, "c10", {"L10": 100})
+
+
+def test_unreadable_account_is_not_read_as_not_debited_yet(client, auth_headers, env, monkeypatch):
+    """The debit landed earlier (EXPIRE row missing). If the account cannot be
+    read, the lot must wait. Read as "not debited yet" it would be re-computed
+    from the ledger -- which by now says the lot has nothing left (a later
+    redeem was charged to it) -- and be marked finished with its EXPIRE row
+    missing for good."""
+    env.seed("c13", _earn("L13", 100, "c13"))
+    heal_insert = _fail(monkeypatch, env.txns, "insert_one", _is_expire_insert)
+    assert client.post(URL, headers=auth_headers).status_code == 503
+    heal_insert()
+    assert env.balance("c13") == 0
+
+    # The customer earns a fresh lot and spends it before the retry.
+    env.txns.insert_one(_earn("VALID", 100, "c13", created=T0 + timedelta(days=40),
+                              expires=datetime(2099, 1, 1)))
+    env.a_repo.adjust_balance("c13", 100)
+    assert env.a_repo.try_debit("c13", 100) is not None
+    env.txns.insert_one({"_id": "R13", "txn_id": "R13", "type": "REDEEM", "points": 100,
+                         "customer_id": "c13", "created_at": T0 + timedelta(days=41)})
+
+    heal_read = _fail(monkeypatch, env.accounts, "find_one", lambda *a, **k: True)
+    blind = client.post(URL, headers=auth_headers)
+    assert blind.status_code == 503 and blind.json()["detail"]["incomplete_lots"] == ["L13"]
+    heal_read()
+    assert env.marked("L13") is False and env.expire_rows("c13") == []
+
+    assert client.post(URL, headers=auth_headers).json() == {"expired_txns": 1, "points_expired": 100}
+    _assert_reconciled(env, "c13", {"L13": 100})
+    # Ledger and balance agree: nothing is left for the fresh lot to shed later.
+    from api.services.loyalty_engine import expirable_points_by_lot
+    assert expirable_points_by_lot(list(env.txns.docs), datetime(2100, 1, 1)) == {}
 
 
 def test_unreadable_due_list_is_an_error_not_a_zero(client, auth_headers, env, monkeypatch):
