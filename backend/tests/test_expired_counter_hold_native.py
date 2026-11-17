@@ -234,3 +234,60 @@ def test_a_hold_aged_out_before_the_fence_issues_nothing_at_the_counter(online, 
     assert final["points"] == (150, 0, 50)  # the Rs 100 redeemed restored once (D27: earned points stay)
     # no_restock: the unit stays out, still this bill's; the counter claimed nothing and holds nothing.
     assert final["units"] == [("U1", "SOLD", "ord-1")] and final["returned_qty"] == 0 and final["holds"] == []
+
+
+def test_a_credit_move_that_stalls_past_the_reconciler_never_lands_beside_an_online_refund(online, monkeypatch):
+    """D79, the same double credit through another stale writer (Claude's
+    reviewers on head d7d0a963): the counter press stalls INSIDE its balance
+    move, after every fence. Its ISSUING line passes the reconciler's limit;
+    the reconciler voids it and gives the unit claim and the bill's hold
+    back; Accounts confirm the online no_restock refund (Rs 900); the press's
+    move resumes. Before: the move landed, the VOID line was healed to ISSUED
+    and the hold re-kept -- Rs 1,800 of store credit for Rs 900 paid, 201.
+    Now the reconciler fences the move on the customer before it gives
+    anything back: the late move can never land."""
+    from api.routers import customers as C
+    from database.repositories.audit_repository import AuditRepository
+    from database.repositories.customer_repository import CustomerRepository
+
+    db, seen = online["db"], {}
+    # The real audit trail: the reconciler's write-off of the credit-note
+    # number is recorded there, and only then is the bill's hold given back.
+    monkeypatch.setattr("api.dependencies.get_audit_repository", lambda: AuditRepository(db["audit_logs"]),
+                        raising=False)
+    real_move = C.apply_store_credit_delta
+
+    def stalls_inside_its_move(repo, customer_id, delta, **k):
+        ref = k.get("guard_ref") or ""
+        if ref.endswith(":credit") and "confirm" not in seen:
+            old = (datetime.now(timezone.utc) - timedelta(seconds=C.PENDING_TIMEOUT_SECONDS + 5)).isoformat()
+            assert db["credit_note_ledger"].update_one(
+                {"entry_id": ref, "type": "ISSUING"}, {"$set": {"pending_at": old}}).modified_count == 1
+            seen["reconciled"] = C.reconcile_pending_credits(CustomerRepository(db["customers"]))
+            seen["line"] = db["credit_note_ledger"].find_one({"entry_id": ref})
+            seen["holds"] = sorted(db["orders"].find_one({"order_id": "ord-1"}).get("refund_holds") or {})
+            seen["confirm"] = _in_thread(lambda: _confirm(online)).get("value")
+        return real_move(repo, customer_id, delta, **k)
+
+    monkeypatch.setattr(C, "apply_store_credit_delta", stalls_inside_its_move)
+    r = _press()
+    assert seen.get("confirm"), "the press never reached its balance move"
+    # The reconciler took the stalled line over and gave the bill back ...
+    assert seen["reconciled"]["voided"] == 1 and seen["line"]["type"] == "VOID" and seen["holds"] == [], seen
+    # ... so the online refund was booked ...
+    assert seen["confirm"][0] == 200 and seen["confirm"][1]["status"] == "POSTED", seen["confirm"]
+    first = _books(db)
+    live = [row for row in first["credit_rows"] if row[0] != "VOID"]
+    # ... and the press's late move never landed beside it.
+    assert live == [("ISSUED", 900.0)] and first["store_credit"] == 900.0, (r.status_code, r.text, first)
+    assert r.status_code != 201, r.text
+    assert first["returns"] == [("online", "COMPLETED", 1000.0, 100.0, 47.62)]
+    assert first["holds"] == [] and first["returned_qty"] == 0 and first["units"] == [("U1", "SOLD", "ord-1")]
+    cust = db["customers"].find_one({"customer_id": "CUST-1"})
+    assert seen["line"]["entry_id"] in cust[C.STORE_CREDIT_FENCED] and seen["line"]["entry_id"] not in cust[C.STORE_CREDIT_REFS]
+    again = _retries_and_recovery(online)
+    assert again == {"counter": 400, "confirm": 409, "webhook": "duplicate"}, again
+    C.reconcile_pending_credits(CustomerRepository(db["customers"]))
+    final = _books(db)
+    assert final == first, (first, final)
+    assert final["points"] == (150, 0, 50) and db["stock_units"].count_documents({}) == 1

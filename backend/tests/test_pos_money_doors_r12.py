@@ -328,9 +328,18 @@ def test_the_reconcilers_heal_of_a_return_credit_raises_the_task(till, monkeypat
     till["db"].get_collection("orders").insert_one(_order(refund_holds={}, refund_holds_v=1))
     _customer(till, store_credit=1200.0)
     _ledger(till).insert_one(_row("RET-H:credit", delta=1200.0, undo_on_void=_spec("RET-H")))
-    landed = iter([False, True])  # not landed at the read, landed at the void's re-read
-    monkeypatch.setattr(cust_router, "_guard_landed", lambda *a, **k: next(landed))
+    customers = till["db"].get_collection("customers")
+
+    def lands_right_after_the_read(*a, **k):
+        # Not landed at the reconciler's read; the press's move lands before
+        # the void's own look -- which now FENCES the move (D79) and so reads
+        # the real guard on the customer.
+        customers.update_one({"customer_id": "CUST-1"}, {"$push": {cust_router.STORE_CREDIT_REFS: "RET-H:credit"}})
+        return False
+
+    monkeypatch.setattr(cust_router, "_guard_landed", lands_right_after_the_read)
     cust_router.reconcile_pending_credits(_repo(till), ledger=_ledger(till))
+    assert "RET-H:credit" not in (customers.find_one({"customer_id": "CUST-1"}).get(cust_router.STORE_CREDIT_FENCED) or [])
     assert _ledger(till).find_one({"entry_id": "RET-H:credit"})["type"] == "ISSUED"
     assert [t["dedupe_ref"] for t in tasks] == ["return_credit_settled:RET-H:credit"]
 
