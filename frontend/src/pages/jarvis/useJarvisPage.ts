@@ -100,6 +100,8 @@ export function useJarvisPage() {
     history_count: number;
   } | null>(null);
   const [sentinelLoading, setSentinelLoading] = useState(false);
+  // A failed fetch is not "no checks on record" (INFRA-05): the card says so.
+  const [sentinelError, setSentinelError] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   // Auto-scroll only when the user is already at the bottom of the chat, so
   // reading older messages (scrolled up) is never yanked down on a new message.
@@ -218,10 +220,12 @@ export function useJarvisPage() {
         params: { history_limit: 60, alerts_limit: 10 },
       });
       setSentinelHealth(data);
+      setSentinelError(false);
     } catch (e) {
       // eslint-disable-next-line no-console
       console.error('[JARVIS] SENTINEL health fetch failed:', e);
       setSentinelHealth(null);
+      setSentinelError(true);
     } finally {
       setSentinelLoading(false);
     }
@@ -787,7 +791,7 @@ Is there a specific aspect you'd like me to dive deeper into? I can provide deta
     // activity feed
     activity, activityFilter, setActivityFilter, loadActivity,
     // SENTINEL / PIXEL / insights loaders
-    sentinelHealth, sentinelLoading, loadSentinelHealth,
+    sentinelHealth, sentinelLoading, sentinelError, loadSentinelHealth,
     pixelAudits, pixelLoading, loadPixelAudits,
     loadInsights, loadRecommendations,
   };
