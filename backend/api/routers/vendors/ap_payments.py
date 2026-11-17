@@ -295,6 +295,9 @@ def _ledger_rows(db, vendor_id: str, scope: Optional[str]) -> tuple:
                 {"vendor_id": vendor_id}, {"_id": 0}
             )
         )
+        # A part-application cut off between its two writes is finished here,
+        # so the ledger never shows an advance reduced with no row for it.
+        payments += _finish_half_applied(db, payments, {p.get("payment_id") for p in payments})
         debit_notes = payable_credit_rows(db, vendor_id=vendor_id)
     except Exception as exc:
         raise HTTPException(503, "Supplier balances could not be verified. Retry the ledger.") from exc
@@ -426,6 +429,9 @@ async def create_vendor_payment(
     return _clean(doc)
 
 
+_UNCONFIRMED = "Could not confirm the save. Check the supplier's ledger before recording it again."
+
+
 def _landed(db, collection: str, id_field: str, doc: dict) -> Optional[dict]:
     """A save whose insert raised, with no request id to replay by: the stored
     row if it landed all the same (its reply was lost), None if it did not.
@@ -434,10 +440,54 @@ def _landed(db, collection: str, id_field: str, doc: dict) -> Optional[dict]:
         row = db.get_collection(collection).find_one({id_field: doc[id_field]}, {"_id": 0})
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(
-            status_code=503,
-            detail="Could not confirm the save. Check the supplier's ledger before recording it again.",
+            status_code=503, detail=_UNCONFIRMED,
         ) from exc
     return _clean(row) if row else None
+
+
+def _split_row(adv: dict, entry: dict) -> dict:
+    """The payment row of one part-application of an advance, from the advance
+    and the entry its `applications` log holds for it -- the row the apply
+    door writes and a later read finishes (_finish_half_applied). Not the
+    advance's applications log, nor its form's request_id (unique -- the copy
+    would be refused)."""
+    return {
+        **{k: v for k, v in adv.items() if k not in ("_id", "applications", "request_id")},
+        "bill_id": entry["bill_id"], "store_id": entry.get("store_id") or adv.get("store_id"),
+        "applied_at": entry.get("at"), "applied_by": entry.get("by"),
+        "payment_id": entry["payment_id"], "amount": entry["amount"], "applied_from": adv["payment_id"],
+    }
+
+
+def _store_split_row(db, row: dict) -> None:
+    """Insert-once under its own _id (its payment_id): the apply door and a
+    read finishing it can both write it and one row is stored. An insert that
+    raised is read back -- stored is stored; anything else is a 503, never a
+    give-back (which could cross a row that did land) and never 'failed'."""
+    try:
+        db.get_collection("vendor_payments").insert_one({**row, "_id": row["payment_id"]})
+    except Exception as exc:  # noqa: BLE001
+        if _landed(db, "vendor_payments", "payment_id", row) is None:
+            raise HTTPException(status_code=503, detail=_UNCONFIRMED) from exc
+
+
+def _finish_half_applied(db, advances: list, stored: Optional[set] = None) -> list:
+    """A part-application is two writes: the advance is reduced and logs the
+    application, then the row naming the bill is inserted. One cut off in
+    between (a crash, a lost reply) is finished here, never undone: every
+    logged application whose row is not stored gets its row. Returns the rows
+    it stored. `stored`: the payment ids known to exist (else read)."""
+    owed = [(a, e) for a in advances for e in (a.get("applications") or []) if e.get("payment_id")]
+    if not owed:
+        return []
+    if stored is None:
+        stored = {r.get("payment_id") for r in db.get_collection("vendor_payments").find(
+            {"payment_id": {"$in": [e["payment_id"] for _, e in owed]}}, {"_id": 0, "payment_id": 1})}
+    rows = [_split_row(a, e) for a, e in owed if e["payment_id"] not in stored]
+    for row in rows:
+        _store_split_row(db, row)
+        _recompute_bill_status(db, row["bill_id"])
+    return rows
 
 
 def _replayed_payment(
@@ -525,6 +575,18 @@ async def apply_advance_to_bill(
     except Exception as exc:
         raise HTTPException(status_code=503, detail="Database unavailable") from exc
     in_reach_or_404(adv, current_user, "Payment not found")
+    already = "This advance was already applied - refresh to see what is left of it."
+    try:
+        finished = _finish_half_applied(db, [adv])
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Database unavailable") from exc
+    if finished:
+        # An earlier application of this advance had been cut off between its
+        # two writes; it is finished now. This request was made on the figures
+        # from before that: the form reloads and shows what is left.
+        raise HTTPException(status_code=409, detail=already)
     if ap_engine._has_bill_id(adv.get("bill_id")):
         raise HTTPException(status_code=409, detail="This payment is already applied to a bill.")
     bill = _named_bill_in_scope_or_404(db, vendor_id, body.bill_id, current_user)
@@ -552,10 +614,7 @@ async def apply_advance_to_bill(
     cash, tds = round(float(adv.get("amount") or 0), 2), round(float(adv.get("tds_amount") or 0), 2)
     gross = round(cash + tds, 2)
     if round(body.advance_left, 2) != gross:
-        raise HTTPException(
-            status_code=409,
-            detail="This advance was already applied - refresh to see what is left of it.",
-        )
+        raise HTTPException(status_code=409, detail=already)
     if applied > gross:
         raise HTTPException(
             status_code=422, detail=f"This advance has only Rs {gross:,.2f} to apply."
@@ -578,29 +637,22 @@ async def apply_advance_to_bill(
     now, actor = utc_now_iso(), current_user.get("user_id")
     unchanged = {"payment_id": payment_id, "amount": adv.get("amount"), "bill_id": adv.get("bill_id")}
     stamp = {"bill_id": body.bill_id, "store_id": bill.get("store_id"), "applied_at": now, "applied_by": actor}
-    if applied == gross:
-        moved = coll.update_one(unchanged, {"$set": stamp})
-        row = {**adv, **stamp}
-    else:
-        # The split row is a new payment row: not the advance's applications
-        # log, nor its form's request_id (unique -- the copy would be refused).
-        row = {**{k: v for k, v in adv.items() if k not in ("applications", "request_id")}, **stamp,
-               "payment_id": str(uuid.uuid4()), "amount": applied, "applied_from": payment_id}
-        moved = coll.update_one(unchanged, {
-            "$set": {"amount": round(cash - applied, 2)},
-            "$push": {"applications": {"payment_id": row["payment_id"], "bill_id": body.bill_id,
-                                       "amount": applied, "at": now, "by": actor}},
-        })
-        if moved.matched_count:  # the advance's `applications` names the row below
-            try:
-                coll.insert_one(dict(row))
-            except Exception as exc:
-                coll.update_one(  # give the advance back what this call took
-                    {"payment_id": payment_id},
-                    {"$inc": {"amount": applied},
-                     "$pull": {"applications": {"payment_id": row["payment_id"]}}},
-                )
-                raise HTTPException(status_code=500, detail="Failed to apply the advance") from exc
+    # A part-application: the advance logs it and keeps the rest; the applied
+    # part becomes a new payment row naming the bill (_split_row). The log
+    # entry is written with the reduction, so a call cut off before its row
+    # is stored is finished by _finish_half_applied -- never given back.
+    entry = {"payment_id": str(uuid.uuid4()), "bill_id": body.bill_id, "store_id": bill.get("store_id"),
+             "amount": applied, "at": now, "by": actor}
+    row = {**adv, **stamp} if applied == gross else _split_row(adv, entry)
+    try:
+        moved = coll.update_one(unchanged, {"$set": stamp} if applied == gross else {
+            "$set": {"amount": round(cash - applied, 2)}, "$push": {"applications": entry}})
+    except Exception as exc:
+        # Written or not, nobody can say: never 'failed' (a retry is refused
+        # or finishes it; it is never applied twice).
+        raise HTTPException(status_code=503, detail=_UNCONFIRMED) from exc
+    if moved.matched_count and applied != gross:
+        _store_split_row(db, row)
     if not moved.matched_count:
         raise HTTPException(
             status_code=409,
