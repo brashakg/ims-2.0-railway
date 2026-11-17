@@ -2696,7 +2696,8 @@ class _Died(BaseException):
     """The process died here (nothing below this point ran)."""
 
 
-@pytest.mark.parametrize("how", ["died_after_the_claim", "voucher_insert_refused"])
+@pytest.mark.parametrize("how", ["died_after_the_claim", "voucher_insert_refused",
+                                 "left_by_the_previous_version"])
 def test_r4_a_reversal_left_without_its_voucher_is_finished_by_reverse(db, monkeypatch, how):
     """A journal left REVERSED naming a voucher that was never written (the
     process died between the two writes, or the voucher's insert was refused)
@@ -2715,6 +2716,10 @@ def test_r4_a_reversal_left_without_its_voucher_is_finished_by_reverse(db, monke
         with pytest.raises(_Died):
             je_service.reverse_je(db, je_id=je_id, actor_id="checker")
         monkeypatch.setattr(je_service, "_next_je_number", real_number)
+    elif how == "left_by_the_previous_version":
+        # as the previous version left it: the claim alone, no note of it
+        db.get_collection("journal_entries").update_one(
+            {"je_id": je_id}, {"$set": {"status": "REVERSED", "reversed_by": "JE-legacyclaim01"}})
     else:
         undo = _db_faults(monkeypatch, db, "journal_entries", insert_one=_is_mirror)
         code, body = _door(db, monkeypatch, "reverse", je_id, checker)
