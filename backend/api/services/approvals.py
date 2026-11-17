@@ -668,7 +668,7 @@ class ApprovalEngine:
             "consumed_at": None,
             "consumed_by": None,
             "audit_log_id": log_id,
-            "audit_rows": {"approval_requested": log_id},   # the row owed (_record_trail)
+            "audit_rows": {log_id: _owed("approval_requested", requested_by)},   # _record_trail
         }
         if dedupe_key:
             doc["dedupe_key"] = dedupe_key
@@ -870,7 +870,7 @@ class ApprovalEngine:
                     # post at end-of-day" dead-ended. The token is now valid for a
                     # full validity window from the moment it was approved.
                     "expires_at": now + timedelta(minutes=_validity_minutes()),
-                    "audit_rows.approved": log_id,      # the row owed (_record_trail)
+                    f"audit_rows.{log_id}": _owed("approved", approver_user_id),   # _record_trail
                     "audit_log_id": log_id,
                 }
             },
@@ -974,7 +974,7 @@ class ApprovalEngine:
                     "reviewed_by_roles": sorted(roles),
                     "reviewed_at": now,
                     "reject_reason": reason or "",
-                    "audit_rows.rejected": log_id,
+                    f"audit_rows.{log_id}": _owed("rejected", approver_user_id, reason),
                     "audit_log_id": log_id,
                 }
             },
@@ -1069,7 +1069,7 @@ class ApprovalEngine:
                     "consumed_at": now,
                     "consumed_by": consumed_by,
                     "consumed_for": consumed_for,
-                    "audit_rows.consumed": log_id,
+                    f"audit_rows.{log_id}": _owed("consumed", consumed_by),
                     "audit_log_id": log_id,
                 }
             },
@@ -1080,6 +1080,12 @@ class ApprovalEngine:
             return self._consume_failure(ident)
 
         updated.pop("_id", None)
+        # The spend landed, whether it stands or is given back below: its row
+        # is written now, after any row an earlier spend or give-back of this
+        # request still owes. (A door that spends with no read first -- the
+        # refund and discount doors -- would otherwise put this spend's row
+        # ahead of theirs.)
+        self._record_trail([updated])
 
         # Post-match validation. A mismatch must NOT keep the approval burned --
         # roll the doc back to APPROVED (atomic re-claim on consumed==True by us).
@@ -1120,29 +1126,28 @@ class ApprovalEngine:
 
         if mismatch:
             # The spend landed and is given back: an audited give-back like
-            # any other (release_consumption). Its 'consumed' row stays owed
-            # and a 'consume_released' row joins it, naming why. Rolled back
-            # with no trace, a read of the request between the two writes
-            # wrote 'consumed' for a spend with no give-back, and the real
-            # spend then wrote a second one.
+            # any other (release_consumption). Its 'consumed' row is written
+            # (above) and a 'consume_released' row joins it, naming why.
+            # Rolled back with no trace, a read of the request between the
+            # two writes wrote 'consumed' for a spend with no give-back, and
+            # the real spend then wrote a second one.
             self.release_consumption(updated.get("request_id"), consumed_by=consumed_by,
                                      reason=mismatch)
             return {"ok": False, "error": mismatch}
 
-        self._write_audit("consumed", updated, actor=consumed_by, log_id=log_id)
         logger.info("[APPROVALS] %s CONSUMED by %s", updated.get("request_id"), consumed_by)
         return {"ok": True, "request": _jsonable(updated)}
 
-    def _unconsume(self, request_id: Optional[str], consumed_by: str, *,
+    def _unconsume(self, request_id: Optional[str], consumed_by: str, log_id: str, *,
                    reason: str = "") -> Optional[Dict[str, Any]]:
         """Put a spent approval back to APPROVED -- only the spender's own
         spend (atomic, guarded on consumed_by). The request as given back, or
         None when it was not.
 
         The same write names the give-back's own audit row on the request
-        (``audit_rows.consume_released``, _record_trail) with who released it
-        and why. The spend it gives back did land, so its 'consumed' row
-        stays owed: every spend that is given back leaves the pair."""
+        (``audit_rows.<log_id>``, _record_trail) with who released it and
+        why. The spend it gives back did land and keeps its own 'consumed'
+        row: every spend that is given back leaves the pair."""
         from pymongo import ReturnDocument
 
         coll = self._coll()
@@ -1158,9 +1163,7 @@ class ApprovalEngine:
                     "consumed_at": None,
                     "consumed_by": None,
                     "consumed_for": None,
-                    "audit_rows.consume_released": _new_log_id(),
-                    "released_by": consumed_by,
-                    "release_reason": reason or None,
+                    f"audit_rows.{log_id}": _owed("consume_released", consumed_by, reason),
                 }},
                 projection={"_id": 0},
                 return_document=ReturnDocument.AFTER,
@@ -1175,7 +1178,8 @@ class ApprovalEngine:
         (consume_approval; ``reason`` says which). Audited as
         ``consume_released`` (a row the request names, so a release whose
         reply was lost still gets it: _record_trail)."""
-        doc = self._unconsume(request_id, consumed_by, reason=reason)
+        log_id = _new_log_id()
+        doc = self._unconsume(request_id, consumed_by, log_id, reason=reason)
         if doc is None:
             return False
         self._record_trail([doc])
@@ -1340,7 +1344,8 @@ class ApprovalEngine:
         try:
             res = coll.update_one(
                 {"request_id": doc.get("request_id"), "status": ApprovalStatus.REQUESTED.value},
-                {"$set": {"status": ApprovalStatus.EXPIRED.value, "audit_rows.expired": log_id}},
+                {"$set": {"status": ApprovalStatus.EXPIRED.value,
+                          f"audit_rows.{log_id}": _owed("expired", "SYSTEM")}},
             )
         except Exception:  # noqa: BLE001
             return False
@@ -1562,27 +1567,35 @@ class ApprovalEngine:
             return None
 
     def _record_trail(self, docs: List[Dict[str, Any]]) -> None:
-        """Write, once, every audit row the decisions on the requests of
-        ``docs`` still owe (D84).
+        """Write, once, every audit row the actions on the requests of
+        ``docs`` still owe (D84), in the order they were made.
 
         request / approve / reject / consume_approval / release_consumption
-        and the expiry name their audit row's log id on the request
-        (``audit_rows.<action>``) in the SAME single-document write that makes
-        the change, then write the row. When that write lands and its reply
-        is lost the caller is told to try again (503) and the row was never
-        written; when only the audit insert fails the change stands without
-        it. Every engine read of a request -- get, the inbox and "mine" lists,
-        and the already-decided / already-spent answers a retry gets -- runs
-        this: a row named on the request and missing from the trail is
-        written under that id (the unique _id lets it land once), naming who
-        decided or spent, never the reader.
+        and the expiry each name their audit row on the request -- its log
+        id, the action, who made it and why (``audit_rows.<log id>``, _owed)
+        -- in the SAME single-document write that makes the change. A name is
+        only ever added: a request spent and given back more than once keeps
+        every spend's and every give-back's row named (one name per kind of
+        action let a second spend replace the name of an earlier row not yet
+        written, and that row was lost for good). When a write lands and its
+        reply is lost the caller is told to try again (503) and the row was
+        never written; when only the audit insert fails the change stands
+        without it. Every engine read of a request -- get, the inbox and
+        "mine" lists, the already-decided / already-spent answers a retry
+        gets -- and every spend and give-back runs this: a row named on the
+        request and missing from the trail is written under that id (the
+        unique _id lets it land once), naming who made the action, never the
+        reader.
 
         A request decided by a previous version carries no note and has its
         row already, so nothing of its is written here. Fail-soft: a check
-        that fails writes nothing (the next read repairs)."""
-        owed = {log_id: (doc, action)
+        that fails writes nothing, and a row that cannot be written holds
+        back the later rows of its request (the rows stay named; the next
+        read, spend or give-back writes them, still in order)."""
+        owed = {log_id: (doc, note)                     # in the order the request named them
                 for doc in docs
-                for action, log_id in ((doc or {}).get("audit_rows") or {}).items() if log_id}
+                for log_id, note in ((doc or {}).get("audit_rows") or {}).items()
+                if isinstance(note, dict) and note.get("action") in _TRAIL}
         if not owed:
             return
         try:
@@ -1592,19 +1605,23 @@ class ApprovalEngine:
             logger.warning("[APPROVALS] could not check the audit rows of %s: %s",
                            sorted({d.get("request_id") for d, _ in owed.values()}), e)
             return
-        for log_id in owed.keys() - written:
-            doc, action = owed[log_id]
-            if action not in _TRAIL:
+        stuck = set()       # requests with a row that could not be written
+        for log_id, (doc, note) in owed.items():
+            if log_id in written or doc.get("request_id") in stuck:
                 continue
-            status, who = _TRAIL[action]
-            self._write_audit(
+            action = note["action"]
+            if self._write_audit(
                 action,
                 # as the request stood when the action was made
-                dict(doc, status=status, consumed=action == "consumed"),
-                actor=next((doc[f] for f in who if doc.get(f)), "SYSTEM"),
-                reason=doc.get(_TRAIL_REASON.get(action, "")) or "",
+                dict(doc, status=_TRAIL[action], consumed=action == "consumed"),
+                actor=note.get("actor") or "SYSTEM",
+                reason=note.get("reason") or "",
                 log_id=log_id,
-            )
+            ) is None:
+                # Not written (the audit store failed, or another reader is
+                # writing these same rows): none of this request's later
+                # rows goes in ahead of it. The next read carries on.
+                stuck.add(doc.get("request_id"))
 
     def _write_audit(
         self,
@@ -1693,20 +1710,22 @@ def _new_log_id() -> str:
     return f"AUD-{uuid.uuid4().hex[:12]}"
 
 
-# Each audited action a request names the row of (_record_trail): the status
-# the request had when it was made, and the fields naming who made it (none:
-# the system). A spend given back has no consumed_by any more; whoever
-# released it is who spent it (_unconsume is guarded on that).
+# Each audited action a request names the row of (_record_trail), and the
+# status the request had when it was made.
 _TRAIL = {
-    "approval_requested": (ApprovalStatus.REQUESTED.value, ("requested_by",)),
-    "approved": (ApprovalStatus.APPROVED.value, ("reviewed_by",)),
-    "rejected": (ApprovalStatus.REJECTED.value, ("reviewed_by",)),
-    "consumed": (ApprovalStatus.CONSUMED.value, ("consumed_by", "released_by")),
-    "consume_released": (ApprovalStatus.APPROVED.value, ("released_by",)),
-    "expired": (ApprovalStatus.EXPIRED.value, ()),
+    "approval_requested": ApprovalStatus.REQUESTED.value,
+    "approved": ApprovalStatus.APPROVED.value,
+    "rejected": ApprovalStatus.REJECTED.value,
+    "consumed": ApprovalStatus.CONSUMED.value,
+    "consume_released": ApprovalStatus.APPROVED.value,
+    "expired": ApprovalStatus.EXPIRED.value,
 }
-# ... and the field holding the reason its row carries.
-_TRAIL_REASON = {"rejected": "reject_reason", "consume_released": "release_reason"}
+
+
+def _owed(action: str, actor: str, reason: str = "") -> Dict[str, Any]:
+    """What a request stores under ``audit_rows.<log id>`` for the audit row
+    one of its actions owes (_record_trail): the action, who made it, why."""
+    return {"action": action, "actor": actor, "reason": reason or None}
 
 
 def _as_aware(dt: Any) -> datetime:

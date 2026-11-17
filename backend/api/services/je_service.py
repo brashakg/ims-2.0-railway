@@ -1380,7 +1380,9 @@ def reverse_je(db, *, je_id: str, actor_id: str, actor_name: Optional[str] = Non
         503 above, or a process that died between the two writes) is finished
         by Reverse again, which inserts the mirror under that same id. The
         journal list and detail mark it (reversal_unfinished) so the screen
-        offers the press.
+        offers the press. A previous-version worker's claim (no note of it)
+        is finished only once it is older than _READ_REPAIR_GRACE: fresher,
+        that worker may still be writing its voucher (503, try again).
     The claim is never un-flipped: an insert whose reply was lost can still
     land after the un-flip, and the fresh reversal that followed it posted
     the reversal twice.
@@ -1410,6 +1412,16 @@ def reverse_je(db, *, je_id: str, actor_id: str, actor_name: Optional[str] = Non
             return {"ok": False, "http": 409, "error": "already_reversed"}
         claimed = je
         owes_reversed_row = "reversed" not in (je.get("events") or {})   # else _load wrote it
+        claimed_at = je.get("updated_at")
+        if owes_reversed_row and isinstance(claimed_at, datetime) \
+                and claimed_at > _now() - _READ_REPAIR_GRACE:
+            # A claim with no note is a previous-version worker's, and this
+            # fresh it may be between its claim and its voucher (a rolling
+            # deploy). Writing its voucher here made its own insert fail; it
+            # then flipped the original back to POSTED, and the next Reverse
+            # posted a second voucher. Left alone: try again. Once the grace
+            # has passed that worker is gone and Reverse finishes it.
+            return {"ok": False, "http": 503, "error": "write_failed"}
     elif je.get("status") != STATUS_POSTED:
         return {"ok": False, "http": 409, "error": "not_posted", "status": je.get("status")}
     else:
@@ -1572,10 +1584,17 @@ def tally_jes(db, *, store_id: Optional[str], limit: int = 1000) -> List[Dict[st
     (pnl_adjustments counts it and there is no voucher to net it), so it
     exports as posted until Reverse is pressed again and writes the voucher
     (D113) -- left out, the export and the P&L disagreed for as long as nobody
-    finished it. A finished reversal exports its voucher alone, as before."""
+    finished it. A finished reversal exports its voucher alone, as before.
+
+    One row per journal: these are two reads, and a Reverse that lands its
+    claim between them puts the same journal in both (POSTED in the first,
+    REVERSED and unfinished in the second) -- it went out as two vouchers."""
     rows = list_jes(db, store_id=store_id, status=STATUS_POSTED, limit=limit)
     reversed_rows = with_flags(db, list_jes(db, store_id=store_id, status=STATUS_REVERSED, limit=limit))
-    return rows + [r for r in reversed_rows if r.get("reversal_unfinished")]
+    once: Dict[Any, Dict[str, Any]] = {}
+    for row in rows + [r for r in reversed_rows if r.get("reversal_unfinished")]:
+        once.setdefault(row.get("je_id"), row)
+    return list(once.values())
 
 
 def build_journal_voucher_xml(jes: List[Dict[str, Any]]) -> str:
