@@ -312,12 +312,28 @@ class _FakeColl:
         return _FakeResult(1)
 
     def update_one(self, query, update, upsert=False):
-        # $set only: a credit row is marked applied once its balance moved (#1264).
+        # $set (a credit row is marked applied once its balance moved, #1264)
+        # and $addToSet with $each (a return's quarantined units, D95).
         for d in self.docs:
             if all(d.get(k) == v for k, v in (query or {}).items()):
                 d.update((update or {}).get("$set") or {})
+                for key, val in ((update or {}).get("$addToSet") or {}).items():
+                    arr = d.setdefault(key, [])
+                    for item in (val["$each"] if isinstance(val, dict) and "$each" in val else [val]):
+                        if item not in arr:
+                            arr.append(item)
                 return type("R", (), {"matched_count": 1, "modified_count": 1})()
         return type("R", (), {"matched_count": 0, "modified_count": 0})()
+
+    def find_one_and_update(self, query, update, return_document=None):
+        # The claim of a record's stock step (returns._claim_restock):
+        # equality and {"$ne": value} only; $set only.
+        for d in self.docs:
+            if all(d.get(k) != v["$ne"] if isinstance(v, dict) and set(v) == {"$ne"} else d.get(k) == v
+                   for k, v in (query or {}).items()):
+                d.update((update or {}).get("$set") or {})
+                return dict(d)
+        return None
 
     def find(self, query=None, projection=None):
         q = query or {}

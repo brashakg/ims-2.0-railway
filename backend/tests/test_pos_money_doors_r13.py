@@ -102,13 +102,15 @@ def test_the_sweep_skips_young_holds_and_holds_another_owner_has(till, tasks):
     till["db"].get_collection("orders").insert_one(_order(order_id="ORD-2", refund_holds={
         "RET-Y": {"amount": 100.0, "at": _ago(1), "kept": True},                    # too young
         "RET-I": {"amount": 100.0, "at": _ago(30), "kept": True},                   # its credit landed
-        "RET-D": {"amount": 100.0, "at": _ago(30), "kept": True, "doc": {"x": 1}},  # its own task
+        # D95(3): its press could not confirm its record and was never pressed again.
+        "RET-D": {"amount": 100.0, "at": _ago(30), "kept": True, "doc": {"return_id": "RET-D"}},
+        "RET-E": {"amount": 100.0, "at": _ago(1), "kept": True, "doc": {"return_id": "RET-E"}},  # may still re-press
         "RET-V": {"amount": 100.0, "at": _ago(30), "kept": True},                   # a VOID line
     }, refund_holds_v=1))
     _ledger(till).insert_one(_row("RET-I:credit", type=scl.ISSUED, applied=True))
     _ledger(till).insert_one(_row("RET-V:credit", type="VOID", delta=0.0, void_delta=200.0))
-    assert returns_router.sweep_stuck_return_holds() == 1
-    assert [t["dedupe_ref"] for t in tasks] == ["return_hold_stuck:RET-V"]
+    assert returns_router.sweep_stuck_return_holds() == 2
+    assert sorted(t["dedupe_ref"] for t in tasks) == ["return_doc_missing:RET-D", "return_hold_stuck:RET-V"]
 
 
 def test_nothing_paid_gives_the_claims_hold_and_number_back_once(till, monkeypatch, tasks):

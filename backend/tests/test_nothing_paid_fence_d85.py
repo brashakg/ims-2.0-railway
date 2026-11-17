@@ -538,16 +538,31 @@ def test_a_credit_note_door_that_stopped_before_its_record_tells_a_superadmin_to
 # --- Needs completing "Cash paid" on a press that may have restocked -------------------
 
 
-def test_a_cash_paid_record_never_tells_a_person_to_add_a_unit_already_in_stock(till, tasks):
-    """The press's money-out mark landed, then it stalled; its restock may
-    already have run. The recovered record used to say 'Put its units back in
-    stock by hand' -- a person following it doubled the stock."""
+@pytest.mark.parametrize("legacy_restocking", [False, True])
+def test_a_cash_paid_record_never_tells_a_person_to_add_a_unit_by_hand(till, tasks, legacy_restocking):
+    """The press's money-out mark landed, then it stopped. D95: the press
+    never places a unit before its record, so the record written here says
+    its units are NOT back, with one task and the button -- never 'add them by
+    hand'. A hold an older build left (its press was already restocking)
+    keeps the check-each-unit answer and its Restock adds nothing."""
     _bill_with_hold(till, "RET-CP", money_out=True, net_amount=1800.0, return_type="RETURN",
                     gst_view={"taxable": 1525.42, "tax": 274.58, "gross": 1800.0, "gst_rate": 18.0},
-                    tenders=[{"method": "CASH", "amount": 1800.0}])
+                    tenders=[{"method": "CASH", "amount": 1800.0}],
+                    lines=[{"item_id": "li1", "product_id": "P1", "qty": 1.0, "condition": "GOOD", "restock": True}],
+                    **({"restocking": True} if legacy_restocking else {}))
     doc = _complete("RET-CP", cash_leg_paid=True)
-    assert doc["status"] == "COMPLETED"
-    assert "already shows in stock" in doc["message"] and "do not add it again" in doc["message"]
+    assert doc["status"] == "COMPLETED" and doc["return_id"] == "RET-CP"
+    raised = [t for t in tasks if t.get("dedupe_ref") == "return_restock_blocked:RET-CP"]
+    if legacy_restocking:
+        assert "already shows in stock" in doc["message"] and "do not add it again" in doc["message"]
+        assert doc["restock_left_to_counter"] is True and doc["stock_pending"] is False and raised == []
+    else:
+        assert "NOT back in stock" in doc["message"] and "Do not add them by hand" in doc["message"]
+        assert doc["stock_pending"] is True and len(raised) == 1 and "Update stock" in raised[0]["description"]
+    # A second answer writes nothing and raises nothing more.
+    again = _complete("RET-CP", cash_leg_paid=False)
+    assert again["replayed"] is True and again["message"] == "This return's record already exists."
+    assert len([t for t in tasks if t.get("dedupe_ref") == "return_restock_blocked:RET-CP"]) == len(raised)
 
 
 # --- D85(1), round 8: Nothing was paid between the press's claim fence and its unit claim ---
@@ -709,8 +724,8 @@ def test_cash_paid_before_the_press_restocks_leaves_the_units_to_the_record(till
     _advance_client().post("/api/v1/returns", json=payload, headers=_hdr("STORE_MANAGER"))
     assert isinstance(out["record"], dict) and out["record"]["status"] == "COMPLETED", out
     assert restocks == []  # the press put nothing back
-    rec = rcoll.find_one({"_id": f"recovered:{out['rid']}"})
-    assert rec["restock_applied"] is False and not rec.get("restock_left_to_counter")
+    rec = rcoll.find_one({"_id": f"ret:{out['rid']}"})
+    assert rec["restock_applied"] is False and rec["stock_pending"] is True
     assert len(list(rcoll.find({"return_id": out["rid"]}))) == 1
     # The record's Restock puts the units back -- once.
     first = _retry_restock(out["rid"])
@@ -719,37 +734,66 @@ def test_cash_paid_before_the_press_restocks_leaves_the_units_to_the_record(till
     assert second["message"] == "Already restocked" and restocks == [out["rid"]]
 
 
-def test_cash_paid_after_the_press_began_restocking_leaves_the_units_to_the_press(till, monkeypatch, tasks):
-    """The other order: the press passed its restock fence, then Cash paid
-    answered. The units are the press's: the record says so and its Restock
-    adds nothing."""
+def test_cash_paid_after_the_press_wrote_its_record_writes_nothing(till, monkeypatch, tasks):
+    """D95(4), the other order: the press's record landed, then (the press
+    still placing its units) Accounts answered Needs completing. The return
+    is the counter's: nothing is written, nothing is asked -- the press
+    answers 201 and its units go back once."""
     payload, rcoll, restocks = _cash_press(till, monkeypatch)
     real_restock, out = returns_router._restock_good_items, {}
 
     def stalled(*a, **k):
         if "record" not in out:
+            out["before"] = rcoll.find_one({})
             _cash_paid_now(till, out)
+            out["after"] = {k2: v for k2, v in rcoll.find_one({}).items() if not k2.startswith("restock_")}
         return real_restock(*a, **k)
 
     monkeypatch.setattr(returns_router, "_restock_good_items", stalled)
     r = _advance_client().post("/api/v1/returns", json=payload, headers=_hdr("STORE_MANAGER"))
-    assert isinstance(out["record"], dict) and out["record"]["status"] == "COMPLETED", out
-    # D92(4): Cash paid recorded the cash -- the counter never says "Refund recorded".
-    assert r.status_code == 409 and r.json()["detail"] == returns_router.RECORD_TAKEN_MESSAGE, r.text
+    assert isinstance(out["record"], dict) and out["record"]["replayed"] is True, out
+    assert out["record"]["message"] == returns_router.COUNTER_COMPLETED_MESSAGE
+    assert out["after"] == {k2: v for k2, v in out["before"].items() if not k2.startswith("restock_")}
+    assert r.status_code == 201 and r.json()["restock_applied"] is True, r.text
     assert restocks == [out["rid"]]  # the press's own restock, once
-    rec = rcoll.find_one({"_id": f"recovered:{out['rid']}"})
-    assert rec["restock_left_to_counter"] is True
+    recs = list(rcoll.find({"return_id": out["rid"]}))
+    assert [d["_id"] for d in recs] == [f"ret:{out['rid']}"] and not recs[0].get("recovered")
+    assert recs[0]["restock_applied"] is True and recs[0]["stock_pending"] is False
     again = _retry_restock(out["rid"])
-    assert again["restock_applied"] is False and "adds nothing" in again["message"], again
-    assert restocks == [out["rid"]]
+    assert again["message"] == "Already restocked" and restocks == [out["rid"]]
+    assert not [t for t in tasks if "return_restock_blocked" in str(t.get("dedupe_ref"))], tasks
+
+
+def test_the_records_restock_pressed_while_the_press_places_its_units_adds_nothing(till, monkeypatch, tasks):
+    """Two requests at once on the stock step: the press holds THE claim of
+    its record's stock step, so a Restock pressed meanwhile places nothing."""
+    payload, rcoll, restocks = _cash_press(till, monkeypatch)
+    real_restock, out = returns_router._restock_good_items, {}
+
+    def stalled(items, store_id, return_id, **k):
+        if "second" not in out:
+            out["second"] = None
+            t = threading.Thread(target=lambda: out.update(second=_retry_restock(return_id)))
+            t.start()
+            t.join(60)
+        return real_restock(items, store_id, return_id, **k)
+
+    monkeypatch.setattr(returns_router, "_restock_good_items", stalled)
+    r = _advance_client().post("/api/v1/returns", json=payload, headers=_hdr("STORE_MANAGER"))
+    assert r.status_code == 201 and len(restocks) == 1, (r.text, restocks)
+    assert out["second"]["restock_applied"] is False and "in progress" in out["second"]["message"]
 
 
 def test_the_press_puts_its_units_back_when_nobody_took_its_record(till, monkeypatch, tasks):
     payload, rcoll, restocks = _cash_press(till, monkeypatch)
     r = _advance_client().post("/api/v1/returns", json=payload, headers=_hdr("STORE_MANAGER"))
     assert r.status_code == 201 and r.json()["restock_applied"] is True and len(restocks) == 1, r.text
+    rec = rcoll.find_one({})
+    assert rec["_id"] == f"ret:{rec['return_id']}" and rec["restock_applied"] is True
+    assert rec["stock_pending"] is False and rec["restock_in_progress"] is False
+    # D95: no decision rides on a mark of the bill's hold any more.
     hold = next(iter(_stored(till)["refund_holds"].values()))
-    assert hold.get("restocking") is True and not hold.get(returns_router.RECORD_TAKEN_MARK)
+    assert not {"restocking", "record_taken", "unconfirmed"} & set(hold)
 
 
 # --- D85(2), round 8: an advance door that stopped after its fence, before its record ---

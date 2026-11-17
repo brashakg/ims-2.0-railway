@@ -262,6 +262,12 @@ class _FakeColl:
         for d in self.docs:
             if _doc_matches(d, query):
                 d.update(update.get("$set", {}))
+                # $addToSet with $each: a return's quarantined units (D95).
+                for key, val in (update.get("$addToSet") or {}).items():
+                    arr = d.setdefault(key, [])
+                    for item in (val["$each"] if isinstance(val, dict) and "$each" in val else [val]):
+                        if item not in arr:
+                            arr.append(item)
                 return _FakeResult(1)
         return _FakeResult(0)
 

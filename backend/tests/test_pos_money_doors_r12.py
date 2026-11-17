@@ -302,10 +302,11 @@ def test_a_doc_that_could_not_be_saved_raises_a_task_and_is_completed_from_the_h
     returns = till["db"].get_collection("returns")
     _crash_once(monkeypatch, returns, "insert_one", lambda doc, *a, **k: doc.get("status") == "COMPLETED")
     r = _advance_client().post("/api/v1/returns", json=payload, headers=_hdr("STORE_MANAGER"))
-    assert r.status_code == 201
-    rid = r.json()["return_id"]
-    assert [t["dedupe_ref"] for t in tasks] == [f"return_doc_missing:{rid}"]
-    assert tasks[0]["priority"] == "P1" and tasks[0]["extra"]["payload"]["doc"]["return_id"] == rid
+    # D95(3): never "Refund recorded" on a record that is not confirmed --
+    # the counter is told not to pay yet; the doc rides on the kept hold.
+    assert r.status_code == 503 and r.json()["detail"] == returns_router.RECORD_NOT_CONFIRMED_MESSAGE, r.text
+    rid = next(iter(_stored(till)["refund_holds"]))
+    assert _stored(till)["refund_holds"][rid]["doc"]["return_id"] == rid and tasks == []
     # Round 14: a hold younger than the reconciler's timeout may be a press
     # still running -- refused; this one is past it.
     with pytest.raises(HTTPException) as young:
@@ -314,6 +315,10 @@ def test_a_doc_that_could_not_be_saved_raises_a_task_and_is_completed_from_the_h
     holds = _stored(till)["refund_holds"]
     holds[rid]["at"] = _ago(30)
     till["db"].get_collection("orders").update_one({"order_id": "ORD-1"}, {"$set": {"refund_holds": holds}})
+    # Never pressed again: the stuck-hold sweep puts it in front of a person.
+    assert returns_router.sweep_stuck_return_holds() == 1
+    assert [t["dedupe_ref"] for t in tasks] == [f"return_doc_missing:{rid}"]
+    assert tasks[0]["priority"] == "P1" and tasks[0]["extra"]["payload"]["doc"]["return_id"] == rid
     doc = _complete(rid, paid=True)
     assert doc["status"] == "COMPLETED" and doc["net_refund"] == 1800.0
     assert returns.count_documents({"return_id": rid}) == 1

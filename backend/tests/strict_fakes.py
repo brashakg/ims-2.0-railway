@@ -407,8 +407,10 @@ class StrictCollection:
             arr = _get_path(doc, k)
             if not isinstance(arr, list):
                 arr = []
-            if v not in arr:
-                arr.append(v)
+            # $each adds every listed value (real Mongo); a bare value is one.
+            for item in (v["$each"] if isinstance(v, dict) and "$each" in v else [v]):
+                if item not in arr:
+                    arr.append(item)
             _set_path(doc, k, arr)
         for k, v in (update.get("$pull") or {}).items():
             arr = _get_path(doc, k)
