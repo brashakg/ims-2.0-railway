@@ -3084,6 +3084,10 @@ class TestD88OneDrawerNeverTwiceInTheTotals:
         assert (first["till_session_id"], second["till_session_id"]) == (sid, sid)
         assert (first["till_link_ok"], second["till_link_ok"]) == (True, True)
         # The second close holds the drawer's one count, not its own Rs 3,500.
+        # (The till stamps the real clock here while the register runs on
+        # DATE, so this count reads as made WHILE the second session was open:
+        # L3-12. With the count before the session opened it is D111, see
+        # TestR17D111ASessionOnACountedDrawerIsJudgedOnItsOwnSheet.)
         assert (second["counted"], second["counted_from_shared_record"]) == (3000.0, True)
 
         res = _recon_summary(db, monkeypatch)
@@ -4326,3 +4330,328 @@ def test_r13_open_and_count_with_the_audit_store_down_on_real_mongo(monkeypatch)
     finally:
         client.drop_database(name)
         client.close()
+
+
+# ===========================================================================
+# Round 17 (review of head d4429202; lead decisions D110, D111)
+# ===========================================================================
+# MUST-FIX: "of several closes on one drawer the earliest adds" let a close
+# with NO count stand in for the later close that counted the drawer, so the
+# counted cash left the range totals.
+# D111: a Cash Register session opened on a drawer already counted is judged
+# on its own sheet against that count plus the cash moved since it.
+# D110: every reader and retry that meets a till drawer pays the audit rows
+# it still owes, not only the Blind EOD screens.
+
+
+def _register(db, monkeypatch, sid, *, opened, closed, opening=0.0, pieces=None, note=None, insert=True):
+    """One Cash Register session of DATE through the real close handler.
+    ``pieces`` None = the grid left blank (closed without a count)."""
+    monkeypatch.setattr(finance_router, "_get_db", lambda: db)
+    monkeypatch.setattr(finance_router, "_iso_now", lambda: f"{DATE}T{closed}")
+    if insert:
+        db.get_collection("cash_register_sessions").insert_one({
+            "_id": sid, "session_id": sid, "store_id": STORE, "status": "OPEN",
+            "opening_float": opening, "opening_denominations": [], "opened_at": f"{DATE}T{opened}",
+        })
+    body = finance_router.CashRegisterClose(
+        session_id=sid,
+        denominations=[] if pieces is None else [{"face": 500, "kind": "note", "pieces": pieces}],
+        closing_count_state="NOT_CAPTURED" if pieces is None else "COUNTED",
+        **({"note": note} if note else {}),
+    )
+    return asyncio.run(finance_router.close_cash_register(body=body, current_user=MANAGER))
+
+
+def _counted_at(db, sid, clock):
+    """Put the drawer's count instant on DATE's clock. The register sessions
+    of these tests run on DATE (their clock is patched) while the till stamps
+    the real now; in real use both are the same clock."""
+    db.get_collection("till_sessions").update_one(
+        {"_id": sid}, {"$set": {"blind_submitted_at": datetime.fromisoformat(f"{DATE}T{clock}")}})
+
+
+def _one_drawer_counted_by_a_register(db, monkeypatch, *, pieces=6, note=None):
+    """Drawer opened, Rs 3,000 cash taken, counted through a first Cash
+    Register close at 12:00 and not locked."""
+    sid = _open(db)
+    _cash_sale(db, 3000)
+    first = _register(db, monkeypatch, "CR-R17-1", opened="04:00:00", closed="12:00:00",
+                      pieces=pieces, note=note)
+    assert (first["till_session_id"], first["till_link_ok"]) == (sid, True)
+    _counted_at(db, sid, "12:00:00")
+    return sid, first
+
+
+def _recon_row(res, sid):
+    return next(r for r in res["rows"] if r["session_id"] == sid)
+
+
+class TestR17TheEarliestCloseThatHoldsACountAdds:
+    def test_first_close_without_a_count_does_not_displace_the_one_that_counted(self, db, monkeypatch):
+        """The reviewers' steps: register closed with a blank grid (the drawer
+        stays OPEN), a second session counts the drawer. Until the Z-Read
+        locked, the totals read counted Rs 0 and called the only count a
+        duplicate."""
+        first = _register(db, monkeypatch, "CR-R17-1", opened="04:00:00", closed="09:00:00")
+        sid = first["till_session_id"]
+        assert (first["variance_status"], first["counted"], first["till_link_ok"]) == (
+            "NOT_COUNTED", None, True)
+        assert _till(db, sid)["status"] == till.STATUS_OPEN
+        _cash_sale(db, 3000, f"{DATE}T10:00:00")
+        second = _register(db, monkeypatch, "CR-R17-2", opened="09:30:00", closed="12:00:00", pieces=6)
+        assert (second["till_session_id"], second["counted"], second["variance_status"]) == (
+            sid, 3000.0, "BALANCED")
+
+        res = _recon_summary(db, monkeypatch)
+        t = res["totals"]
+        assert (t["counted_cash"], t["cash_sales"], t["expected_cash"]) == (3000.0, 3000.0, 3000.0)
+        assert (t["sessions"], t["also_counted_on_till"], t["balanced"]) == (2, 0, 1)
+        assert _recon_row(res, "CR-R17-2")["also_counted_on_till"] is False
+        assert _recon_row(res, "CR-R17-1")["variance_status"] == "NOT_COUNTED"
+
+        assert till.lock_session(db, sid, actor=MANAGER)["ok"]
+        res = _recon_summary(db, monkeypatch)
+        assert [r["source"] for r in res["rows"]] == ["BLIND_EOD"]
+        assert res["totals"]["counted_cash"] == 3000.0
+
+
+class TestR17D111ASessionOnACountedDrawerIsJudgedOnItsOwnSheet:
+    """Builder probe of head d4429202: Rs 3,000 counted at the first close,
+    Rs 500 taken after, Rs 3,500 in hand at the second close: stored Rs 500
+    SHORT, a note demanded, the manager alerted."""
+
+    def test_its_own_sheet_balances_with_no_note_and_no_alert(self, db, monkeypatch):
+        alerts = _alerts(monkeypatch)
+        sid, _first = _one_drawer_counted_by_a_register(db, monkeypatch)
+        _cash_sale(db, 500, f"{DATE}T12:45:00")
+        second = _register(db, monkeypatch, "CR-R17-2", opened="12:30:00", closed="13:00:00",
+                           opening=3000.0, pieces=7)
+        assert {k: second[k] for k in ("counted", "expected", "variance", "variance_status")} == {
+            "counted": 3500.0, "expected": 3500.0, "variance": 0.0, "variance_status": "BALANCED"}
+        assert (second["counted_from_shared_record"], second["till_count_differs"]) == (False, False)
+        assert (second["till_counted_earlier"], second["till_standing_count"]) == (True, 3000.0)
+        assert (second["cash_sales"], second["till_session_id"]) == (500.0, sid)
+        assert alerts == [] and second["manager_followup"]["tasks"] == []
+        # The drawer's blind count is not replaced (L3-12).
+        assert _till(db, sid)["blind_count_paisa"] == 300000
+
+        # D88 totals unchanged: the earliest counted close adds, this one is marked.
+        res = _recon_summary(db, monkeypatch)
+        assert _money_totals(res) == {
+            "opening_float": 0.0, "cash_sales": 3000.0, "cash_refunds": 0.0,
+            "cash_expenses": 0.0, "expected_cash": 3000.0, "counted_cash": 3000.0, "variance": 0.0}
+        row = _recon_row(res, "CR-R17-2")
+        assert (row["also_counted_on_till"], row["counted_cash"], row["expected_cash"],
+                row["opening_float"], row["variance"], row["variance_status"]) == (
+            True, 3500.0, 3500.0, 3000.0, 0.0, "BALANCED")
+
+    def test_expected_starts_from_the_standing_count_and_covers_cash_since_it(self, db, monkeypatch):
+        """Rs 500 is taken after the count and BEFORE the next session opens,
+        and the float typed at opening is wrong: neither moves the figure."""
+        alerts = _alerts(monkeypatch)
+        _one_drawer_counted_by_a_register(db, monkeypatch)
+        _cash_sale(db, 500, f"{DATE}T12:10:00")
+        _cash_sale(db, 500, f"{DATE}T12:45:00")
+        second = _register(db, monkeypatch, "CR-R17-2", opened="12:30:00", closed="13:00:00",
+                           opening=2000.0, pieces=8)
+        assert (second["counted"], second["expected"], second["variance_status"]) == (
+            4000.0, 4000.0, "BALANCED")
+        assert (second["cash_sales"], second["opening_float"], second["till_standing_count"]) == (
+            1000.0, 2000.0, 3000.0)
+        assert alerts == []
+
+    def test_a_real_difference_on_its_own_sheet_needs_the_note_and_alerts(self, db, monkeypatch):
+        """Owner ruling 2026-08-25 stands. The first close was Rs 500 short
+        too and its alert is still open: the second session's own shortage
+        raises its own."""
+        alerts = _alerts(monkeypatch)
+        sid, first = _one_drawer_counted_by_a_register(
+            db, monkeypatch, pieces=5, note="Rs 500 short at the first count")
+        assert first["variance"] == -500.0
+        _cash_sale(db, 500, f"{DATE}T12:45:00")
+        with pytest.raises(HTTPException) as exc:
+            _register(db, monkeypatch, "CR-R17-2", opened="12:30:00", closed="13:00:00",
+                      opening=2500.0, pieces=5)
+        assert exc.value.status_code == 400 and "variance_note_required" in exc.value.detail
+        second = _register(db, monkeypatch, "CR-R17-2", opened="12:30:00", closed="13:00:00",
+                           pieces=5, note="another Rs 500 short", insert=False)
+        assert {k: second[k] for k in ("counted", "expected", "variance", "variance_status")} == {
+            "counted": 2500.0, "expected": 3000.0, "variance": -500.0, "variance_status": "SHORT"}
+        assert second["counted_from_shared_record"] is False
+        assert [(a["session_id"], a["variance_paisa"]) for a in alerts] == [
+            (sid, -50000), ("CR-R17-2", -50000)]
+
+    def test_no_count_of_its_own_stores_no_comparison(self, db, monkeypatch):
+        alerts = _alerts(monkeypatch)
+        _one_drawer_counted_by_a_register(db, monkeypatch)
+        _cash_sale(db, 500, f"{DATE}T12:45:00")
+        second = _register(db, monkeypatch, "CR-R17-2", opened="12:30:00", closed="13:00:00",
+                           opening=3000.0)
+        assert (second["variance"], second["variance_status"]) == (None, "COUNTED_EARLIER")
+        # The count shown is the one standing on the till, flagged as such;
+        # the cash taken after that count is on the row.
+        assert (second["counted"], second["counted_from_shared_record"], second["cash_sales"]) == (
+            3000.0, True, 500.0)
+        assert alerts == [] and second["manager_followup"]["tasks"] == []
+        res = _recon_summary(db, monkeypatch)
+        row = _recon_row(res, "CR-R17-2")
+        assert (row["variance"], row["variance_status"], row["also_counted_on_till"]) == (
+            None, "COUNTED_EARLIER", True)
+        t = res["totals"]
+        assert (t["counted_cash"], t["shortage"], t["sessions"]) == (3000.0, 0, 1)
+
+    def test_counted_on_the_blind_eod_tally_then_a_register_session(self, db, monkeypatch):
+        alerts = _alerts(monkeypatch)
+        _cash_sale(db, 1000)
+        sid = _blind_count(db, rupees=1000, lock=False)
+        _counted_at(db, sid, "06:00:00")
+        _cash_sale(db, 500, f"{DATE}T07:00:00")
+        out = _register(db, monkeypatch, "CR-R17-1", opened="06:30:00", closed="08:00:00",
+                        opening=1000.0, pieces=3)
+        assert (out["counted"], out["expected"], out["variance_status"]) == (1500.0, 1500.0, "BALANCED")
+        assert alerts == [] and _till(db, sid)["blind_count_paisa"] == 100000
+        # The only close on the drawer: it adds until the Z-Read locks, then folds.
+        res = _recon_summary(db, monkeypatch)
+        assert (res["totals"]["counted_cash"], res["totals"]["also_counted_on_till"]) == (1500.0, 0)
+        assert till.lock_session(db, sid, actor=MANAGER)["ok"]
+        res = _recon_summary(db, monkeypatch)
+        assert [r["source"] for r in res["rows"]] == ["BLIND_EOD"]
+        assert res["totals"]["counted_cash"] == 1000.0
+
+    def test_on_a_day_with_several_drawers_it_is_still_its_own_sheet(self, db, monkeypatch):
+        alerts = _alerts(monkeypatch)
+        _a, b = _drawer_a_then_b(db, a_sales=[1000], b_sales=[3000])
+        first = _cr_close_b(db, monkeypatch, 6)
+        assert (first["variance_status"], first["till_session_id"]) == ("SEVERAL_DRAWERS", b)
+        _counted_at(db, b, "12:00:00")
+        second = _second_register_close(db, monkeypatch, 7)
+        assert (second["counted"], second["expected"], second["variance"], second["variance_status"]) == (
+            3500.0, 3500.0, 0.0, "BALANCED")
+        assert second["till_drawers_on_day"] == 2 and alerts == []
+
+    def test_control_a_count_made_while_the_session_is_open_still_stands(self, db, monkeypatch):
+        """L3-12 unchanged: the till is counted through the other door WHILE
+        this register session is open; the close reports the count on the till."""
+        sid = _open(db)
+        _cash_sale(db, 3000)
+        assert till.blind_submit(
+            db, sid, blind_denominations=[{"face": 500, "kind": "note", "pieces": 2}],
+            actor=CASHIER)["ok"]
+        _counted_at(db, sid, "10:00:00")
+        with pytest.raises(HTTPException) as exc:
+            _register(db, monkeypatch, "CR-R17-1", opened="04:00:00", closed="12:00:00", pieces=6)
+        assert exc.value.status_code == 400
+        out = _register(db, monkeypatch, "CR-R17-1", opened="04:00:00", closed="12:00:00",
+                        pieces=6, note="till count stands", insert=False)
+        assert (out["counted"], out["counted_from_shared_record"], out["variance"],
+                out["variance_status"]) == (1000.0, True, -2000.0, "SHORT")
+        assert not out.get("till_counted_earlier")
+
+
+class TestR17D110EveryReaderAndRetryPaysTheOwedTillRows:
+    """A till write whose audit row could not be stored answers saved and
+    owes the row. It used to be paid only by the Blind EOD screens."""
+
+    @staticmethod
+    def _audit_down(monkeypatch, audit_rows):
+        up = []
+        store = _AuditStore(audit_rows, up=lambda: bool(up))
+        monkeypatch.setattr("api.dependencies.get_audit_repository", lambda: store)
+        monkeypatch.setattr(reports_router, "get_audit_repository", lambda: store)
+        return up
+
+    @staticmethod
+    def _actions(audit_rows, sid):
+        return [r["action"] for r in audit_rows if r.get("entity_id") == sid]
+
+    def test_the_cash_reconciliation_read_pays_a_locked_drawer(self, db, monkeypatch, audit_rows):
+        up = self._audit_down(monkeypatch, audit_rows)
+        _cash_sale(db, 1000)
+        sid = _blind_count(db, rupees=1000, lock=True)
+        assert audit_rows == [] and _till(db, sid)["manager_followup"]["pending"] is True
+        up.append(True)
+        for _ in range(2):
+            _recon_summary(db, monkeypatch)
+        assert self._actions(audit_rows, sid) == ["till.open", "till.blind_submit", "till.lock"]
+        assert [r["user_id"] for r in audit_rows] == ["u-cash", "u-cash", "u-mgr"]
+        assert _till(db, sid)["manager_followup"]["pending"] is False
+
+    @pytest.mark.parametrize("repair", ["recon", "register_retry", "register_list"])
+    def test_a_register_close_that_opened_and_counted_the_drawer(
+        self, db, monkeypatch, audit_rows, repair
+    ):
+        up = self._audit_down(monkeypatch, audit_rows)
+        _cash_sale(db, 1000)
+        out = _cr_close_two_drawers(
+            db, monkeypatch, denominations=[{"face": 500, "kind": "note", "pieces": 2}],
+            closing_count_state="COUNTED")
+        sid = out["till_session_id"]
+        assert out["till_link_ok"] is True and audit_rows == []
+        assert _till(db, sid)["status"] == till.STATUS_BLIND_SUBMITTED
+        up.append(True)
+        for _ in range(2):
+            if repair == "recon":
+                _recon_summary(db, monkeypatch)
+            elif repair == "register_list":
+                _cr_list(db, monkeypatch)
+            else:
+                with pytest.raises(HTTPException) as exc:
+                    _cr_again(db, monkeypatch,
+                              denominations=[{"face": 500, "kind": "note", "pieces": 2}])
+                assert exc.value.status_code == 409
+        assert self._actions(audit_rows, sid) == ["till.open", "till.blind_submit"]
+        assert _till(db, sid)["manager_followup"]["pending"] is False
+
+    @pytest.mark.parametrize("repair", ["retry", "status_read"])
+    def test_a_day_end_close_that_opened_and_counted_the_drawer(
+        self, db, monkeypatch, audit_rows, day_end, repair
+    ):
+        up = self._audit_down(monkeypatch, audit_rows)
+        _cash_sale(db, 1000)
+        sid = day_end(closing_cash=1000.0, system_cash=1000.0)["close"]["till_session_id"]
+        assert self._actions(audit_rows, sid) == []
+        up.append(True)
+        for _ in range(2):
+            if repair == "retry":
+                with pytest.raises(HTTPException) as exc:
+                    day_end(closing_cash=1000.0, system_cash=1000.0)
+                assert exc.value.status_code == 409
+            else:
+                asyncio.run(reports_router.get_day_end_close(
+                    date=DATE, store_id=STORE, current_user=MANAGER))
+        assert self._actions(audit_rows, sid) == ["till.open", "till.blind_submit"]
+        assert _till(db, sid)["manager_followup"]["pending"] is False
+
+    def test_a_close_that_joins_a_counted_drawer_pays_what_it_owes(self, db, monkeypatch, audit_rows):
+        up = self._audit_down(monkeypatch, audit_rows)
+        _cash_sale(db, 1000)
+        sid = _blind_count(db, rupees=1000, lock=False)
+        assert audit_rows == []
+        up.append(True)
+        link = till.record_screen_close(
+            db, store_id=STORE, session_date=DATE, counted_paisa=100000, actor=MANAGER)
+        assert link["ok"] and link["already_counted"]
+        assert self._actions(audit_rows, sid) == ["till.open", "till.blind_submit"]
+
+    def test_an_unreadable_drawer_leaves_the_rows_owed_and_the_retry_answers(
+        self, db, monkeypatch, audit_rows
+    ):
+        """The repair read fails: the retry still answers the saved close and
+        the rows stay owed for the next read."""
+        up = self._audit_down(monkeypatch, audit_rows)
+        _cash_sale(db, 1000)
+        out = _cr_close_two_drawers(
+            db, monkeypatch, denominations=[{"face": 500, "kind": "note", "pieces": 2}],
+            closing_count_state="COUNTED")
+        sid = out["till_session_id"]
+        up.append(True)
+        restore = _fail_reads(db, "till_sessions")
+        try:
+            with pytest.raises(HTTPException) as exc:
+                _cr_again(db, monkeypatch, denominations=[{"face": 500, "kind": "note", "pieces": 2}])
+        finally:
+            restore()
+        assert exc.value.status_code == 409 and self._actions(audit_rows, sid) == []
+        till.list_sessions(db, store_id=STORE)
+        assert self._actions(audit_rows, sid) == ["till.open", "till.blind_submit"]
