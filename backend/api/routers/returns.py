@@ -8140,7 +8140,10 @@ def _return_slot_index_ok() -> bool:
 # Marks on the returns record: A = restock_applied, P = stock_pending (a
 # counter record's "step open" flag: its History label, button and task),
 # I = restock_in_progress with restock_started_at (renewed before every unit
-# write) and T = restock_claim (the holder's token).
+# write) and T = restock_claim (the holder's token), C = restock_completed_at
+# (the closing stamp). A Shopify refund's record also keeps restock_intent:
+# the claim and the slots of the worker that last booked (_note_intent,
+# written BEFORE it books; cleared by its closing stamp).
 # Marks on the stock rows: every unit a return moves carries its return slot
 # "<return>|back|<product>|<n>" (put back on the shelf: a flip of the bill's
 # SOLD unit, or a mint) or "<return>|aside|<product>|<n>" (set aside:
@@ -8148,8 +8151,14 @@ def _return_slot_index_ok() -> bool:
 # (uniq_stock_unit_return_slot / _slots), with returned_by_return_id (flip)
 # or source_id (mint). A flip also matches only a unit still SOLD on THIS
 # bill. So a write whose slot is used changes nothing -- also after the unit
-# was sold again -- whoever makes it and however late (D122(2)).
-# One native test per row: test_d122_stock_step_states_native.
+# was sold again -- whoever makes it and however late (D122(2)). The slots a
+# return used are read from return_slots, the history: a unit sold again and
+# returned by another return keeps this return's slot used (_slots_of).
+# Marks on the order line (a Shopify refund only): its booking -- returned_qty
+# and restocked_refunds.<refund> -- under the worker's own token
+# "<claim>|<units>|<line>" (shopify_refund.booking_token).
+# One native test per row: test_d122_stock_step_states_native,
+# test_d122_return_slot_fence_native, test_d122_taken_over_step_native.
 #
 #  S0 nothing to place   A no  P no  I no   the record insert of a return with no stock line. The
 #                                           press's own step finds nothing and stamps S4. Final
@@ -8157,21 +8166,31 @@ def _return_slot_index_ok() -> bool:
 #  S1 open               A no  (P yes) I no opened: the record insert (the press, Needs completing,
 #                                           a Shopify refund door that left its restock open); a
 #                                           holder that could not place everything (its stamp
-#                                           names what landed); a holder that gave the claim back.
+#                                           names what landed); a holder that gave the claim back;
+#                                           a reopen (_reopen_by_booking).
 #                                           closed: _claim_restock -> S2.
-#                                           finisher: the press's own _finish_press right after its
-#                                           insert; then 'Update stock' / 'Retry stock step' (the
-#                                           sweep raises ONE P1 task naming the button for a
-#                                           counter record nobody pressed; a blocked restock
-#                                           carries its own task with its cause).
+#                                           finisher, step never started (no T): the press's own
+#                                           _finish_press right after its insert; then 'Update
+#                                           stock' / 'Retry stock step' -- the sweep raises ONE P1
+#                                           task naming the button for a counter record nobody
+#                                           pressed (D95(2)/(5): a press that never answered 201
+#                                           may have left the goods with the customer; IMS does
+#                                           not put that unit on sale on its own).
+#                                           finisher, step STOPPED (T, and no C since it started:
+#                                           the stamp never landed and the claim was given back,
+#                                           or the record was reopened): the next press, or the
+#                                           hourly sweep (finish_stopped_stock_steps).
+#                                           stamped 'not everything placed' (C after its start):
+#                                           the person was told; a blocked restock carries its own
+#                                           task with its cause.
 #  S2 claim held         A no  I yes T      opened: _claim_restock (one worker; token T).
 #                                           closed: that worker's ONE closing stamp, matched on T
 #                                           (_close_claim) -> S1 (not everything placed) or S4.
 #                                           stamp landed, reply lost: sent again under T it matches
 #                                           again and writes the same values -> the answer is the
 #                                           stored record's (D122(4)).
-#                                           stamp never landed: the claim is given back (-> S1) or,
-#                                           if that fails too, ages -> S3.
+#                                           stamp never landed: the claim is given back (-> S1,
+#                                           stopped) or, if that fails too, ages -> S3.
 #  S3 stopped part way   A no  I yes, old   the worker died, stalled, or its stamp never landed and
 #                                           the claim aged (_STOCK_CLAIM_STALE_SECONDS).
 #                                           finisher: IMS. The next 'Update stock' / 'Retry stock
@@ -8180,17 +8199,33 @@ def _return_slot_index_ok() -> bool:
 #                                           (_claim_restock, a new token) -> S2 and runs the step
 #                                           again: what already moved is read from the stock rows
 #                                           and credited; a piece is written only on a slot no row
-#                                           holds. The old holder, if it wakes: its next unit write
-#                                           hits a used slot or a unit no longer SOLD on this bill
-#                                           (nothing changes), its renew and its stamp miss on T.
+#                                           holds. A Shopify refund's stopped worker may have left
+#                                           a BOOKING with no unit behind it: its taker releases
+#                                           exactly that (by the worker's token; on a historical
+#                                           order: no stock-in task under the worker's ref) and
+#                                           places the piece on the slot the worker chose
+#                                           (_settle_stopped_booking). The old holder, if it wakes:
+#                                           it books nothing (_note_intent misses on T), its next
+#                                           unit write hits a used slot or a unit no longer SOLD
+#                                           on this bill (nothing changes), its renew and its
+#                                           stamp miss on T, its un-booking finds its token gone.
+#                                           An 'in progress' with no T is an older version's: the
+#                                           sweep leaves it; a person's press takes it over.
 #  S4 done               A yes P no         'Already restocked'. Final: no claim is ever taken on
 #                                           it again, so A is never written back to "no" -- except
 #                                           a Shopify refund whose 'applied' rested on a booking a
-#                                           stale retry then gave up (_reopen_by_booking -> S1).
+#                                           stale retry then really took back (_reopen_by_booking
+#                                           -> S1, stopped: the sweep finishes it).
 #  blocked               S1 + its P1 task   IMS may not place the units yet (the order unreadable,
 #                                           no physical shop for an online order, the slot indexes
 #                                           missing: 503). The task names the cause and the re-run;
-#                                           never a hand entry.
+#                                           never a hand entry. Closing that task by hand --
+#                                           Complete or Cancel -- is refused once while the units
+#                                           are out (D122(5)).
+#  historical order      no stock rows      IMS adds none: the step books and raises ONE stock-in
+#                                           task, once ever per counter return (a task under its
+#                                           ref in any status is the task) and once per booking
+#                                           of a Shopify refund (shopify_refund.raise_stock_in_task).
 # --------------------------------------------------------------------------- #
 # A claim older than this is a worker that stopped; a younger one is running
 # (it renews before every unit write). The age decides only WHO CONTINUES --
@@ -8654,7 +8689,7 @@ def _retry_claimed(coll: Any, mine: Dict[str, Any], claim: Dict[str, Any], curre
     by_booking = False
     # Did this run take a booking of its own back off an order line? Unknown
     # (a booked restock that raised) reads as yes: a reopen is the safe side.
-    unbooked = True
+    unbooked = False
     # What the STOCK says this return already moved (a worker that died
     # before its stamp left it on the rows only): kept on the record too.
     back_ids: set = set()
@@ -8673,6 +8708,7 @@ def _retry_claimed(coll: Any, mine: Dict[str, Any], claim: Dict[str, Any], curre
             # Before it books a line: its claim renewed and its slots on the
             # record (_ClaimLost when it was taken over: it books nothing).
             _note_intent(coll, mine, slot_keys)
+            unbooked = True
             restock_result = _restock_booked(
                 retry_order, lines, str(refund_id), lambda ls: _restock(ls, slot_keys=slot_keys),
                 processing_store_id=processing_store_id, owner=mine.get("restock_claim"),
