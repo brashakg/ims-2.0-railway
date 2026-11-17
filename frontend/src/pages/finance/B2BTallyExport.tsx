@@ -212,7 +212,7 @@ export default function B2BTallyExport() {
             ) : failed ? (
               <tr><td colSpan={12} role="alert" className="px-4 py-6 text-center text-red-700">
                 {B2B_LOAD_FAILED}.{' '}
-                <button type="button" onClick={load} className="font-medium text-bv hover:underline">Retry</button>
+                <button type="button" onClick={load} className="font-medium underline">Retry</button>
               </td></tr>
             ) : invoices.length === 0 ? (
               <tr><td colSpan={12} className="px-4 py-6 text-center text-gray-400">
