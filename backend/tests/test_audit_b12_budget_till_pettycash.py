@@ -3907,6 +3907,26 @@ class TestR12TillWritesKeepTheirAuditRow:
         till.list_sessions(db, store_id=STORE)
         assert len(_rows(audit_rows, "till.lock", sid)) == 1
 
+    def test_another_persons_read_writes_the_row_in_the_lockers_name(self, db, monkeypatch, audit_rows):
+        """The repair is not tied to the person who pressed: the cashier's own
+        list of the day, or an admin's retry, writes the manager's row."""
+        sid = self._short(db)
+        _raised(monkeypatch)
+        coll = db.get_collection("till_sessions")
+        fired = _lose_ack(monkeypatch, coll, "find_one_and_update", _sets_status(till.STATUS_LOCKED))
+        _fail_read_back(monkeypatch, coll, fired)
+        assert till.lock_session(db, sid, actor=MANAGER, variance_note="short")["http"] == 500
+        monkeypatch.setattr(till_router, "_get_db", lambda: db)
+        listed = asyncio.run(till_router.list_till_sessions(
+            store_id=STORE, date=None, status=None, limit=50, current_user=CASHIER))
+        rows = _rows(audit_rows, "till.lock", sid)
+        assert len(rows) == 1 and rows[0]["user_id"] == "u-mgr" and rows[0]["user_name"] == "Priya"
+        # The cashier's list never carries the owed row (it names the variance).
+        assert listed["sessions"] and all("manager_followup" not in r for r in listed["sessions"])
+        again = till.lock_session(db, sid, actor=ADMIN, variance_note="short")
+        assert (again["http"], again["error"]) == (409, "already_locked")
+        assert len(_rows(audit_rows, "till.lock", sid)) == 1
+
     def test_count_500_then_the_retry_writes_the_audit_row_once(self, db, monkeypatch, audit_rows):
         _cash_sale(db, 1000)
         c = _open(db)
