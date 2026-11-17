@@ -400,22 +400,44 @@ async def create_vendor_payment(
         "created_at": created_at,
     }
     db = _get_db()
-    if db is not None:
-        if payment.request_id:
-            _ensure_request_index(db)
-        try:
-            db.get_collection("vendor_payments").insert_one(dict(doc))
-        except Exception as exc:
-            # The same request racing itself: the unique request_id index let
-            # one through -- answer with that one (or refuse, as above).
-            done = _replayed_payment(db, payment.request_id, sent, current_user) if payment.request_id else None
-            if done is not None:
-                return done
+    if db is None:
+        # Nowhere to save: never a 201 for a payment nothing stored.
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    if payment.request_id:
+        _ensure_request_index(db)
+    try:
+        db.get_collection("vendor_payments").insert_one(dict(doc))
+    except Exception as exc:
+        # The same request racing itself (the unique request_id index let one
+        # through), or a save that landed with its reply lost: answer with the
+        # stored payment (or refuse, as above). Only a payment that is not
+        # stored is "failed".
+        done = (
+            _replayed_payment(db, payment.request_id, sent, current_user)
+            if payment.request_id else _landed(db, "vendor_payments", "payment_id", doc)
+        )
+        if done is None:
             raise HTTPException(
                 status_code=500, detail="Failed to save payment"
             ) from exc
         _recompute_bill_status(db, payment.bill_id)
+        return done
+    _recompute_bill_status(db, payment.bill_id)
     return _clean(doc)
+
+
+def _landed(db, collection: str, id_field: str, doc: dict) -> Optional[dict]:
+    """A save whose insert raised, with no request id to replay by: the stored
+    row if it landed all the same (its reply was lost), None if it did not.
+    No answer is a 503 -- never "failed", which a retry would record twice."""
+    try:
+        row = db.get_collection(collection).find_one({id_field: doc[id_field]}, {"_id": 0})
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=503,
+            detail="Could not confirm the save. Check the supplier's ledger before recording it again.",
+        ) from exc
+    return _clean(row) if row else None
 
 
 def _replayed_payment(
@@ -658,6 +680,9 @@ async def create_debit_note(
         money={"date": note.date, "created_at": created_at},
     )
 
+    if db_early is None:
+        # Nowhere to save: never a 201 for a credit nothing stored.
+        raise HTTPException(status_code=503, detail="Database unavailable")
     dn_id = str(uuid.uuid4())
     doc = {
         **({"request_id": note.request_id} if note.request_id else {}),
@@ -683,24 +708,25 @@ async def create_debit_note(
         "created_by": current_user.get("user_id"),
         "created_at": created_at,
     }
-    db = _get_db()
-    if db is not None:
-        if note.request_id:
-            _ensure_request_index(db, "vendor_debit_notes")
-        try:
-            db.get_collection("vendor_debit_notes").insert_one(dict(doc))
-        except Exception as exc:
-            # The same request racing itself: the unique index let one through.
-            done = (
-                _replayed_payment(db, note.request_id, sent, current_user, "vendor_debit_notes")
-                if note.request_id else None
-            )
-            if done is not None:
-                return done
+    db = db_early
+    if note.request_id:
+        _ensure_request_index(db, "vendor_debit_notes")
+    try:
+        db.get_collection("vendor_debit_notes").insert_one(dict(doc))
+    except Exception as exc:
+        # The same request racing itself (the unique index let one through),
+        # or a save that landed with its reply lost: the stored note.
+        done = (
+            _replayed_payment(db, note.request_id, sent, current_user, "vendor_debit_notes")
+            if note.request_id else _landed(db, "vendor_debit_notes", "debit_note_id", doc)
+        )
+        if done is None:
             raise HTTPException(
                 status_code=500, detail="Failed to save debit note"
             ) from exc
         _recompute_bill_status(db, note.bill_id)
+        return done
+    _recompute_bill_status(db, note.bill_id)
     return _clean(doc)
 
 
