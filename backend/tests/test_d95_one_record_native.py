@@ -661,3 +661,32 @@ async def _update_stock(db, stock_repo, rid):
             patch("api.dependencies.get_db", lambda: conn), \
             patch("api.dependencies.get_task_repository", lambda: TaskRepository(db["tasks"])):
         return await returns_router.retry_restock(rid, current_user=_user("STORE_MANAGER"))
+
+
+def test_a_named_unit_another_return_took_is_replaced_by_one_other(native, monkeypatch):
+    """The record names U1 as its DAMAGED unit; another return of the bill put
+    U1 back on the shelf meanwhile. The set-aside names U2 in its place (a
+    compare-and-set on what was named) and flips that one; a second run moves
+    nothing; a record that cannot be read sets nothing aside."""
+    db = native["db"]
+    db["returns"].insert_one({"_id": "ret:RET-X", "return_id": "RET-X", "order_id": "ORD-1", "status": "COMPLETED",
+                              "damaged_unit_ids": ["U1"]})
+    db["stock_units"].update_one({"_id": "U1"}, {"$set": {"status": "AVAILABLE", "order_id": None}})
+    lines = [returns_router.ReturnLine(**_payload(condition="DAMAGED")["items"][0])]
+    order = db["orders"].find_one({"order_id": "ORD-1"})
+
+    def unreadable(self, flt=None, *a, **k):
+        if self.name == "returns":
+            raise AutoReconnect("returns unreadable")
+        return REAL_FIND_ONE(self, flt, *a, **k)
+
+    with monkeypatch.context() as m:
+        m.setattr(Collection, "find_one", unreadable)
+        assert returns_router._quarantine_damaged_units(lines, "ORD-1", order, "RET-X", "U1") == []
+    assert _books(db)["units"] == ["AVAILABLE", "SOLD"]
+    for moved in (["U2"], []):
+        out = returns_router._quarantine_damaged_units(lines, "ORD-1", order, "RET-X", "U1")
+        assert [u["stock_id"] for u in out] == moved
+    assert db["returns"].find_one({"_id": "ret:RET-X"})["damaged_unit_ids"] == ["U2"]
+    units = {u["_id"]: u["status"] for u in db["stock_units"].find({})}
+    assert units == {"U1": "AVAILABLE", "U2": "QUARANTINED"}
