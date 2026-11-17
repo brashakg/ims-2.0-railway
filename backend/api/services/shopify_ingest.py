@@ -1544,9 +1544,12 @@ def _ensure_unique_hist_cn_ref_index(db) -> None:
     ('SHOPIFY-HIST-REFUND-<refund id>') are unique by construction and every
     historical CN row stamps historical=True, so the partial filter pins exactly
     the racing writes. Idempotent + fail-soft: an index-build failure (e.g.
-    unexpected pre-existing duplicate rows in prod) logs and skips -- booking
-    then proceeds with the find-then-insert guard exactly as before, never
-    crashing the import."""
+    unexpected pre-existing duplicate rows in prod) logs and skips. The
+    booking never relies on it (PR #1423 review R2-A): each historical note's
+    ledger row is inserted under its own ``_id`` (_hist_cn_ledger_id), so a
+    second writer of the same refund is refused by Mongo's always-present
+    ``_id`` index whether or not this one exists. The index stays for rows an
+    older import wrote with a random ``_id``."""
     try:
         coll = db.get_collection("credit_note_ledger")
         if coll is None:
@@ -1562,10 +1565,22 @@ def _ensure_unique_hist_cn_ref_index(db) -> None:
         )
     except Exception as exc:  # noqa: BLE001 -- backstop only; never block booking
         logger.warning(
-            "[SHOPIFY_INGEST] uniq_hist_cn_ref index ensure failed (continuing "
-            "with find-then-insert dedupe): %s",
+            "[SHOPIFY_INGEST] uniq_hist_cn_ref index ensure failed (continuing: "
+            "each note's ledger row is insert-once on its own _id): %s",
             exc,
         )
+
+
+def _hist_cn_ledger_id(refund_id: str) -> str:
+    """The ``_id`` of a historical refund's credit-note ledger row: its
+    idempotency ref ('SHOPIFY-HIST-REFUND-<refund id>'). INSERT-ONCE without
+    any index of ours (PR #1423 review R2-A): two import runs that both passed
+    the "is it booked" read can land only one row -- the second insert is a
+    duplicate key on ``_id``, which every Mongo collection always has. The
+    importer is the only writer of these rows."""
+    from . import shopify_refund
+
+    return shopify_refund._hist_refund_ref(refund_id)
 
 
 def _hist_cn_note_number(refund_id: str) -> str:
@@ -1722,12 +1737,27 @@ def _book_historical_refund_credit_notes(
             summary["unmapped_refunds"] = 1
             return summary
 
+    def _record_failed(refund: Dict[str, Any]) -> None:
+        summary["cn_failed"] += 1
+        rid = str(refund.get("id") or "?").strip() or "?"
+        if len(summary["cn_failed_refund_ids"]) < 20:
+            summary["cn_failed_refund_ids"].append(rid)
+
+    def _all_failed() -> Dict[str, Any]:
+        # Nothing could be booked (no ledger, no pricing machinery): every
+        # refund is reported failed -- never an order that reads as having
+        # nothing to reverse. The next import run books them.
+        for refund in refunds:
+            if isinstance(refund, dict):
+                _record_failed(refund)
+        return summary
+
     try:
         ledger = db.get_collection("credit_note_ledger")
     except Exception:  # noqa: BLE001
         ledger = None
     if ledger is None:
-        return summary
+        return _all_failed()
     try:
         returns_coll = db.get_collection("returns")
     except Exception:  # noqa: BLE001
@@ -1739,7 +1769,7 @@ def _book_historical_refund_credit_notes(
         from . import shopify_refund
     except Exception as exc:  # noqa: BLE001
         logger.warning("[SHOPIFY_INGEST] historical refund machinery import failed: %s", exc)
-        return summary
+        return _all_failed()
 
     # Concurrency backstops (idempotent, fail-soft): the unique partial index on
     # historical CN refs closes the create-vs-heal booking race, and the returns
@@ -1823,7 +1853,15 @@ def _book_historical_refund_credit_notes(
         # a ledger row whose doc never landed is finished here (heal), with no
         # second ledger row.
         heal = False
-        if shopify_refund._refund_already_processed(db, refund_id):
+        try:
+            # strict: a read that fails is no answer -- never "not booked",
+            # which would book a second note over one an older run stored.
+            processed = shopify_refund._refund_already_processed(db, refund_id, strict=True)
+        except Exception:  # noqa: BLE001
+            logger.warning("[SHOPIFY_INGEST] historical refund %s: could not read whether it is "
+                           "booked -- reported failed, the next import run books it", refund_id)
+            return "skipped"
+        if processed:
             try:
                 heal = (ledger.find_one({"ref": ref}, {"_id": 1}) is not None
                         and returns_coll is not None
@@ -1963,6 +2001,9 @@ def _book_historical_refund_credit_notes(
         cn_date = _refund_credit_note_date_iso(refund, payload)
         cn_tax = round(float(gst_view.get("tax") or 0.0), 2)
         entry = {
+            # Insert-once: one ledger row per refund with or without the
+            # uniq_hist_cn_ref index (PR #1423 review R2-A).
+            "_id": _hist_cn_ledger_id(refund_id),
             "entry_id": str(uuid.uuid4()),
             "customer_id": customer_id,
             "type": "ISSUED",
@@ -2017,8 +2058,9 @@ def _book_historical_refund_credit_notes(
         except Exception as exc:  # noqa: BLE001
             if shopify_refund._is_dup_key(exc):
                 # A concurrent run (create-branch booking vs duplicate-path
-                # heal, or two parallel heals) won the unique-index insert for
-                # this ref -- this is a DUPLICATE, not a failure: never counted
+                # heal, or two parallel heals) won the insert for this refund
+                # (its own _id; the ref index too where it exists) -- this is
+                # a DUPLICATE, not a failure: never counted
                 # as cn_failed, never told to 're-run to heal'.
                 logger.info(
                     "[SHOPIFY_INGEST] historical credit note for %s already "
@@ -2065,12 +2107,6 @@ def _book_historical_refund_credit_notes(
         summary["tax"] = round(summary["tax"] + cn_tax, 2)
         return "booked"
 
-    def _record_failed(refund: Dict[str, Any]) -> None:
-        summary["cn_failed"] += 1
-        rid = str(refund.get("id") or "?").strip() or "?"
-        if len(summary["cn_failed_refund_ids"]) < 20:
-            summary["cn_failed_refund_ids"].append(rid)
-
     for refund in refunds:
         if not isinstance(refund, dict):
             continue
@@ -2092,6 +2128,20 @@ def _book_historical_refund_credit_notes(
     # orderfull:<id> idempotency key as the missing-refunds[] branch), reconciled
     # against the TOTAL Shopify actually refunded. Without this the order stays
     # status=REFUNDED in GSTR-1 with the full sale as output tax and NO CDNR.
+    # A whole-order note an EARLIER run booked covers every refund this run
+    # still finds unmapped: that run's stamp of one of them did not land (a
+    # crash between the stamps). Its stamped siblings read as duplicates, so
+    # the heal-rerun guard below would leave the rest unstamped for good --
+    # let the fallback through to finish them (it books nothing: the note
+    # exists). An unreadable ledger is reported failed, never guessed.
+    whole_booked = False
+    if fin == "refunded" and unmapped_real_ids and summary["duplicate_refunds"]:
+        try:
+            whole_booked = ledger.find_one(
+                {"ref": shopify_refund._hist_refund_ref(f"orderfull:{payload.get('id')}")},
+                {"_id": 1}) is not None
+        except Exception:  # noqa: BLE001
+            _record_failed({"id": f"orderfull:{payload.get('id')}"})
     if (
         fin == "refunded"
         and summary["credit_notes"] == 0
@@ -2100,7 +2150,7 @@ def _book_historical_refund_credit_notes(
         # decision and residual policy stand -- firing the fallback here would
         # stack a whole-order CN on top of the existing per-refund CN(s),
         # reversing more than the original invoice (GST-illegal).
-        and summary["duplicate_refunds"] == 0
+        and (summary["duplicate_refunds"] == 0 or whole_booked)
         # FAILED-BOOKING GUARD (mirror of the heal-rerun guard above): a FAILED
         # per-refund booking (transient pricing/ledger error) is promised
         # heal-on-re-run -- the whole-order fallback must not pre-empt that in
@@ -2165,11 +2215,14 @@ def _book_historical_refund_credit_notes(
                         continue
                 except Exception:  # noqa: BLE001
                     pass
-                _stamp_returns_doc(
+                if not _stamp_returns_doc(
                     rid, 0.0, {},
                     cn_date,
                     covered_by=f"SHOPIFY-HIST-REFUND-orderfull:{payload.get('id')}",
-                )
+                ):
+                    # Not stamped: reported failed (never a run that reads
+                    # complete); the next import run stamps it.
+                    _record_failed({"id": rid})
 
     return summary
 

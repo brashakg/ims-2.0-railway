@@ -346,7 +346,7 @@ def _hist_refund_ref(refund_id: str) -> str:
     return f"SHOPIFY-HIST-REFUND-{refund_id}"
 
 
-def _refund_already_processed(db, refund_id: str) -> bool:
+def _refund_already_processed(db, refund_id: str, strict: bool = False) -> bool:
     """THE "is this refund booked" rule -- the webhook, the status sweep and the
     order-history import all ask it, so a re-delivered webhook or a re-fed
     refund never double-credits or double-restocks. True when a prior `returns`
@@ -358,7 +358,8 @@ def _refund_already_processed(db, refund_id: str) -> bool:
     the refund arrived before its order was ingested, so once the order exists a
     redelivery (or a re-drive) must be able to reprocess it. Fail-soft -> False
     (the caller then proceeds; a stray double is preferable to dropping a real
-    refund)."""
+    refund). ``strict`` (the order-history import, which a re-run heals): a
+    read that fails RAISES instead -- no answer is never "not booked"."""
     if db is None or not refund_id:
         return False
     try:
@@ -368,13 +369,15 @@ def _refund_already_processed(db, refund_id: str) -> bool:
         ):
             return True
     except Exception:  # noqa: BLE001
-        pass
+        if strict:
+            raise
     try:
         ledger = db.get_collection("credit_note_ledger")
         if ledger is not None and ledger.find_one({"ref": _hist_refund_ref(refund_id)}):
             return True
     except Exception:  # noqa: BLE001
-        pass
+        if strict:
+            raise
     try:
         review_coll = db.get_collection(_REVIEW_COLLECTION)
         if review_coll is not None:
@@ -382,7 +385,8 @@ def _refund_already_processed(db, refund_id: str) -> bool:
             if row is not None and _norm(row.get("status")).upper() != "UNMATCHED":
                 return True
     except Exception:  # noqa: BLE001
-        pass
+        if strict:
+            raise
     return False
 
 
