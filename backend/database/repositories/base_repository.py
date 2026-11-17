@@ -144,6 +144,11 @@ class BaseRepository(ABC, Generic[T]):
             print(f"Error finding {self.entity_name}: {e}")
             return None
 
+    def is_absent(self, id: str) -> bool:
+        """True only when the database confirms there is no such document.
+        RAISES on a database error (find_by_id reports that as None too)."""
+        return self.collection.find_one({self.id_field: id}) is None
+
     def find_one(self, filter: Dict) -> Optional[Dict]:
         """
         Find single document by filter

@@ -1095,9 +1095,26 @@ async def get_user(user_id: str, current_user: dict = Depends(require_manager)):
         if user is not None:
             _assert_can_read_user(user, current_user)
             return sanitize_user(user, current_user)
-        raise HTTPException(status_code=404, detail="User not found")
+        raise _user_missing(repo, user_id)
 
     return {"user_id": user_id}
+
+
+def _user_missing(repo, user_id: str) -> HTTPException:
+    """The error for a user read that came back empty. ``find_by_id`` answers
+    None for a failed database read as well as for "no such person", so ask
+    the database once more, strictly: 404 only when it confirms the person is
+    not there, 503 when the read itself failed."""
+    confirm = getattr(repo, "is_absent", None)  # test doubles have no strict read
+    try:
+        absent = confirm(user_id) if confirm else True
+    except Exception:  # noqa: BLE001 - the read failed: not "not found"
+        absent = False
+    if absent:
+        return HTTPException(status_code=404, detail="User not found")
+    return HTTPException(
+        status_code=503, detail="Could not read this person. Try again."
+    )
 
 
 def _commit_user_write(
@@ -1175,7 +1192,7 @@ async def _apply_user_update(
     if repo is not None:
         existing = repo.find_by_id(user_id)
         if existing is None:
-            raise HTTPException(status_code=404, detail="User not found")
+            raise _user_missing(repo, user_id)
 
         actor_roles = current_user.get("roles", [])
 
@@ -1367,7 +1384,7 @@ async def delete_user(user_id: str, current_user: dict = Depends(require_admin))
     if repo is not None:
         existing = repo.find_by_id(user_id)
         if existing is None:
-            raise HTTPException(status_code=404, detail="User not found")
+            raise _user_missing(repo, user_id)
 
         # Prevent deactivating yourself
         if user_id == current_user.get("user_id"):
@@ -1452,7 +1469,7 @@ async def add_role(
     if repo is not None:
         existing = repo.find_by_id(user_id)
         if existing is None:
-            raise HTTPException(status_code=404, detail="User not found")
+            raise _user_missing(repo, user_id)
 
         await _add_role_via_update(user_id, existing, role, current_user)
         return {"message": f"Role {role} added to user"}
@@ -1479,7 +1496,7 @@ async def remove_role(
     if repo is not None:
         existing = repo.find_by_id(user_id)
         if existing is None:
-            raise HTTPException(status_code=404, detail="User not found")
+            raise _user_missing(repo, user_id)
 
         current_roles = existing.get("roles", []) or []
         # LAST-ROLE GUARD: don't strip a user's only remaining role -- a
@@ -1610,7 +1627,7 @@ async def reset_password(
 
     existing = repo.find_by_id(user_id)
     if existing is None:
-        raise HTTPException(status_code=404, detail="User not found")
+        raise _user_missing(repo, user_id)
 
     # ROLE-ESCALATION GUARD: a non-SUPERADMIN actor may only reset a user at or
     # below their own level. This mirrors update_user / delete_user so an ADMIN
@@ -1696,7 +1713,7 @@ async def set_password(
         raise HTTPException(status_code=503, detail="Database unavailable")
     existing = repo.find_by_id(user_id)
     if existing is None:
-        raise HTTPException(status_code=404, detail="User not found")
+        raise _user_missing(repo, user_id)
 
     keep_sid = current_user.get("sid") if current_user.get("user_id") == user_id else None
     saved = repo.update(
@@ -1773,7 +1790,7 @@ async def assign_store(
         }
     existing = repo.find_by_id(user_id)
     if existing is None:
-        raise HTTPException(status_code=404, detail="User not found")
+        raise _user_missing(repo, user_id)
     if body.role:
         # D97: through the same role-change door as add_role (D70), with the
         # shop grant in that ONE compare-and-set write. A refusal (409) leaves
@@ -1796,7 +1813,7 @@ async def add_store_access(
     if repo is not None:
         existing = repo.find_by_id(user_id)
         if existing is None:
-            raise HTTPException(status_code=404, detail="User not found")
+            raise _user_missing(repo, user_id)
 
         _grant_store(repo, user_id, store_id)
         return {"message": f"Store {store_id} access granted"}
@@ -1814,7 +1831,7 @@ async def remove_store_access(
     if repo is not None:
         existing = repo.find_by_id(user_id)
         if existing is None:
-            raise HTTPException(status_code=404, detail="User not found")
+            raise _user_missing(repo, user_id)
 
         if repo.remove_store(user_id, store_id):
             return {"message": f"Store {store_id} access revoked"}
@@ -1969,7 +1986,7 @@ async def get_user_permissions(
         return {"permissions": {}, "module_access": {}, "discount_cap": None, "history": []}
     existing = repo.find_by_id(user_id)
     if existing is None:
-        raise HTTPException(status_code=404, detail="User not found")
+        raise _user_missing(repo, user_id)
     history = _perm_audit.find_permission_history(
         get_audit_repository(),
         user_id,
@@ -2016,7 +2033,7 @@ async def revert_user_permissions(
 
     existing = repo.find_by_id(user_id)
     if existing is None:
-        raise HTTPException(status_code=404, detail="User not found")
+        raise _user_missing(repo, user_id)
 
     actor_roles = current_user.get("roles", [])
     # Same higher-account guard as update_user: a non-SUPERADMIN cannot touch a

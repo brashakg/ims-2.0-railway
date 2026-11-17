@@ -596,7 +596,7 @@ def test_a_logged_change_with_no_write_at_all_is_not_applied(monkeypatch):
         audit, action="PERMISSIONS_UPDATE", actor=_SUPER, target_user_id=uid,
         prior=snap, after=dict(snap, discount_cap=9.0))
     audit.collection.update_one(
-        {"log_id": legacy["log_id"]}, {"$unset": {pa.NEEDS_CONFIRMATION: ""}})
+        {"log_id": legacy["log_id"]}, {"$unset": {"confirmed_on_user": ""}})
     by_id = {h["log_id"]: h for h in _history(c, uid)}
     assert by_id[orphan["log_id"]].get("not_applied") is True
     assert not by_id[legacy["log_id"]].get("not_applied")
@@ -705,3 +705,36 @@ def test_a_shop_grant_that_did_not_land_is_an_error_and_a_lost_reply_is_not(
         r = c.post(f"/api/v1/users/{uid}{path}", json=body)
     assert r.status_code == 200, r.text
     assert repo.find_by_id(uid)["store_ids"] == before + ["S2"]
+
+
+def test_a_failed_user_read_is_an_error_not_user_not_found(monkeypatch):
+    """A database error on the single-user read answered 404 "User not found"
+    on every door of an existing person. 404 is kept for a person the
+    database confirms is not there."""
+    from pymongo.errors import AutoReconnect
+
+    repo = _repo()
+    c, _ = _client_with_audit(repo, _SUPER, monkeypatch)
+    uid = _create(c, "there", ["SALES_STAFF"])
+    doors = [
+        ("get", f"/api/v1/users/{uid}", None),
+        ("get", f"/api/v1/users/{uid}/permissions", None),
+        ("put", f"/api/v1/users/{uid}", {"discount_cap": 12}),
+        ("post", f"/api/v1/users/{uid}/roles/OPTOMETRIST", None),
+        ("post", f"/api/v1/users/{uid}/assign-store", {"store_id": "S2"}),
+        ("post", f"/api/v1/users/{uid}/permissions/revert", {"audit_log_id": "x"}),
+    ]
+
+    def unreadable(*a, **k):
+        raise AutoReconnect("user read unavailable")
+
+    with monkeypatch.context() as m:
+        m.setattr(repo.collection, "find_one", unreadable)
+        for method, path, body in doors:
+            r = getattr(c, method)(path, **({"json": body} if body else {}))
+            assert r.status_code == 503, (path, r.status_code, r.text)
+    assert _stored(repo, uid) == (10.0, True)
+    for method, path, body in doors:
+        r = getattr(c, method)(path.replace(uid, "no-such-person"),
+                               **({"json": body} if body else {}))
+        assert r.status_code == 404, (path, r.status_code, r.text)
