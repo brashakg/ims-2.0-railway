@@ -26,8 +26,12 @@ vi.mock('../../../services/api/client', () => ({ default: { get: (...a: unknown[
 vi.mock('../../../services/api', () => ({ inventoryApi: {} }));
 // The signed-in roles; hasRole answers as AuthContext's does (ADMINs pass all).
 let roles: string[] = ['CASHIER'];
+// The shop the server has confirmed for this sign-in (AuthContext moves it
+// only when the switch is confirmed, #1372).
+let shop = 'S1';
 vi.mock('../../../context/AuthContext', () => ({
   useAuth: () => ({
+    user: { activeStoreId: shop },
     hasRole: (want: string[]) =>
       roles.includes('SUPERADMIN') || roles.includes('ADMIN') || want.some((r) => roles.includes(r)),
   }),
@@ -68,6 +72,7 @@ const priceOf = (name: string) => {
 describe('Stock lookup screen', () => {
   beforeEach(() => {
     roles = ['CASHIER'];
+    shop = 'S1';
     mockGet.mockReset();
     mockGet.mockResolvedValue({
       data: {
@@ -236,5 +241,73 @@ describe('Stock lookup header - Power Grid door', () => {
     roles = ['OPTOMETRIST'];
     renderPage();
     expect(screen.getByRole('link', { name: 'Power Grid' })).toHaveAttribute('href', '/inventory/power-grid');
+  });
+});
+
+// Audit SP-06: a frame looked up at shop A, then a store switch the server
+// confirmed (token and header both on B). The query key was the search text
+// alone, so nothing asked again and the answer for A stayed on screen with A
+// still marked "this shop". The key now carries the confirmed shop.
+describe('SP-06: Stock lookup follows a confirmed store switch', () => {
+  const SHOPS = [
+    { store_id: 'S1', store_name: 'Dhanbad', available: 3, in_transit: 0 },
+    { store_id: 'S2', store_name: 'Pune', available: 0, in_transit: 0 },
+  ];
+  /** The server answers for the shop in the sign-in token. */
+  const answerFor = (store_id: string) => ({
+    data: { store_id, items: [{ product_id: 'F', sku: 'F', name: 'Frame F', mrp: 100, offer_price: null, stores: SHOPS }] },
+  });
+  const thisShop = () => screen.queryByText('this shop')?.closest('th')?.firstChild?.textContent ?? null;
+  const tree = (qc: QueryClient) => (
+    <QueryClientProvider client={qc}>
+      <MemoryRouter>
+        <StockLookupPage />
+      </MemoryRouter>
+    </QueryClientProvider>
+  );
+
+  beforeEach(() => {
+    roles = ['CASHIER'];
+    shop = 'S1';
+    mockGet.mockReset();
+  });
+
+  it('asks again for the new shop and marks IT "this shop"; the old mark is gone while that loads', async () => {
+    let answerB: (v: unknown) => void = () => {};
+    mockGet
+      .mockResolvedValueOnce(answerFor('S1'))
+      .mockImplementationOnce(() => new Promise((done) => { answerB = done; }));
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const view = render(tree(qc));
+    const box = screen.getByLabelText('Search stock');
+    fireEvent.change(box, { target: { value: 'CA8895' } });
+    fireEvent.submit(box.closest('form')!);
+    await waitFor(() => expect(thisShop()).toBe('Dhanbad'));
+
+    // The switch is confirmed: the screen's shop is now S2. No new search.
+    shop = 'S2';
+    view.rerender(tree(qc));
+    await waitFor(() => expect(mockGet).toHaveBeenCalledTimes(2));
+    // Until S2's answer lands nothing is marked, and S1's counts are not shown.
+    expect(thisShop()).toBeNull();
+    expect(screen.queryByText('Frame F')).toBeNull();
+
+    answerB(answerFor('S2'));
+    await waitFor(() => expect(thisShop()).toBe('Pune'));
+    // This shop is listed first.
+    expect(screen.getAllByRole('columnheader').slice(5).map((h) => h.firstChild?.textContent)).toEqual(['Pune', 'Dhanbad']);
+  });
+
+  it('a switch that failed changes nothing: same shop, no second request', async () => {
+    mockGet.mockResolvedValue(answerFor('S1'));
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const view = render(tree(qc));
+    const box = screen.getByLabelText('Search stock');
+    fireEvent.change(box, { target: { value: 'CA8895' } });
+    fireEvent.submit(box.closest('form')!);
+    await waitFor(() => expect(thisShop()).toBe('Dhanbad'));
+    view.rerender(tree(qc)); // the shop did not move (#1372)
+    expect(thisShop()).toBe('Dhanbad');
+    expect(mockGet).toHaveBeenCalledTimes(1);
   });
 });

@@ -12,6 +12,7 @@
 // editor drawer UI uses BV brand tokens; printed docs do not.
 
 import { ReactNode } from 'react';
+import { istDayString } from '../../utils/datetime';
 
 // ---------------------------------------------------------------------------
 // Types -- aligned with backend services/print_legal.py
@@ -239,28 +240,14 @@ export function amountInWords(value: number | string | null | undefined, paiseAr
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
+/** The India calendar day, e.g. "02-Nov-2026", whatever the browser's own
+ *  timezone: a date-only "2026-11-02" stays the 2nd (never the evening before
+ *  west of UTC), and a timestamp is the day it was in India (D34.2). */
 export function formatDate(value: Date | string | null | undefined): string {
-  if (!value) return '';
-  // A date-only "YYYY-MM-DD" is a calendar day, not an instant: print it as
-  // is. new Date() reads it as UTC midnight, which the local getters below
-  // turn into the previous day west of UTC (Codex PR-1425).
-  const day = typeof value === 'string' ? /^(\d{4})-(\d{2})-(\d{2})$/.exec(value.trim()) : null;
-  if (day) {
-    const m = Number(day[2]);
-    if (m >= 1 && m <= 12) return `${day[3]}-${MONTHS[m - 1]}-${day[1]}`;
-  }
-  const d = value instanceof Date ? value : new Date(value);
-  if (Number.isNaN(d.getTime())) return '';
-  return `${String(d.getDate()).padStart(2, '0')}-${MONTHS[d.getMonth()]}-${d.getFullYear()}`;
-}
-
-export function formatDateTimeIST(value: Date | string | null | undefined): string {
-  if (!value) return '';
-  const d = value instanceof Date ? value : new Date(value);
-  if (Number.isNaN(d.getTime())) return '';
-  const hh = String(d.getHours()).padStart(2, '0');
-  const mm = String(d.getMinutes()).padStart(2, '0');
-  return `${formatDate(d)} ${hh}:${mm} IST`;
+  const day = istDayString(value ?? null);
+  if (!day) return '';
+  const [y, m, d] = day.split('-');
+  return `${d}-${MONTHS[Number(m) - 1]}-${y}`;
 }
 
 // Indian-numbering currency with the Rupee glyph and tabular-nums display.

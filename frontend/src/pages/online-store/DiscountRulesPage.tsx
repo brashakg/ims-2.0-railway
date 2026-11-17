@@ -136,6 +136,12 @@ export default function DiscountRulesPage() {
   };
 
   const submit = async () => {
+    // L1-F36: blank must not become Number('') === 0 (an active 0% rule that
+    // overrides broader discounts). A deliberate 0 is still allowed.
+    if (!String(form.discount_percentage).trim()) {
+      toast.error('Enter a discount % (0 to 100)');
+      return;
+    }
     const pct = Number(form.discount_percentage);
     if (Number.isNaN(pct) || pct < 0 || pct > 100) {
       toast.error('Discount % must be between 0 and 100');
