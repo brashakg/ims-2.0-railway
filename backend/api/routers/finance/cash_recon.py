@@ -240,6 +240,7 @@ async def cash_reconciliation_summary(
                     or 0,
                     2,
                 ),
+                "counted_earlier_on_till": bool(s.get("till_counted_earlier")),
                 # D86(3): a close that could not read the day's drawers covers
                 # an unknown set of them -- its cash figures are not available
                 # and stay out of the totals (they would add a drawer twice).
@@ -415,7 +416,15 @@ async def cash_reconciliation_summary(
         survivors: List[dict] = []
         for r in rows:
             linked = r.get("till_session_id")
-            if r.get("source") == "CASH_REGISTER" and linked in till_row_ids:
+            # A D111 session's figures are its OWN (a later sheet, the cash
+            # taken after the drawer's count), not the drawer's: its row
+            # stays, marked and out of the totals (2c), so a difference on
+            # that sheet is still on this console after the Z-Read locks.
+            if (
+                r.get("source") == "CASH_REGISTER"
+                and linked in till_row_ids
+                and not r.get("counted_earlier_on_till")
+            ):
                 by_id[linked]["also_closed_from"] = r.get("session_id")
                 by_id[linked]["also_closed_from_source"] = "CASH_REGISTER"
                 continue
@@ -449,6 +458,11 @@ async def cash_reconciliation_summary(
             or (
                 r.get("session_id") in unattributed_ids
                 and (r.get("store_id"), r.get("session_date")) in zread_days
+            )
+            # A D111 session beside its drawer's own Z-Read row (see 2b).
+            or (
+                r.get("counted_earlier_on_till")
+                and r.get("till_session_id") in till_row_ids
             )
         )
 

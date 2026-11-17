@@ -4446,6 +4446,17 @@ class TestR17D111ASessionOnACountedDrawerIsJudgedOnItsOwnSheet:
                 row["opening_float"], row["variance"], row["variance_status"]) == (
             True, 3500.0, 3500.0, 3000.0, 0.0, "BALANCED")
 
+        # Locked: the first close folds into the drawer's Z-Read row; this
+        # session's own figures still show, marked and not added.
+        assert till.lock_session(db, sid, actor=MANAGER)["ok"]
+        res = _recon_summary(db, monkeypatch)
+        assert sorted((r["source"], r["also_counted_on_till"]) for r in res["rows"]) == [
+            ("BLIND_EOD", False), ("CASH_REGISTER", True)]
+        assert _recon_row(res, "CR-R17-2")["counted_cash"] == 3500.0
+        t = res["totals"]
+        assert (t["counted_cash"], t["cash_sales"], t["sessions"], t["also_counted_on_till"]) == (
+            3000.0, 3000.0, 1, 1)
+
     def test_expected_starts_from_the_standing_count_and_covers_cash_since_it(self, db, monkeypatch):
         """Rs 500 is taken after the count and BEFORE the next session opens,
         and the float typed at opening is wrong: neither moves the figure."""
@@ -4481,6 +4492,14 @@ class TestR17D111ASessionOnACountedDrawerIsJudgedOnItsOwnSheet:
         assert second["counted_from_shared_record"] is False
         assert [(a["session_id"], a["variance_paisa"]) for a in alerts] == [
             (sid, -50000), ("CR-R17-2", -50000)]
+        # The shortage stays on the console after the Z-Read locks (the row
+        # is marked and adds nothing: the totals are the drawer's own).
+        assert till.lock_session(db, sid, actor=MANAGER, variance_note="Rs 500 short")["ok"]
+        res = _recon_summary(db, monkeypatch)
+        row = _recon_row(res, "CR-R17-2")
+        assert (row["variance"], row["variance_status"], row["also_counted_on_till"]) == (
+            -500.0, "SHORTAGE", True)
+        assert (res["totals"]["counted_cash"], res["totals"]["shortage"]) == (2500.0, 1)
 
     def test_no_count_of_its_own_stores_no_comparison(self, db, monkeypatch):
         alerts = _alerts(monkeypatch)
@@ -4516,8 +4535,9 @@ class TestR17D111ASessionOnACountedDrawerIsJudgedOnItsOwnSheet:
         assert (res["totals"]["counted_cash"], res["totals"]["also_counted_on_till"]) == (1500.0, 0)
         assert till.lock_session(db, sid, actor=MANAGER)["ok"]
         res = _recon_summary(db, monkeypatch)
-        assert [r["source"] for r in res["rows"]] == ["BLIND_EOD"]
-        assert res["totals"]["counted_cash"] == 1000.0
+        assert sorted((r["source"], r["also_counted_on_till"]) for r in res["rows"]) == [
+            ("BLIND_EOD", False), ("CASH_REGISTER", True)]
+        assert (res["totals"]["counted_cash"], res["totals"]["also_counted_on_till"]) == (1000.0, 1)
 
     def test_on_a_day_with_several_drawers_it_is_still_its_own_sheet(self, db, monkeypatch):
         alerts = _alerts(monkeypatch)
