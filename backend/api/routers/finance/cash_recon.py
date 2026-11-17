@@ -525,9 +525,26 @@ async def cash_reconciliation_summary(
     over = [r for r in counted_rows if r.get("variance_status") == "OVERAGE"]
     short = [r for r in counted_rows if r.get("variance_status") == "SHORTAGE"]
     balanced = [r for r in counted_rows if r.get("variance_status") == "BALANCED"]
+    # D121: a later Cash Register close on an already counted drawer stays
+    # out of the totals (D88), so the totals describe each drawer at its
+    # first count of the day. Those closes are named beside the totals with
+    # their OWN differences, short and over apart so they cannot cancel: a
+    # second-shift shortage must not be missed.
+    later = [
+        r for r in rows if r["also_counted_on_till"] and r.get("counted_earlier_on_till")
+    ]
+
+    def _later_sum(status: str) -> float:
+        return round(
+            sum(abs(r["variance"]) for r in later if r.get("variance_status") == status), 2
+        )
+
     totals = {
         "sessions": len(counted_rows),
         "also_counted_on_till": len(rows) - len(counted_rows),
+        "later_closes": len(later),
+        "later_closes_short": _later_sum("SHORTAGE"),
+        "later_closes_over": _later_sum("OVERAGE"),
         "balanced": len(balanced),
         "overage": len(over),
         "shortage": len(short),

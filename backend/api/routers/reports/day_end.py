@@ -241,6 +241,9 @@ async def create_day_end_close(
         counted_paisa=(
             cash_denom.rupees_to_paisa(closing_cash) if closing_cash is not None else None
         ),
+        # Which door made the count (D120: a Cash Register session open at
+        # the time is judged from this count, on its own sheet).
+        origin=till_service.COUNT_ORIGIN_DAY_END,
         actor=current_user,
     )
 

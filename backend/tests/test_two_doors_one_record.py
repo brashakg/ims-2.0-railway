@@ -561,9 +561,15 @@ class TestTheTwoScreensCannotShowTwoFigures:
     def test_the_finance_list_reports_the_count_the_day_end_already_made(self, db):
         """THE REPRODUCTION. POS Day-End closes the drawer at Rs 3,000. The
         Finance screen then closes the SAME day with a 4 x Rs 500 grid. The
-        first count STANDS on the shared record, so the Finance list must
-        report Rs 3,000 too -- it used to report Rs 2,000 and a Rs 1,000
-        OVERAGE for a drawer the Z-Read said held Rs 3,000."""
+        first count STANDS on the shared record. The Finance list used to
+        report Rs 2,000 and a Rs 1,000 OVERAGE against its own window, for a
+        drawer the Z-Read said held Rs 3,000, with nothing tying the two.
+
+        Lead decision D120 (PR #1421): the Finance close is judged on its OWN
+        sheet FROM the Day-End count. Its row carries that count as the
+        starting figure and reports its sheet as Rs 1,000 SHORT of it -- a
+        difference that needs its note -- instead of repeating the Day-End
+        figure and dropping the later sheet."""
         _day_end_close(
             db,
             closing_cash=3000.0,
@@ -577,25 +583,26 @@ class TestTheTwoScreensCannotShowTwoFigures:
             db,
             denominations=[{"face": 500, "kind": "note", "pieces": 4}],
             closing_count_state="COUNTED",
-            # Band pinned to 0; the adopted Rs 3,000 count vs expected 0 is out
-            # of band -> the mandatory explanation (2026-08-25 ruling).
-            note="day-end already counted this drawer - see Z-Read",
+            # Band pinned to 0; Rs 2,000 on this sheet against the Rs 3,000
+            # Day-End counted is out of band -> the mandatory explanation
+            # (2026-08-25 ruling).
+            note="Rs 1,000 less than the day-end count - see Z-Read",
         )
 
-        # ONE drawer, ONE counted figure -- on the close response, on the
-        # stored document, and on what the Finance screen reads back.
-        assert closed["counted"] == 3000.0
+        # The sheet typed here is judged FROM the Day-End count (D120) -- on
+        # the close response, on the stored document, and on what the Finance
+        # screen reads back.
+        assert closed["counted"] == 2000.0
         listed = _cr_sessions(db)
         assert len(listed) == 1
-        assert listed[0]["counted"] == cd.paisa_to_rupees(shared["blind_count_paisa"])
-        assert listed[0]["counted"] == 3000.0
-        # ...and the screen is TOLD, rather than silently shown someone else's
-        # number.
-        assert listed[0]["counted_from_shared_record"] is True
-        assert listed[0]["till_count_differs"] is True
+        # ...and the screen is TOLD which count it starts from, rather than
+        # shown a second figure with nothing tying it to the first.
+        assert listed[0]["till_counted_earlier"] is True
+        assert listed[0]["till_standing_count"] == cd.paisa_to_rupees(shared["blind_count_paisa"])
         assert listed[0]["till_already_counted"] is True
-        # The variance is re-derived from the count that stands.
-        assert listed[0]["variance"] == round(3000.0 - listed[0]["expected"], 2)
+        assert listed[0]["counted_from_shared_record"] is False
+        assert (listed[0]["expected"], listed[0]["variance"], listed[0]["variance_status"]) == (
+            3000.0, -1000.0, "SHORT")
         # The shared record is NOT restated by the second door.
         assert _sessions(db)[0]["blind_count_paisa"] == 300000
 

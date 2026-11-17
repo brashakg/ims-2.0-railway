@@ -697,6 +697,12 @@ def auto_cash_payouts_paisa(db, store_id: str, window_start: Any, window_end: An
     return _to_int_paisa_from_rupees(win.total), int(win.excluded_count or 0)
 
 
+# Who made a drawer's count (``blind_count_origin``): one of these, or the id
+# of the Cash Register session whose close counted it.
+COUNT_ORIGIN_TILL = "TILL"
+COUNT_ORIGIN_DAY_END = "DAY_END"
+
+
 def _counted_drawers(db, session: Dict[str, Any]) -> List[Dict[str, Any]]:
     """The OTHER drawers of this session's shop-day that already carry a
     count (BLIND_SUBMITTED or LOCKED). Raises when the read fails."""
@@ -773,11 +779,22 @@ def _own_share(exp: Dict[str, Any], earlier: List[Dict[str, Any]]) -> Dict[str, 
     }
 
 
-def moved_since_count(db, drawer: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """D111: the cash that moved on a COUNTED drawer's shop-day after the
+def moved_since_count(
+    db, drawer: Dict[str, Any], later: Optional[List[Dict[str, Any]]] = None
+) -> Optional[Dict[str, Any]]:
+    """D120: the cash that moved on a COUNTED drawer's shop-day after the
     day's counts, by the D60 rule above (``_own_share``): the day so far
     minus what every counted drawer of the day, this one included, was
     charged with at its count.
+
+    ``later``: the sheets counted on this drawer AFTER its blind count, oldest
+    first (earlier Cash Register sessions judged on their own sheet). Each is
+    a count like a drawer's: it holds the cash it was charged with
+    (``cash_sales_paisa`` / ``cash_refunds_paisa`` / ``cash_payouts_paisa`` /
+    ``by_mode``) and is taken off the same way, and the LAST one's
+    ``counted_paisa`` is where the cash now starts. Starting every session
+    from the blind count instead charged a later session again with a bank
+    deposit and a noted shortage an earlier one had already accounted for.
 
     "Cash since the count's instant" cannot be read back: payouts are booked
     by day only, so the day's payouts already out of the standing count were
@@ -796,10 +813,10 @@ def moved_since_count(db, drawer: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     store_id = drawer.get("store_id")
     ws, we = _session_day_window(drawer)
     payouts, off_till_excluded = auto_cash_payouts_paisa(db, store_id, ws, we)
-    exp = compute_expected(
-        db, store_id, ws, we, int(drawer.get("blind_count_paisa") or 0), payouts
-    )
-    return {**_own_share(exp, counted), "off_till_excluded": off_till_excluded}
+    later = list(later or [])
+    opening = later[-1]["counted_paisa"] if later else drawer.get("blind_count_paisa")
+    exp = compute_expected(db, store_id, ws, we, int(opening or 0), payouts)
+    return {**_own_share(exp, counted + later), "off_till_excluded": off_till_excluded}
 
 
 # ---------------------------------------------------------------------------
@@ -1220,6 +1237,7 @@ def blind_submit(
     window_start: Any = None,
     window_end: Any = None,
     idempotency_key: Optional[str] = None,
+    origin: Optional[str] = None,
     actor: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Cashier posts the denomination counts (BLIND).
@@ -1400,6 +1418,10 @@ def blind_submit(
                     "computed_at": now,
                     "blind_submitted_at": now,
                     "blind_submitted_by": (actor or {}).get("user_id"),
+                    # WHICH DOOR made this count, stored with it: the Blind
+                    # EOD Tally, Day-End, or the id of the Cash Register
+                    # session whose close counted the drawer (D120 reads it).
+                    "blind_count_origin": origin or COUNT_ORIGIN_TILL,
                     "idempotency_key": idempotency_key,
                     # Stored WITH the count, so the check-by-hand task cannot
                     # be lost between this write and the lines below it.
@@ -1559,6 +1581,7 @@ def _record_screen_close(
     closing_rows: Optional[List[Dict[str, Any]]] = None,
     closing_count_state: Optional[str] = None,
     counted_paisa: Optional[int] = None,
+    origin: Optional[str] = None,
     actor: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Land a closing count from EITHER close screen on the SAME till session.
@@ -1685,6 +1708,7 @@ def _record_screen_close(
         closing_count_state=closing_count_state,
         blind_count_paisa=forward_total,
         allow_uncounted_total=not rows,
+        origin=origin,
         actor=actor,
     )
     if not res.get("ok"):
@@ -1772,21 +1796,37 @@ def shared_counted_paisa(till_link: Optional[Dict[str, Any]]) -> Optional[int]:
         return None
 
 
-def counted_before(
-    till_link: Optional[Dict[str, Any]], opened_at: Any
+def count_by_another(
+    till_link: Optional[Dict[str, Any]], opened_at: Any, own: Optional[str] = None
 ) -> Optional[Dict[str, Any]]:
-    """D111: the drawer's count that was ALREADY STANDING when a Cash
-    Register session opened, as ``{"paisa", "at"}``, or None.
+    """D120: the drawer's count that a Cash Register close (session id
+    ``own``) did NOT make itself, as ``{"paisa", "at"}``, or None: a count
+    already standing when the session opened, or one made through ANOTHER
+    door (the Blind EOD Tally, Day-End) while it was open.
 
-    Such a session's opening cash is that count, so it is judged on its own
-    sheet against that count plus the cash moved since it -- never the earlier
-    count against the later cash (a shortage that does not exist). A count
-    made WHILE the session was open (the other door, or this close's own
-    earlier attempt) is not this case: that count is the session's own drawer
-    moment and stands for it (L3-12). Both instants are naive UTC; a count
-    with no recorded instant cannot be placed and is not this case either."""
+    Such a close starts from that count: it is judged on its own sheet against
+    that count plus the cash moved since it -- never the earlier count against
+    the later cash (a shortage that does not exist).
+
+    A count made while the session was open is this case only when the till
+    recorded WHO made it (``blind_count_origin``) and it was not this session.
+    The session's own close lands its count on the till BEFORE the note check
+    (on a several-drawer day the figure the note is judged on is the till's
+    own, known only once the count lands), so a close refused for its note
+    and sent again finds the drawer already counted by itself: judged from
+    that count, a real shortage would read balanced. A count with no origin
+    (stored by the previous version) cannot be told apart and is read the
+    same way. Both instants are naive UTC; a count with no recorded instant
+    cannot be placed and is not this case either.
+
+    SEVERAL DRAWERS ON THE DAY (D53 stands): a session that was open while
+    the day's latest drawer was counted may span more than one drawer, and
+    its sheet may hold more than that one drawer's cash. Nothing is compared
+    for it, as before. A session that opened AFTER the count lives on that
+    one drawer and is judged from it (as built for D111)."""
     link = till_link or {}
     at = (link.get("session") or {}).get("blind_submitted_at")
+    origin = (link.get("session") or {}).get("blind_count_origin")
     paisa = shared_counted_paisa(link)
     if not link.get("already_counted") or paisa is None:
         return None
@@ -1794,7 +1834,9 @@ def counted_before(
         return None
     if at.tzinfo is not None:
         at = at.astimezone(timezone.utc).replace(tzinfo=None)
-    if at > opened_at:
+    while_open = at > opened_at
+    several = int(link.get("drawers_on_day") or 1) > 1
+    if origin == own or (while_open and (not origin or several)):
         return None
     return {"paisa": paisa, "at": at}
 

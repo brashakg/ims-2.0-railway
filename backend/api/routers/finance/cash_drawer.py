@@ -203,6 +203,51 @@ def _already_closed(coll, stored: dict):
     )
 
 
+def _later_closes(coll, till_session_id, own_id):
+    """D120: what OTHER Cash Register sessions already closed on this till
+    drawer after its count, as ``(sheets, banked_paisa)``.
+
+    ``sheets``: the sessions judged on their OWN sheet, oldest first, in the
+    shape ``eod_tally.moved_since_count`` takes. Each is a later count of the
+    same drawer (a drawer's till count is made once, so every one of them is
+    later than it); the last is where the next session starts. Its counted
+    cash is what was left AFTER the bank deposit recorded on it -- its own
+    expected figure was already net of that deposit -- so it is the starting
+    figure as stored.
+    ``banked_paisa``: the bank deposits recorded after that starting point on
+    closes that carried NO sheet (or one nothing could be compared with):
+    cash recorded as banked that no count has seen leave the drawer.
+
+    RAISES when the read fails: read as "none", a deposit or a shortage an
+    earlier session already accounted for is charged again."""
+    sheets, banked = [], []
+    for s in coll.find(
+        {"till_session_id": till_session_id, "status": "CLOSED", "till_counted_earlier": True}
+    ):
+        at = _to_dt(s.get("closed_at"))
+        if s.get("session_id") == own_id or at is None:
+            continue
+        if (
+            s.get("counted") is None
+            or s.get("counted_from_shared_record")
+            or s.get("variance_status") == cash_register.COMPARISON_UNAVAILABLE
+        ):
+            banked.append((at, cash_denom.rupees_to_paisa(s.get("bank_deposit") or 0)))
+            continue
+        sheets.append(
+            {
+                "at": at,
+                "counted_paisa": cash_denom.rupees_to_paisa(s["counted"]),
+                "cash_sales_paisa": cash_denom.rupees_to_paisa(s.get("cash_sales") or 0),
+                "cash_refunds_paisa": cash_denom.rupees_to_paisa(s.get("cash_refunds") or 0),
+                "cash_payouts_paisa": cash_denom.rupees_to_paisa(s.get("cash_expenses") or 0),
+                "by_mode": s.get("by_mode_breakdown") or {},
+            }
+        )
+    sheets.sort(key=lambda c: c["at"])
+    return sheets, sum(p for at, p in banked if not sheets or at >= sheets[-1]["at"])
+
+
 @router.post("/cash-register/close")
 async def close_cash_register(
     body: CashRegisterClose,
@@ -326,6 +371,9 @@ async def close_cash_register(
         counted_paisa=(
             cash_denom.rupees_to_paisa(counted) if counted is not None else None
         ),
+        # A count this close lands on the till is marked as THIS session's
+        # (D120 tells it from a count made through another door).
+        origin=body.session_id,
         actor=current_user,
     )
 
@@ -339,26 +387,40 @@ async def close_cash_register(
     # that disagrees with the shared count flags itself (matches_amount False).
     shared_paisa = till_service.shared_counted_paisa(till_link)
 
-    # A SESSION OPENED ON A DRAWER ALREADY COUNTED (D111). Its opening cash is
-    # the count standing on the drawer, so it is judged on ITS OWN sheet
-    # against that count plus the cash moved since it. Comparing the EARLIER
-    # count with the LATER cash stored a shortage that did not exist, demanded
-    # a note for it and alerted the manager (Rs 3,000 counted, Rs 500 taken
-    # after: Rs 3,500 in hand read Rs 500 short). Its cash is therefore what
-    # moved since that count, not since this session's opening: cash taken in
-    # between is in the drawer and in no earlier figure. The till's count is
-    # not replaced.
-    # That cash is NOT re-read from the count's instant: payouts are booked by
-    # day and orders are read by created_at, so that read took the day's
-    # payouts off twice (a false excess) and missed a balance paid later on an
-    # earlier order. It is the day so far minus what the day's counted drawers
-    # were charged with at their counts -- the till's own D60 rule.
-    standing = till_service.counted_before(till_link, _to_dt(start_iso))
+    # A DRAWER COUNTED BY ANYTHING OTHER THAN THIS CLOSE (D120, which replaces
+    # D111's formula). The close is judged on ITS OWN sheet against the most
+    # recent such count plus the cash moved since it: the till's count (the
+    # Blind EOD Tally, Day-End or an earlier register's close -- standing when
+    # this session opened or made while it was open), or a later sheet of an
+    # earlier register session. Comparing the EARLIER count with the LATER
+    # cash stored a shortage that did not exist, demanded a note for it and
+    # alerted the manager (Rs 3,000 counted, Rs 500 taken after: Rs 3,500 in
+    # hand read Rs 500 short). The till's count is not replaced (L3-12).
+    # A count THIS close landed itself (refused for its note and sent again)
+    # is not such a count: count_by_another tells them apart by who made it.
+    # The cash since the count is NOT re-read from the count's instant:
+    # payouts are booked by day and orders are read by created_at, so that
+    # read took the day's payouts off twice (a false excess) and missed a
+    # balance paid later on an earlier order. It is the day so far minus what
+    # the counted drawers and the later sheets were charged with (D60).
+    standing = till_service.count_by_another(till_link, _to_dt(start_iso), body.session_id)
     moved = None
+    banked_since = 0
     if standing is not None:
+        # The LATEST sheet is the starting point: an earlier session judged
+        # on its own sheet already accounted for its cash, its bank deposit
+        # and any shortage it noted. Starting again from the till's count
+        # charged all three to this session as well.
+        sheets, banked_since = _strict(
+            lambda: _later_closes(coll, till_link.get("session_id"), body.session_id)
+        )
+        if sheets:
+            standing = {"paisa": sheets[-1]["counted_paisa"], "at": sheets[-1]["at"]}
         start_iso = standing["at"].isoformat()
-        opening_float = cash_denom.paisa_to_rupees(standing["paisa"])
-        moved = _strict(lambda: till_service.moved_since_count(db, till_link["session"]))
+        opening_float = cash_denom.paisa_to_rupees(standing["paisa"] - banked_since)
+        moved = _strict(
+            lambda: till_service.moved_since_count(db, till_link["session"], sheets)
+        )
         if moved is not None:
             cash_sales = cash_denom.paisa_to_rupees(moved["cash_sales_paisa"])
             cash_refunds = cash_denom.paisa_to_rupees(moved["cash_refunds_paisa"])
@@ -547,11 +609,15 @@ async def close_cash_register(
         # The count on this close came from the shared record, not from the
         # grid on this screen.
         "counted_from_shared_record": count_adopted,
-        # D111: this session opened on a drawer already counted. Its expected
-        # cash starts from that count (not the float typed at opening) and
-        # covers the cash moved since it.
+        # D120: the drawer was counted by something other than this close.
+        # Its expected cash starts from the latest such count (not the float
+        # typed at opening), less any bank deposit recorded after it on a
+        # close with no sheet, and covers the cash moved since it.
         "till_counted_earlier": standing is not None,
         "till_standing_count": opening_float if standing is not None else None,
+        "till_banked_since_count": (
+            cash_denom.paisa_to_rupees(banked_since) if standing is not None else None
+        ),
         "till_standing_counted_at": start_iso if standing is not None else None,
         "cash_sales": cash_sales,
         "cash_refunds": cash_refunds,
