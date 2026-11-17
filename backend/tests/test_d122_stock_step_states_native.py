@@ -340,6 +340,43 @@ def test_closing_the_task_of_an_open_step_is_refused_once_and_never_marks_the_st
     assert _restock(rid)["restock_applied"] is True and _rows(db) == DONE
 
 
+def _cancel_task(db, monkeypatch, rid, who="MGR-7"):
+    from api.routers import tasks as tasks_router
+    from database.repositories.task_repository import TaskRepository
+
+    monkeypatch.setattr(tasks_router, "get_task_repository", lambda: TaskRepository(db["tasks"]))
+    task = db["tasks"].find_one({"source_ref": f"return_restock_blocked:{rid}", "status": "OPEN"})
+    return asyncio.run(tasks_router.update_task(
+        task["task_id"], tasks_router.TaskUpdate(status="CANCELLED"), _user("STORE_MANAGER", who)))
+
+
+def test_cancelling_the_task_of_an_open_step_is_refused_once_like_completing_it(native, monkeypatch):
+    """D122(5) is about closing the task BY HAND, whichever button does it. A
+    manager's Cancel (PATCH /tasks/{id}, status CANCELLED) went round the
+    rule: the task of a step still open vanished with no refusal, no rewrite
+    and nothing recorded on the return. Now it is the same rule: refused
+    once (409, the task names the button), then recorded (who, when), and
+    the step stays open until IMS has placed the units."""
+    db = native["db"]
+    rid = _stopped_record(db, monkeypatch, _mixed(db))
+    db["returns"].update_one({"return_id": rid}, {"$set": {"created_at": OLD}})
+    assert returns_router.sweep_stuck_return_holds() == 1
+    with pytest.raises(HTTPException) as err:
+        _cancel_task(db, monkeypatch, rid)
+    assert err.value.status_code == 409 and err.value.detail == returns_router.TASK_UNITS_STILL_OUT_MESSAGE
+    task = db["tasks"].find_one({"source_ref": f"return_restock_blocked:{rid}"})
+    assert task["status"] == "OPEN" and task["payload"]["close_refused"] is True
+    _never_by_hand(task["title"], task["description"], err.value.detail)
+    assert "stock_task_closed_by" not in _rec(db, rid)
+    assert _cancel_task(db, monkeypatch, rid)["message"] == "Task updated"
+    assert db["tasks"].find_one({"source_ref": f"return_restock_blocked:{rid}"})["status"] == "CANCELLED"
+    rec = _rec(db, rid)
+    assert rec["stock_task_closed_by"] == "MGR-7" and rec["stock_task_closed_at"]
+    assert _marks(db, rid) == (False, True, None) and _row(db, rid)["stock_pending"] is True  # still open
+    assert _rows(db) == {"p1": ["SOLD", "SOLD"], "p2": "SOLD", "rows": 3}
+    assert _restock(rid)["restock_applied"] is True and _rows(db) == DONE
+
+
 # --- D123: cash owed, the payout stored behind an abandoned 503 -------------------------------------
 
 

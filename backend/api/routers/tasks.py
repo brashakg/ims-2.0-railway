@@ -881,6 +881,8 @@ async def update_task(
             )
         if new_status == "CANCELLED":
             _ensure_may_close(existing, current_user)
+            # A cancel closes the task by hand, as Complete does (D122(5)).
+            await _before_closed_by_hand(existing, current_user)
         update_data["status"] = new_status
         update_data["history"] = (existing.get("history") or []) + [
             {
@@ -930,6 +932,25 @@ async def update_task(
     return {"task_id": task_id, "message": "No changes made"}
 
 
+async def _before_closed_by_hand(task: dict, current_user: dict) -> None:
+    """THE rule for a person closing a task by hand, whichever door closes it
+    (Complete, or a manager's Cancel through the task update): the record the
+    task stands for is settled or asked first, BEFORE the task changes."""
+    ref = str(task.get("source_ref") or "")
+    if ref.startswith("return_restock_blocked:"):
+        # D122(5) / D109(3): while the return's units are still out the close
+        # is refused once (409: press Update stock); otherwise the return
+        # records who closed its task (503: the task stays open).
+        from .returns import note_stock_task_closed
+
+        await note_stock_task_closed(ref.split(":", 1)[1], current_user, task)
+    elif ref.startswith("return_cash_owed:"):
+        # D123: a payout already stored settles the return as paid.
+        from .returns import settle_owed_for_task
+
+        settle_owed_for_task(ref.split(":", 1)[1], current_user)
+
+
 @router.patch("/{task_id}/complete")
 async def complete_task(
     task_id: str,
@@ -955,19 +976,7 @@ async def complete_task(
             detail=f"Task is already in '{current_status}' status and cannot be completed.",
         )
 
-    ref = str(task.get("source_ref") or "")
-    if ref.startswith("return_restock_blocked:"):
-        # D122(5) / D109(3): while the return's units are still out the close
-        # is refused once (409: press Update stock); otherwise the return
-        # records who closed its task (503: the task stays open).
-        from .returns import note_stock_task_closed
-
-        await note_stock_task_closed(ref.split(":", 1)[1], current_user, task)
-    elif ref.startswith("return_cash_owed:"):
-        # D123: a payout already stored settles the return as paid.
-        from .returns import settle_owed_for_task
-
-        settle_owed_for_task(ref.split(":", 1)[1], current_user)
+    await _before_closed_by_hand(task, current_user)
 
     now = datetime.now()
     result = repo.update(
