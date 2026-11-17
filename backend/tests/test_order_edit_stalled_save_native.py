@@ -158,3 +158,47 @@ def test_the_sweep_reaches_every_open_edit_row_in_turn_on_real_mongo(shop, monke
 
     _native(shop)
     case(shop, monkeypatch)
+
+
+# Codex round 8 R8-A (17 Nov 2026): the D81 points task whose write failed, on
+# real Mongo, both edit doors -- the in-memory suite's own test bodies.
+
+
+def _native_tasks(shop):
+    _native(shop)
+    return shop["db"].get_collection("tasks")
+
+
+@pytest.mark.parametrize("recovery", ["the sweep", "an identical retry"])
+@pytest.mark.parametrize("fault", ["the insert fails", "the store is unreachable", "the read fails"])
+def test_a_points_task_that_could_not_be_raised_stays_owed_on_real_mongo(
+    client, shop, door, monkeypatch, fault, recovery
+):
+    from tests.test_order_edit_recovery import test_a_points_task_that_could_not_be_raised_stays_owed as case
+
+    case(client, shop, door, _native_tasks(shop), monkeypatch, fault, recovery)
+
+
+def test_a_points_task_whose_insert_reply_was_lost_on_real_mongo(client, shop, door, monkeypatch):
+    from tests.test_order_edit_recovery import test_a_points_task_whose_insert_reply_was_lost_is_the_task as case
+
+    case(client, shop, door, _native_tasks(shop), monkeypatch)
+
+
+def test_a_points_task_ims_could_not_close_stays_owed_on_real_mongo(client, shop, door, monkeypatch):
+    from tests.test_order_edit_recovery import test_a_points_task_ims_could_not_close_stays_owed as case
+
+    case(client, shop, door, _native_tasks(shop), monkeypatch)
+
+
+def test_overlapping_runners_raise_one_points_task_on_real_mongo(shop, monkeypatch):
+    """A real unique _id decides the race."""
+    from api import dependencies as dm
+    from database.repositories.user_repository import UserRepository
+    from tests.test_order_points_task_head_office import REF, test_overlapping_runners_raise_one_task as case
+
+    _native(shop)
+    db = shop["db"]
+    monkeypatch.setattr(dm, "get_user_repository", lambda: UserRepository(db.get_collection("users")))
+    case(db, monkeypatch)
+    assert db.tasks.count_documents({"source_ref": REF}) == 1

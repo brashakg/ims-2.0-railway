@@ -107,3 +107,67 @@ def test_with_no_admin_it_goes_to_a_superadmin(boards):
 
     _points_task(dict(ORDER), {"ok": False, "reason": "balance_underflow", "delta": 10})
     assert boards.tasks.find_one({"source_ref": REF})["assigned_to"] == "u-super"
+
+
+# Codex round 8 R8-A: the answer of _points_task is what keeps an edit OPEN
+# until the task is on the board (the door-level cases are in
+# test_order_edit_recovery.py).
+
+SPENT = {"ok": False, "reason": "balance_underflow", "delta": 10}
+
+
+def test_it_says_whether_the_task_is_on_the_board(boards, monkeypatch):
+    from api.routers.orders.edit_ops import _points_task
+
+    kind = type(boards.tasks)
+    real = kind.insert_one
+
+    def refused(self, doc, *a, **k):
+        if self.name == "tasks":
+            raise ConnectionError("tasks unreachable")
+        return real(self, doc, *a, **k)
+
+    with monkeypatch.context() as m:
+        m.setattr(kind, "insert_one", refused)
+        assert _points_task(dict(ORDER), dict(SPENT)) is False
+    assert boards.tasks.count_documents({"source_ref": REF}) == 0
+    assert _points_task(dict(ORDER), dict(SPENT)) is True
+    # A task already open is the handoff: True, and nothing raised beside it.
+    assert _points_task(dict(ORDER), dict(SPENT)) is True
+    assert boards.tasks.count_documents({"source_ref": REF}) == 1
+    # Nothing to raise or close: nothing owed.
+    assert _points_task(dict(ORDER), {"ok": False, "reason": "ledger_read_failed"}) is True
+    assert _points_task(dict(ORDER), {"ok": True, "clawed": 10}) is True
+    assert boards.tasks.find_one({"source_ref": REF})["status"] == "COMPLETED"
+
+
+def test_overlapping_runners_raise_one_task(boards, monkeypatch):
+    """Two runners that both read 'no task yet' (two edits of one bill, or a
+    runner whose lease lapsed under it) insert the same _id: the database keeps
+    one, and both read it back as their handoff."""
+    from api.routers.orders.edit_ops import _points_task
+
+    kind = type(boards.tasks)
+    real, other = kind.insert_one, []
+
+    def insert(self, doc, *a, **k):
+        if self.name == "tasks" and not other:
+            other.append(None)
+            other[0] = _points_task(dict(ORDER), dict(SPENT))  # inside this runner's window
+        return real(self, doc, *a, **k)
+
+    monkeypatch.setattr(kind, "insert_one", insert)
+    assert _points_task(dict(ORDER), dict(SPENT)) is True and other == [True]
+    assert boards.tasks.count_documents({"source_ref": REF}) == 1
+
+
+def test_a_later_edit_raises_it_again_after_an_admin_closed_it(boards):
+    """Unchanged by R8-A: a task an admin closed stays closed, and a later edit
+    that still cannot take the points raises a new one."""
+    from api.routers.orders.edit_ops import _points_task
+
+    assert _points_task(dict(ORDER), dict(SPENT)) is True
+    boards.tasks.update_one({"source_ref": REF}, {"$set": {"status": "COMPLETED"}})
+    assert _points_task(dict(ORDER), dict(SPENT)) is True
+    rows = sorted(t["status"] for t in boards.tasks.find({"source_ref": REF}))
+    assert rows == ["COMPLETED", "OPEN"]

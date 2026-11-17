@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 
 import pytest
@@ -1883,6 +1884,121 @@ def test_points_already_spent_reach_the_tasks_board(client, shop, door, tasks, m
                                 for ln in _order(shop, oid)["items"]]).status_code == 200
     else:
         _sweep(shop)
+    assert tasks.find_one(ref)["status"] == "COMPLETED"
+    assert set(_op_states(shop, oid)) == {"SETTLED"}
+
+
+_SPENT = {"ok": False, "reason": "balance_underflow", "delta": 10}
+TASK_FAULTS = ["the insert fails", "the store is unreachable", "the read fails"]
+
+
+@contextmanager
+def _tasks_fault(monkeypatch, tasks, fault):
+    """One way the Tasks store can fail the points task. Every other collection
+    stays healthy, as in Codex's native probe (an AutoReconnect at tasks.insert_one)."""
+    from api import dependencies as dm
+
+    kind = type(tasks)
+    real_insert, real_find = kind.insert_one, kind.find
+
+    def insert(self, doc, *a, **k):
+        if self.name == "tasks":
+            if fault == "the reply is lost":
+                real_insert(self, doc, *a, **k)
+            raise ConnectionError("AUDIT task persistence failure")
+        return real_insert(self, doc, *a, **k)
+
+    def find(self, *a, **k):
+        if self.name == "tasks":
+            raise ConnectionError("AUDIT task read failure")
+        return real_find(self, *a, **k)
+
+    with monkeypatch.context() as m:
+        if fault in ("the insert fails", "the reply is lost"):
+            m.setattr(kind, "insert_one", insert)
+        elif fault == "the read fails":
+            m.setattr(kind, "find", find)
+        else:
+            m.setattr(dm, "get_task_repository", lambda: None)
+        yield
+
+
+def _spent_points_edit(client, shop, door, monkeypatch):
+    """A bill whose edit lowers its earn after the customer spent the points."""
+    from api.routers import loyalty
+
+    oid = door.arm(_saved_bill(client, shop, [_line(SVC)]))
+    monkeypatch.setattr(loyalty, "regate_earn_after_edit", lambda doc, user_id=None: dict(_SPENT))
+    lines = [_as_sent(ln, discount_percent=10) for ln in _order(shop, oid)["items"]]
+    return oid, lines, {"source_ref": f"order_points_unclawed:{oid}"}
+
+
+@pytest.mark.parametrize("recovery", ["the sweep", "an identical retry"])
+@pytest.mark.parametrize("fault", TASK_FAULTS)
+def test_a_points_task_that_could_not_be_raised_stays_owed(client, shop, door, tasks, monkeypatch, fault, recovery):
+    """Codex round 8 R8-A (D81 handoff), both edit doors. The head-office task's
+    insert failed; the edit answered 200 and closed SETTLED, two healthy sweeps
+    raised nothing, and the revised invoice's identical replay raised nothing
+    either. The edit now stays OPEN while its task is owed, and the sweep or the
+    next press of either door (a replay included) raises it, once."""
+    oid, lines, ref = _spent_points_edit(client, shop, door, monkeypatch)
+    with _tasks_fault(monkeypatch, tasks, fault):
+        assert door.press(oid, lines).status_code == 200
+    assert tasks.count_documents(ref) == 0
+    assert _op_states(shop, oid) == ["OPEN"], "an edit whose task is owed is not settled"
+
+    def recover():
+        if recovery == "the sweep":
+            _sweep(shop)
+        else:
+            assert door.press(oid, lines).status_code == 200
+
+    recover()
+    rows = list(tasks.find(ref))
+    assert len(rows) == 1 and rows[0]["status"] == "OPEN" and "10 loyalty points" in rows[0]["title"], rows
+    assert set(_op_states(shop, oid)) == {"SETTLED"}
+    recover()
+    _sweep(shop)
+    assert tasks.count_documents(ref) == 1, "raised once"
+
+
+def test_a_points_task_whose_insert_reply_was_lost_is_the_task(client, shop, door, tasks, monkeypatch):
+    """R8-A, the other half: the insert landed and its reply was lost. The task
+    read back off the board is the handoff: the edit settles, and no retry or
+    sweep raises a second one."""
+    oid, lines, ref = _spent_points_edit(client, shop, door, monkeypatch)
+    with _tasks_fault(monkeypatch, tasks, "the reply is lost"):
+        assert door.press(oid, lines).status_code == 200
+    assert tasks.count_documents(ref) == 1 and _op_states(shop, oid) == ["SETTLED"]
+    assert door.press(oid, lines).status_code == 200
+    _sweep(shop)
+    assert tasks.count_documents(ref) == 1
+
+
+def test_a_points_task_ims_could_not_close_stays_owed(client, shop, door, tasks, monkeypatch):
+    """R8-A, the closing side: the claw landed but the task could not be closed.
+    The edit stays OPEN and the sweep closes the task; before, it stayed on the
+    board for good, saying points were not taken back that had been."""
+    from api.routers import loyalty
+
+    oid, lines, ref = _spent_points_edit(client, shop, door, monkeypatch)
+    assert door.press(oid, lines).status_code == 200
+    assert tasks.find_one(ref)["status"] == "OPEN"
+    monkeypatch.setattr(loyalty, "regate_earn_after_edit", lambda doc, user_id=None: {"ok": True, "clawed": 10})
+    kind = type(tasks)
+    real = kind.update_many
+
+    def refused(self, *a, **k):
+        if self.name == "tasks":
+            raise ConnectionError("AUDIT task close failure")
+        return real(self, *a, **k)
+
+    with monkeypatch.context() as m:
+        m.setattr(kind, "update_many", refused)
+        assert door.press(oid, [_as_sent(ln, discount_percent=20)
+                                for ln in _order(shop, oid)["items"]]).status_code == 200
+    assert tasks.find_one(ref)["status"] == "OPEN" and "OPEN" in _op_states(shop, oid)
+    _sweep(shop)
     assert tasks.find_one(ref)["status"] == "COMPLETED"
     assert set(_op_states(shop, oid)) == {"SETTLED"}
 

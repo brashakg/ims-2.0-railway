@@ -22,7 +22,7 @@ from contextlib import suppress
 from datetime import datetime, timedelta
 from functools import partial
 from typing import Any, Dict, List, Optional
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from fastapi import HTTPException
 
@@ -451,42 +451,55 @@ async def settle(op: dict, after: dict, repo) -> bool:
     # loyalty earn standing. Each claw lands once per step (regate_earn_after_edit);
     # one that could not finish (its row landed without its balance move, or the
     # ledger could not be read) keeps this row OPEN, so the next runner completes
-    # it. Points already spent (underflow) go on the Tasks board (_points_task).
+    # it. Points already spent (underflow) go on the Tasks board (_points_task),
+    # and the row stays OPEN until that task is there (Codex r8 R8-A): a task
+    # that could not be written is still owed, never a settled edit.
     regated: Dict[str, Any] = {"ok": False, "reason": "error"}
     with suppress(Exception):
         from ..loyalty import regate_earn_after_edit
 
         regated = regate_earn_after_edit(after, user_id=op["user"].get("user_id")) or {}
     owed = not regated.get("ok") and regated.get("reason") not in _LOYALTY_FINAL
-    _points_task(after, regated)
+    owed = not _points_task(after, regated) or owed
     _end(op, None if failed or owed else "SETTLED")
     return not failed
 
 
-def _points_task(order: dict, regated: dict) -> None:
+def _points_task(order: dict, regated: dict) -> bool:
     """Points a bill no longer earns, already spent by the customer, are on the
     Tasks board while they stand (not only in a log), and IMS closes the task
     once the edit's claw has landed. Closing it by hand waives points, so it is a
     head-office item (D81): an ADMIN holds it (a SUPERADMIN if there is none) and
-    only ADMIN/SUPERADMIN may close it (tasks._ensure_may_close). Fail-soft:
-    never stops a settle."""
+    only ADMIN/SUPERADMIN may close it (tasks._ensure_may_close).
+
+    Returns whether the board now says what it must (Codex r8 R8-A). False --
+    the task could not be written, closed or read -- keeps the edit OPEN: that
+    row is the obligation, and the next runner (the sweep, or either edit door's
+    finish_landed, a revised invoice's identical replay included) raises it. A
+    task already open on this bill is the handoff: nothing is raised beside it.
+    Never raises, never stops a settle."""
     from ...dependencies import get_task_repository
-    from ...services.task_triggers import _person_holding, create_system_task
+    from ...services.task_triggers import _person_holding, active_tasks, create_system_task
     from ..loyalty import POINTS_UNCLAWED_REF
     from ..returns import _close_task as close
 
     order_id, reason = order.get("order_id"), regated.get("reason")
+    if not regated.get("ok") and reason not in _POINTS_SPENT:
+        return True
     ref = f"{POINTS_UNCLAWED_REF}{order_id}"
-    with suppress(Exception):
+    try:
+        repo = get_task_repository()
         if regated.get("ok"):
             close(ref, {"user_id": "system"}, "IMS took back the points this bill no longer earns.")
-            return
-        if reason not in _POINTS_SPENT:
-            return
+            return repo is None or not active_tasks(repo, ref)
+        if repo is None:
+            return _ops() is None  # no database at all: nothing to keep open
+        if active_tasks(repo, ref):
+            return True
         number, points = order.get("order_number") or order_id, regated.get("delta")
         owed = reason == "claw_move_underflow"
         create_system_task(
-            get_task_repository(),
+            repo,
             title=f"Order {number}: {points} loyalty points not yet taken back",
             description=(
                 f"An edit of order {number} lowered the points it earns by {points}, but customer "
@@ -504,7 +517,27 @@ def _points_task(order: dict, regated: dict) -> None:
                          or _person_holding("SUPERADMIN", None, any_store=True)),
             extra={"payload": {"order_id": order_id, "customer_id": order.get("customer_id"),
                                "points": points, "owed": owed}},
+            task_id=_points_task_id(repo, ref),
         )
+        # Read back, not the insert's reply: a write that landed and lost its
+        # reply is the task; one that never landed is still owed.
+        return bool(active_tasks(repo, ref))
+    except Exception as exc:  # noqa: BLE001 -- owed: the row stays OPEN
+        logger.warning("[LOYALTY] points task of order %s not settled: %s", order_id, exc)
+        return False
+
+
+def _points_task_id(repo, ref: str) -> Optional[str]:
+    """One id per raising of this bill's points task: the count of tasks ever
+    raised on it names the next one, so runners that overlap (two edits of one
+    bill, a runner whose lease lapsed under it) insert the same _id and the
+    database keeps one. A task an admin closed is counted, so a later edit that
+    still cannot take the points raises a new one, as before."""
+    coll = getattr(repo, "collection", None)
+    if coll is None:
+        return None
+    raised = coll.count_documents({"source_ref": ref})
+    return "TSK-" + uuid5(NAMESPACE_URL, f"{ref}|{raised}").hex[:10].upper()
 
 
 async def finish_landed(order: dict, repo) -> dict:
