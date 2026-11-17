@@ -281,33 +281,125 @@ def test_the_form_is_offered_exactly_what_the_refusal_allows(ap):
     assert _pay(world, {"amount": 600, "bill_id": "B1"}).status_code == 201
 
 
-class _InsertFailsAfterRival:
-    """vendor_payments whose next insert fails -- after a rival application
-    of the same advance has taken its own share in between."""
+class _Faulty:
+    """vendor_payments whose next `op` (insert_one / update_one) fails once.
+    `lands`: the write is stored and only its reply is lost."""
 
-    def __init__(self, real, adv):
-        self._real, self._adv = real, adv
+    def __init__(self, real, op, lands, before=None):
+        self._real, self._op, self._lands, self._before, self.armed = real, op, lands, before, True
 
     def __getattr__(self, name):
         return getattr(self._real, name)
 
-    def insert_one(self, doc, *a, **k):
-        left = self._real.find_one({"payment_id": self._adv})["amount"]
-        self._real.update_one({"payment_id": self._adv}, {"$set": {"amount": left - 50}})
-        self._real.insert_one({**doc, "payment_id": "RIVAL", "amount": 50})
-        raise OSError("insert failed")
+    def _write(self, op, *a, **k):
+        if op != self._op or not self.armed:
+            return getattr(self._real, op)(*a, **k)
+        self.armed = False
+        if self._before:
+            self._before()
+        if self._lands:
+            getattr(self._real, op)(*a, **k)
+        raise OSError(f"vendor_payments {op}: no reply")
+
+    def insert_one(self, *a, **k):
+        return self._write("insert_one", *a, **k)
+
+    def update_one(self, *a, **k):
+        return self._write("update_one", *a, **k)
 
 
-def test_a_failed_apply_gives_back_only_what_it_took(ap, monkeypatch):
+def _faulty(memory, monkeypatch, op, lands, before=None):
+    coll = _Faulty(memory.vendor_payments, op, lands, before)
+    monkeypatch.setattr(vendors_pkg, "_get_db", lambda: SimpleNamespace(
+        get_collection=lambda name: coll if name == "vendor_payments" else memory[name]))
+    return coll
+
+
+def _recorded(memory, adv):
+    """What the books hold for one advance: what is left of it plus every
+    payment row applied from it."""
+    rows = list(memory.vendor_payments.find({"$or": [{"payment_id": adv}, {"applied_from": adv}]}))
+    return sum(r["amount"] for r in rows), len(rows) - 1
+
+
+# --- PR #1423 round 15: a part-application is two writes ----------------------
+
+
+def test_a_part_apply_whose_row_landed_with_its_reply_lost_is_applied_once(ap, monkeypatch):
+    """The split row was stored and only its reply was lost: the door gave
+    the advance its amount back and said 'Failed' -- Rs 1,400 recorded for
+    Rs 1,000 paid, and the retry applied it a second time."""
+    memory, world = ap
+    memory.vendor_bills.update_one({}, {"$set": {"total_amount": 5000}})
+    adv = _pay(world, {"amount": 1000}).json()["payment_id"]
+    _faulty(memory, monkeypatch, "insert_one", lands=True)
+    done = _apply(world, adv, "B1", 400, left=1000)
+    assert done.status_code == 200 and done.json()["advance_left"] == 600
+    assert _recorded(memory, adv) == (1000, 1)
+    again = _apply(world, adv, "B1", 400, left=1000)  # the accountant's retry
+    assert again.status_code == 409 and "already applied" in again.json()["detail"]
+    assert _recorded(memory, adv) == (1000, 1)
+    assert _owed_and_advances(world) == (4600, 600)
+
+
+@pytest.mark.parametrize("op,lands", [("insert_one", False), ("update_one", True)])
+def test_a_part_apply_cut_off_between_its_two_writes_is_finished_never_lost(ap, monkeypatch, op, lands):
+    """The advance was reduced and the row naming the bill never written (the
+    insert failed, the process died, or the first write's reply was lost):
+    Rs 400 of a real payment left the supplier's ledger and nothing brought it
+    back. Now the door says it could not confirm (never 'failed', never a
+    give-back that can cross a row that did land) and the application is
+    finished by the next read of the supplier's ledger or the next apply."""
+    memory, world = ap
+    memory.vendor_bills.update_one({}, {"$set": {"total_amount": 5000}})
+    adv = _pay(world, {"amount": 1000}).json()["payment_id"]
+    _faulty(memory, monkeypatch, op, lands)
+    cut = _apply(world, adv, "B1", 400, left=1000)
+    assert cut.status_code == 503 and "Could not confirm" in cut.json()["detail"]
+    assert _recorded(memory, adv) == (600, 0)  # half done: the row is still owed
+    if op == "insert_one":  # the screen the message sends the accountant to
+        assert _advance_left(world, adv, ACCT_PUNE) == 600
+        assert _recorded(memory, adv) == (1000, 1)
+    again = _apply(world, adv, "B1", 400, left=1000)  # the retry finishes it too
+    assert again.status_code == 409 and "already applied" in again.json()["detail"]
+    assert _recorded(memory, adv) == (1000, 1)
+    row = memory.vendor_payments.find_one({"applied_from": adv})
+    assert (row["bill_id"], row["amount"], row["store_id"], row["_id"]) == ("B1", 400, PUN, row["payment_id"])
+    assert _owed_and_advances(world) == (4600, 600)
+    assert memory.vendor_bills.find_one({"bill_id": "B1"})["status"] == "PARTIAL"
+    # Finished once: reading again, or applying the rest, adds nothing.
+    assert _apply(world, adv, "B1", 600).status_code == 200
+    assert _recorded(memory, adv) == (1000, 1)
+    assert _owed_and_advances(world) == (4000, 0)
+
+
+def test_a_cut_off_apply_is_finished_and_a_rival_keeps_its_share(ap, monkeypatch):
+    """A rival application took its own Rs 50 of the advance between this
+    call's two writes, and this call's row was not written: the rival's 50
+    stands and this call's 300 is finished, 400 paid in all."""
     memory, world = ap
     adv = _pay(world, {"amount": 400}).json()["payment_id"]
-    proxy = SimpleNamespace(get_collection=lambda name: (
-        _InsertFailsAfterRival(memory[name], adv) if name == "vendor_payments" else memory[name]))
-    monkeypatch.setattr(vendors_pkg, "_get_db", lambda: proxy)
-    assert _apply(world, adv, "B1", 300, left=400).status_code == 500
-    # The rival's 50 stands; the failed 300 went back: 350 + 50 = 400 paid.
-    assert memory.vendor_payments.find_one({"payment_id": adv})["amount"] == 350
-    assert sum(p["amount"] for p in memory.vendor_payments.find({})) == 400
+
+    def rival():
+        left = memory.vendor_payments.find_one({"payment_id": adv})["amount"]
+        memory.vendor_payments.update_one({"payment_id": adv}, {"$set": {"amount": left - 50}})
+        memory.vendor_payments.insert_one(payment(50, "B1", store_id=PUN, payment_id="RIVAL", applied_from=adv))
+
+    _faulty(memory, monkeypatch, "insert_one", lands=False, before=rival)
+    assert _apply(world, adv, "B1", 300, left=400).status_code == 503
+    assert _advance_left(world, adv, ACCT_PUNE) == 50
+    assert _recorded(memory, adv) == (400, 2)
+
+
+def test_a_whole_apply_whose_reply_was_lost_says_so_and_is_applied_once(ap, monkeypatch):
+    memory, world = ap
+    adv = _pay(world, {"amount": 400}).json()["payment_id"]
+    _faulty(memory, monkeypatch, "update_one", lands=True)
+    lost = _apply(world, adv, "B1", 400, left=400)
+    assert lost.status_code == 503 and "Could not confirm" in lost.json()["detail"]
+    assert _apply(world, adv, "B1", 400, left=400).status_code == 409  # already on the bill
+    assert _recorded(memory, adv) == (400, 0)
+    assert _owed_and_advances(world) == (600, 0)
 
 
 # --- review round 4 -----------------------------------------------------------
