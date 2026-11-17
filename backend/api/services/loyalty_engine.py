@@ -383,8 +383,21 @@ def expirable_points_by_lot(
                     "already_swept": bool(t.get("expired")),
                 }
             )
-        elif ttype in ("REDEEM", "EXPIRE"):
-            # Both reduce the live balance; points are stored positive on the row.
+        elif ttype == "EXPIRE":
+            # An expiry sheds ITS OWN lot first (source_earn_txn_id); only what
+            # that lot no longer holds falls to the oldest lots. Pure FIFO here
+            # let one lot's expiry eat an older lot that had not expired yet, so
+            # the older lot later shed too little (seen when an older lot's
+            # expiry had to be retried after a newer lot's went through).
+            left = abs(pts)
+            for lot in lots:
+                if lot["txn_id"] == t.get("source_earn_txn_id"):
+                    take = min(lot["remaining"], left)
+                    lot["remaining"] -= take
+                    left -= take
+            _consume(left)
+        elif ttype == "REDEEM":
+            # Reduces the live balance; points are stored positive on the row.
             _consume(abs(pts))
         elif ttype == "ADJUST":
             # A signed adjustment: negative reduces (FIFO), positive is a manual
