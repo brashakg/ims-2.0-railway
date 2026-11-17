@@ -209,14 +209,15 @@ def test_owed_cash_must_say_where_it_came_from(till, monkeypatch):
 def test_owed_cash_paid_by_hq_is_never_on_the_drawer_and_is_audited_once(till, monkeypatch):
     audits = []
     monkeypatch.setattr(returns_router, "_close_task", lambda *a, **k: None)
-    monkeypatch.setattr(returns_router, "_audit_complete", lambda rid, *a, **k: audits.append(rid))
+    # By its fixed id: every press writes the stored payment's row, once.
+    monkeypatch.setattr(returns_router, "_audit_once", lambda log_id, row: audits.append(log_id) or True)
     _owed(till)
     _pay(method="CASH", cash_paid_from="HQ")
     _pay(method="CASH", cash_paid_from="HQ")
     payout = till["db"].get_collection("returns").find_one({"payout_of": "RET-O"})
     assert payout["refund_tenders"] == [] and payout["drawer_auto_netted"] is False
     assert payout["paid_outside_drawer"] == [{"method": "CASH", "amount": 600.0, "paid_from": "HQ"}]
-    assert audits == ["RET-O"]
+    assert sorted(set(audits)) == ["return_owed_paid:RET-O"]
 
 
 def test_owed_cash_from_the_drawer_carries_its_count_block(till, monkeypatch):

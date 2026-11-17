@@ -3928,6 +3928,30 @@ def _quarantine_damaged_units(
     return out
 
 
+def _damaged_set_aside_done(return_id: str, items: Any) -> bool:
+    """D95(2): is the set-aside of this return's DAMAGED units DONE -- its
+    units named on its record and every named unit carrying this return's
+    quarantine note? False when they were never named (the record or the
+    stock could not be read, too many writers), a named unit is not set
+    aside, or it cannot be read: the stock step then stays open on the
+    record (its button, its task). A line whose sold unit does not exist (a
+    historical import) names nothing and is done."""
+    if not any((it.get("condition") if isinstance(it, dict) else it.condition) == "DAMAGED" for it in items or []):
+        return True
+    try:
+        coll, stock_repo = _returns_coll(), get_stock_repository()
+        rec = coll.find_one({"return_id": return_id}, {"damaged_unit_ids": 1}) if coll is not None else None
+        named = (rec or {}).get("damaged_unit_ids")
+        if named is None or stock_repo is None:
+            return False
+        rows = _units_by_id(stock_repo, named)
+        note = f"Damaged, customer return {return_id}"[:200]
+        return all((rows.get(sid) or {}).get("quarantine_notes") == note for sid in named)
+    except Exception as exc:  # noqa: BLE001 -- unknown: the step stays open
+        logger.warning("[RETURNS] damaged units of %s unreadable, its stock step stays open: %s", return_id, exc)
+        return False
+
+
 def _reason_summary(items: List[ReturnLine]) -> str:
     """Distinct reasons across the returned lines, comma-joined."""
     seen: List[str] = []
@@ -4666,6 +4690,12 @@ COUNTER_COMPLETED_MESSAGE = "The counter completed this return; nothing to do he
 # A record whose stock step is still open, said on the till's done screen.
 STOCK_PENDING_NOTE = ("Its units are NOT back in stock yet: press 'Update stock' on this return in "
                       "Returns > History - do not add them by hand")
+# A DAMAGED unit whose set-aside did not happen: the same button finishes it.
+DAMAGED_PENDING_NOTE = ("Its damaged unit is NOT set aside in stock yet: press 'Update stock' on this return in "
+                        "Returns > History - do not change its stock by hand")
+# Needs completing wrote the record but not its audit row (D84).
+RECORD_AUDIT_AGAIN_MESSAGE = ("The record is saved, but its audit entry could not be written. Press again "
+                              "to finish it.")
 
 
 class RecordUnknown(Exception):
@@ -4744,15 +4774,23 @@ def _stock_lines(items: Any) -> List[Dict[str, Any]]:
 def _claim_restock(coll, return_id: str) -> Optional[Dict[str, Any]]:
     """THE atomic claim of a record's stock step: the press right after its
     record has landed, and the record's Restock, take the same one, so only
-    one worker ever places the units. None: placed already, another worker
-    holds it, or the claim could not be written (nothing is placed here)."""
+    one worker ever places the units. The step is open while the GOOD units
+    are not back, or (D95(2)) while the record says it is still pending with
+    them back -- a DAMAGED unit not set aside yet. None: finished already,
+    another worker holds it, or the claim could not be written (nothing is
+    placed here)."""
+    free = {"return_id": return_id, "restock_in_progress": {"$ne": True},
+            # A record written before D95 whose press was putting the units back.
+            "restock_left_to_counter": {"$ne": True}}
     try:
-        return coll.find_one_and_update(
-            {"return_id": return_id, "restock_applied": {"$ne": True}, "restock_in_progress": {"$ne": True},
-             # A record written before D95 whose press was putting the units back.
-             "restock_left_to_counter": {"$ne": True}},
-            {"$set": {"restock_in_progress": True, "restock_started_at": utc_now_iso()}},
-            return_document=ReturnDocument.AFTER)
+        for is_open in ({"restock_applied": {"$ne": True}}, {"restock_applied": True, "stock_pending": True}):
+            claim = coll.find_one_and_update(
+                {**free, **is_open},
+                {"$set": {"restock_in_progress": True, "restock_started_at": utc_now_iso()}},
+                return_document=ReturnDocument.AFTER)
+            if claim is not None:
+                return claim
+        return None
     except Exception as exc:  # noqa: BLE001
         logger.warning("[RETURNS] restock claim of %s failed: %s", return_id, exc)
         return None
@@ -4944,7 +4982,7 @@ def bill_room_left(db, order: Dict[str, Any]) -> Optional[float]:
 
 
 def _reserve_order_refund(order_id: Optional[str], net_amount: float, return_id: str,
-                          bill: Optional[Dict[str, Any]] = None) -> Tuple[float, bool, float]:
+                          bill: Optional[Dict[str, Any]] = None, idem_key: str = "") -> Tuple[float, bool, float]:
     """Reserve this refund on the ORDER, atomically, BEFORE the over-refund
     cap and the Rs 2,000 approval rule decide (PR #1264): two returns fired at
     once each read the other's refund, so neither can dodge the rule or the
@@ -4957,7 +4995,12 @@ def _reserve_order_refund(order_id: Optional[str], net_amount: float, return_id:
     points-paid share). Released by _release_order_refund when the return
     fails; a hold whose worker died ages out (_live_refund_holds). A
     repository without compare-and-set (test doubles) reads the documented
-    sum only, and prices the share from ``bill``."""
+    sum only, and prices the share from ``bill``.
+
+    ``idem_key``: the press's Idempotency-Key, CLAIMED here once -- the hold
+    carries it, and a second request of the same press that finds a live hold
+    with its key is refused in this compare-and-set (two identical requests
+    arriving together each recorded a return)."""
     documented = _sum_prior_refunds(order_id, strict=True)
     repo = get_order_repository()
     update_if = getattr(repo, "update_if", None) if repo is not None else None
@@ -4986,9 +5029,14 @@ def _reserve_order_refund(order_id: Optional[str], net_amount: float, return_id:
             # fails after reserving releases its hold, and one priced beside it
             # would then pay the points part again.
             raise HTTPException(status_code=409, detail=_ANOTHER_RETURN_RUNNING)
+        if idem_key and any(rid != return_id and (h or {}).get("idempotency_key") == idem_key
+                            for rid, h in live.items()):
+            # Another request of THIS press is still writing: one press, one
+            # return. Its re-press replays the record once it has landed.
+            raise HTTPException(status_code=409, detail=_ANOTHER_RETURN_RUNNING)
         share = _points_paid_share(order, order_id, net_amount, strict=True)
         live[return_id] = {"amount": round(float(net_amount), 2), "at": utc_now_iso(),
-                           "points_paid_share": share}
+                           "points_paid_share": share, **({"idempotency_key": idem_key} if idem_key else {})}
         if update_if(order_id, {"refund_holds_v": version},
                      {"refund_holds": {**keep, **live}, "refund_holds_v": int(version or 0) + 1}):
             return prior, True, share
@@ -5236,8 +5284,9 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
     POS-14: supports an optional ``Idempotency-Key`` header. When a non-empty
     key is supplied and a return with that key already exists in the
     ``returns`` collection, the EXISTING return_id is returned without
-    duplicating the financial record. Fail-soft: any lookup failure falls
-    through to the normal (non-idempotent) path.
+    duplicating the financial record. A lookup that cannot be read is never
+    "no earlier press" (503, _recorded_press), and the key is claimed once on
+    the bill's hold (_reserve_order_refund), so one press records one return.
     """
     # Before ANYTHING else -- an EXCHANGE must not even replay an idempotency
     # key, because the door it would replay through is shut.
@@ -5246,51 +5295,9 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
     # isinstance guard: when this endpoint is called directly (unit tests), the
     # default is the FastAPI Header(...) object, not a str -- don't .strip() it.
     idem_key = idempotency_key.strip() if isinstance(idempotency_key, str) else ""
-    replay: Optional[Dict[str, Any]] = None
-    if idem_key:
-        try:
-            coll = _returns_coll()
-            if coll is not None:
-                existing = coll.find_one({"idempotency_key": idem_key})
-                if existing:
-                    # A known key from another shop replays nothing and names
-                    # nothing: the same 404 as GET /returns/{id}.
-                    in_reach_or_404(existing, current_user, "Return not found")
-                    # D95(3): a record Needs completing wrote is never replayed
-                    # as a success (the counter pays nothing); the press's own
-                    # record -- landed, even if its answer was lost -- is.
-                    if existing.get("recovered"):
-                        raise HTTPException(status_code=409, detail=RECORD_TAKEN_MESSAGE)
-                if existing and not _replay_matches(existing, body):
-                    raise HTTPException(status_code=409, detail=(
-                        f"This press already recorded return {existing.get('return_id')} with different "
-                        "items or amounts. Reload the bill before starting a new return."))
-                replay = existing
-        except HTTPException:
-            raise
-        except Exception as _exc:  # noqa: BLE001
-            logger.warning("[RETURNS] idempotency lookup skipped: %s", _exc)
+    replay = _recorded_press(idem_key, body, current_user)
     if replay:
-        # Outside the fail-soft lookup: a record that WAS found is never
-        # followed by a fresh press of the same key.
-        logger.info("[RETURNS] idempotency replay for key %s -> return %s", idem_key, replay.get("return_id"))
-        # D95(3): this IS the "press Return again -> pay" answer of a press
-        # whose record landed unconfirmed (503), so it says everything the
-        # first answer says (_press_answer) and writes the audit row that
-        # press never reached (D84).
-        _audit_return_created(replay)
-        from .loyalty import points_waived as _points_waived
-
-        return {
-            **_press_answer(
-                replay,
-                points_waived=(float(replay.get("points_paid_share") or 0.0) > 0
-                               and _points_waived(replay.get("order_id"))),
-                # D95(2): the press stopped before it placed the units (its
-                # record says so): the till is told, never silent.
-                stock_note=STOCK_PENDING_NOTE if replay.get("stock_pending") else None),
-            "_idempotent_replay": True,
-        }
+        return _replay_answer(replay)
 
     # Accounting period lock: cannot create returns in a closed month.
     # IST audit: lock against the IST business day, not the UTC day --
@@ -5489,9 +5496,18 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
     _refuse_while_a_return_settles(order or {}, resolved_order_id)
     return_id = generate_return_id()
     _prior_refunds, _reserved, points_share = _reserve_order_refund(
-        resolved_order_id, net_amount, return_id, bill=order)
+        resolved_order_id, net_amount, return_id, bill=order, idem_key=idem_key)
     if _reserved:
         held.update(order_id=resolved_order_id, return_id=return_id)
+        # The key is read AGAIN under the reservation: a request of this press
+        # that recorded the return after the read at the top (its hold no
+        # longer counts, so the reservation above let this one in) is
+        # replayed, never recorded a second time. An unreadable lookup: 503,
+        # and create_return gives this hold back.
+        replay = _recorded_press(idem_key, body, current_user)
+        if replay:
+            _release_order_refund(resolved_order_id, return_id)
+            return _replay_answer(replay)
         # Each line read AGAIN under the reservation (#1397 round 8): an online
         # refund of the same line that posted after the read above (a
         # no_restock one books no returned_qty, so the atomic claim cannot see
@@ -6098,6 +6114,8 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         # This press's own mark on its record: a lost acknowledgement reads
         # it back as its own (D95(3)).
         "press_token": uuid.uuid4().hex,
+        # D84: True once its RETURN_CREATED audit row is written (_finish_press).
+        "audited": False,
     }
 
 
@@ -6105,6 +6123,62 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
     if coll is not None:
         await _own_record_or_refuse(coll, doc, held, active_lines, order, current_user)
     return await _finish_press(coll, doc, active_lines, order, current_user)
+
+
+def _recorded_press(idem_key: str, body: "ReturnCreate", current_user: dict) -> Optional[Dict[str, Any]]:
+    """POS-14 / D95(3): the return an earlier press of this Idempotency-Key
+    recorded, or None. The identical re-press is how a 'Not confirmed' press
+    is settled, so a lookup that cannot be read is NEVER read as "no earlier
+    press" (it wrote a second return of a line with units left): 503, press
+    again. Read at the start of the press and AGAIN under its reservation."""
+    coll = _returns_coll() if idem_key else None
+    if coll is None:
+        return None
+    try:
+        existing = coll.find_one({"idempotency_key": idem_key})
+    except Exception as exc:  # noqa: BLE001 -- unknown: never a fresh press
+        logger.error("[RETURNS] idempotency lookup of %s unreadable: %s", idem_key, exc)
+        raise HTTPException(status_code=503, detail=RECORD_NOT_CONFIRMED_MESSAGE) from exc
+    if not existing:
+        return None
+    # A known key from another shop replays nothing and names nothing: the
+    # same 404 as GET /returns/{id}.
+    in_reach_or_404(existing, current_user, "Return not found")
+    # D95(3): a record Needs completing wrote is never replayed as a success
+    # (the counter pays nothing); the press's own record -- landed, even if
+    # its answer was lost -- is.
+    if existing.get("recovered"):
+        raise HTTPException(status_code=409, detail=RECORD_TAKEN_MESSAGE)
+    if not _replay_matches(existing, body):
+        raise HTTPException(status_code=409, detail=(
+            f"This press already recorded return {existing.get('return_id')} with different "
+            "items or amounts. Reload the bill before starting a new return."))
+    return existing
+
+
+def _replay_answer(replay: Dict[str, Any]) -> Dict[str, Any]:
+    """D95(3): the "press Return again -> pay" answer of a press whose record
+    landed (its first answer was lost, or was 503). It says everything the
+    first answer says (_press_answer) and writes the audit row that press
+    never reached -- or says press again (D84)."""
+    logger.info("[RETURNS] idempotency replay for key %s -> return %s",
+                replay.get("idempotency_key"), replay.get("return_id"))
+    if not _audit_return_created(replay):
+        raise HTTPException(status_code=503, detail=RECORD_NOT_CONFIRMED_MESSAGE)
+    if replay.get("audited") is False:
+        _mark_audited(replay.get("return_id"))
+    from .loyalty import points_waived as _points_waived
+
+    return {
+        **_press_answer(
+            replay,
+            points_waived=(float(replay.get("points_paid_share") or 0.0) > 0
+                           and _points_waived(replay.get("order_id"))),
+            # D95(2): the press stopped before it placed the units (its
+            # record says so): the till is told, never silent.
+            stock_note=STOCK_PENDING_NOTE if replay.get("stock_pending") else None),
+        "_idempotent_replay": True,
+    }
 
 
 def _unconfirmed_press_doc(order: Optional[Dict[str, Any]], idem_key: str) -> Optional[Dict[str, Any]]:
@@ -6238,12 +6312,17 @@ async def _finish_press(coll, doc: Dict[str, Any], active_lines: List[ReturnLine
         "restock_store_redirected_from": None,
         "restock_store_reason": None,
     }
-    claimed = coll is None or _claim_restock(coll, return_id) is not None
+    claim = _claim_restock(coll, return_id) if coll is not None else None
+    claimed = coll is None or claim is not None
     # Not claimed: another request of this very press holds the stock step (or
     # finished it), or the claim could not be written. What the record says
     # decides the answer -- never "not put back" beside units that are back.
     other: Dict[str, Any] = {}
-    if not claimed:
+    if (claim or {}).get("restock_applied"):
+        # Claimed with the GOOD units already back (an earlier request of
+        # this press placed them): only a DAMAGED unit's set-aside is open.
+        other = claim
+    elif not claimed:
         try:
             other = coll.find_one({"return_id": return_id}) or {}
         except Exception as exc:  # noqa: BLE001 -- unknown: said so below
@@ -6257,7 +6336,7 @@ async def _finish_press(coll, doc: Dict[str, Any], active_lines: List[ReturnLine
                 restock_store_redirected_from=other.get("restock_store_redirected_from"),
                 restock_store_reason=other.get("restock_store_reason"))
     try:
-        if claimed:
+        if claimed and not other.get("restock_applied"):
             restock_result = _restock_good_items(
                 active_lines,
                 store_id,
@@ -6275,6 +6354,9 @@ async def _finish_press(coll, doc: Dict[str, Any], active_lines: List[ReturnLine
         # applied=False so it can be retried later.
         logger.warning("[RETURNS] restock failed (recorded, not applied): %s", exc)
     quarantined = await _set_aside_damaged(active_lines, order, doc, current_user)
+    # D95(2): the stock step is done only when the DAMAGED units are really
+    # set aside too -- a set-aside that did not happen keeps it open.
+    damaged_done = _damaged_set_aside_done(return_id, active_lines)
     restocked = restock_result.get("restocked", [])
     restock_applied = bool(restock_result.get("applied"))
     restock_stock_ids = restock_result.get("restock_stock_ids", [])
@@ -6311,7 +6393,9 @@ async def _finish_press(coll, doc: Dict[str, Any], active_lines: List[ReturnLine
     # Each step's result is stamped on the record. A stamp that cannot be
     # written leaves the step reading as pending: the sweep re-runs the
     # (idempotent) reversal, and the record's Restock says to check the units.
-    sets: Dict[str, Any] = {"loyalty_reversal_failed": loyalty_reversal_failed}
+    # D84: the return's audit row, before the press answers 201.
+    audited = _audit_return_created(doc)
+    sets: Dict[str, Any] = {"loyalty_reversal_failed": loyalty_reversal_failed, "audited": audited}
     stamp: Dict[str, Any] = {"$set": sets}
     if quarantined:
         stamp["$addToSet"] = {"quarantined_stock_ids": {"$each": [u["stock_id"] for u in quarantined]}}
@@ -6322,7 +6406,7 @@ async def _finish_press(coll, doc: Dict[str, Any], active_lines: List[ReturnLine
             "restock_stock_ids": restock_stock_ids,
             "restock_in_progress": False,
             "restock_completed_at": utc_now_iso(),
-            "stock_pending": bool(_stock_lines(active_lines)) and not restock_applied,
+            "stock_pending": bool(_stock_lines(active_lines)) and not (restock_applied and damaged_done),
             "restock_store_id": restock_store_id,
             "restock_store_ids": restock_store_ids,
             "restock_store_redirected_from": restock_result.get("restock_store_redirected_from"),
@@ -6336,11 +6420,12 @@ async def _finish_press(coll, doc: Dict[str, Any], active_lines: List[ReturnLine
             except Exception as exc:  # noqa: BLE001
                 logger.error("[RETURNS] stock / points result of %s not stamped on its record: %s", return_id, exc)
 
-    _audit_return_created(doc)
-
     stock_note = None  # shown on the till's done screen when set
     units = _stock_lines(active_lines)
-    if not claimed and units and not restock_applied:
+    if claimed and restock_applied and not damaged_done:
+        # The step stays open on the record (its button, its task: the sweep).
+        stock_note = DAMAGED_PENDING_NOTE
+    elif not claimed and units and not restock_applied:
         if other.get("restock_in_progress"):
             # Another request holds the stock step right now: it places the
             # units (if it stops, the sweep raises the task for its button).
@@ -6358,6 +6443,12 @@ async def _finish_press(coll, doc: Dict[str, Any], active_lines: List[ReturnLine
                           + ("a task was raised to put them back - do not add them by hand" if _raised
                              else "tell the store manager - do not add them by hand"))
 
+    if not audited and doc.get("idempotency_key"):
+        # D84: the audit row could not be written. Nothing is paid on a 503;
+        # the identical re-press replays this record and writes the row once
+        # (_replay_answer). A press without a key cannot be pressed again (it
+        # would be a new return): reading its record repairs it (_repair_audit).
+        raise HTTPException(status_code=503, detail=RECORD_NOT_CONFIRMED_MESSAGE)
     return _press_answer(
         {**doc, "restocked": restocked, "restock_applied": restock_applied, "restock_stock_ids": restock_stock_ids,
          "restock_store_id": restock_store_id, "restock_store_ids": restock_store_ids,
@@ -6366,44 +6457,73 @@ async def _finish_press(coll, doc: Dict[str, Any], active_lines: List[ReturnLine
         points_waived=points_waived, stock_note=stock_note)
 
 
-def _audit_return_created(rec: Dict[str, Any]) -> None:
-    """D84: ONE RETURN_CREATED audit row per counter return, under a fixed
-    id, written by whichever request finishes the press or replays it: the
-    identical re-press of a 503 writes the row its first press never reached,
-    and two requests of one press write it once. Fail-soft, as before."""
+def _audit_once(log_id: str, row: Dict[str, Any]) -> bool:
+    """D84: ONE audit row under a fixed id. True only when the row is there
+    (written now, or by an earlier request), or when there is no audit trail
+    at all (no database). False: not confirmed -- the caller answers an error
+    that says press again, and the identical retry writes it once."""
     try:
         from ..dependencies import get_audit_repository
 
         audit = get_audit_repository()
         if audit is None:
-            return
-        log_id = f"return_created:{rec.get('return_id')}"
-        find = getattr(audit, "find_by_id", None)
-        if find is not None and find(log_id):
-            return  # written already (a second insert under this id is refused anyway)
-        audit.create(
-            {
-                "log_id": log_id,
-                "action": "RETURN_CREATED",
-                "entity_type": "return",
-                "entity_id": rec.get("return_id"),
-                "store_id": rec.get("store_id"),
-                "user_id": rec.get("created_by"),
-                "details": {
-                    "return_type": rec.get("return_type"),
-                    "returned_value": rec.get("returned_value"),
-                    "gross_refund": rec.get("gross_refund"),
-                    "restocking_fee": rec.get("restocking_fee"),
-                    "net_refund": rec.get("net_refund"),
-                    "refund_amount": rec.get("refund_amount"),
-                    "credit_amount": rec.get("credit_amount"),
-                    "collect_amount": rec.get("collect_amount"),
-                },
-                "created_at": rec.get("created_at"),
-            }
-        )
+            return True
+        if audit.find_by_id(log_id):
+            return True  # written already (a second insert under this id is refused anyway)
+        if audit.create({"log_id": log_id, **row}) is not None:
+            return True
+        return bool(audit.find_by_id(log_id))  # another request wrote it meanwhile
     except Exception as exc:  # noqa: BLE001
-        logger.warning("[RETURNS] audit log skipped: %s", exc)
+        logger.error("[RETURNS] audit row %s not written: %s", log_id, exc)
+        return False
+
+
+def _audit_return_created(rec: Dict[str, Any]) -> bool:
+    """D84: ONE RETURN_CREATED audit row per counter return, under a fixed
+    id, written by whichever request finishes the press or replays it: the
+    identical re-press of a 503 writes the row its first press never reached,
+    and two requests of one press write it once. False: not confirmed."""
+    return _audit_once(f"return_created:{rec.get('return_id')}", {
+        "action": "RETURN_CREATED",
+        "entity_type": "return",
+        "entity_id": rec.get("return_id"),
+        "store_id": rec.get("store_id"),
+        "user_id": rec.get("created_by"),
+        "details": {
+            "return_type": rec.get("return_type"),
+            "returned_value": rec.get("returned_value"),
+            "gross_refund": rec.get("gross_refund"),
+            "restocking_fee": rec.get("restocking_fee"),
+            "net_refund": rec.get("net_refund"),
+            "refund_amount": rec.get("refund_amount"),
+            "credit_amount": rec.get("credit_amount"),
+            "collect_amount": rec.get("collect_amount"),
+        },
+        "created_at": rec.get("created_at"),
+    })
+
+
+def _mark_audited(return_id: Optional[str]) -> None:
+    """The record says its own audit row is written (read repair looks only
+    at records that say it is not). Fail-soft: a lost mark is repaired on the
+    next read (the row is found under its fixed id)."""
+    try:
+        _returns_coll().update_one({"return_id": return_id}, {"$set": {"audited": True}})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[RETURNS] audited mark of %s not written: %s", return_id, exc)
+
+
+def _repair_audit(doc: Optional[Dict[str, Any]]) -> None:
+    """D84, read repair: a record that says its audit row was not written
+    (``audited`` False: the write failed and nobody pressed again) gets it
+    when the record is read (Returns > History, GET /returns/{id}). Only such
+    records -- one written before this rule carries no mark and is left as it
+    is (no history is rewritten)."""
+    if not doc or doc.get("audited") is not False:
+        return
+    if _audit_complete(doc) if doc.get("recovered") else _audit_return_created(doc):
+        _mark_audited(doc.get("return_id"))
+        doc["audited"] = True
 
 
 def _press_answer(rec: Dict[str, Any], *, points_waived: bool, stock_note: Optional[str]) -> Dict[str, Any]:
@@ -6637,6 +6757,8 @@ async def list_returns(
         logger.warning("[RETURNS] list failed: %s", exc)
         return {"returns": [], "total": 0}
 
+    for doc in returns:
+        _repair_audit(doc)  # D84: only a record that says its audit row is not written
     return {"returns": returns, "total": total}
 
 
@@ -6656,7 +6778,9 @@ async def get_return(
         raise HTTPException(status_code=404, detail="Return not found")
     # Missing, foreign-shop and unattributed rows have the same response to a
     # store-scoped caller, so guessing an ID cannot reveal customer/refund data.
-    return in_reach_or_404(doc, current_user, "Return not found")
+    doc = in_reach_or_404(doc, current_user, "Return not found")
+    _repair_audit(doc)  # D84: a record whose audit row was never written gets it on a read
+    return doc
 
 
 class CompleteRecordBody(BaseModel):
@@ -6775,6 +6899,10 @@ async def complete_return_record(
             _task_cash_owed(return_id, float(existing["owed_amount"]), store_id, existing.get("order_id"))
         if existing.get("recovered") and existing.get("status") == "COMPLETED":
             _task_units_not_placed(existing)  # likewise its stock task (deduped)
+        if existing.get("recovered") and existing.get("audited") is False:
+            # D84: the answer that wrote this record could not write its audit
+            # row (or stopped before it): this press writes it, once.
+            _audit_complete_or_503(existing)
         # D95(4): the counter's own record (or an earlier answer here) owns
         # the return: nothing is written, nothing is asked again.
         return _replayed(existing)
@@ -6911,6 +7039,7 @@ async def complete_return_record(
     units_out = bool(_stock_lines(doc.get("items"))) and not doc.get("restock_applied") \
         and not doc.get("restock_left_to_counter")
     doc.update(status="COMPLETED", created_at=created_at, drawer_at=moved_at, stock_pending=units_out,
+               audited=False,  # D84: True once its RETURN_RECORD_COMPLETED row is written
                recovered=dict(recovered, source=source, redated_from=redate.get("redated_from"),
                               redated_cross_fy=redate.get("redated_cross_fy")))
     doc.pop("restock_in_progress", None)
@@ -6920,15 +7049,17 @@ async def complete_return_record(
         stored = _insert_record(coll, doc)
     except RecordUnknown as exc:
         raise HTTPException(status_code=503, detail="The record could not be saved - nothing changed. Try again.") from exc
-    if stored is not None:
+    if stored is not None and not _own_recovered(stored, recovered):
         return _replayed(stored)
+    # This answer's own record (landed now, or landed with only its
+    # acknowledgement lost): its tasks and its audit row follow.
     if owed:
         _task_cash_owed(return_id, owed, store_id, order_id)
     stock_task = _task_units_not_placed(doc) if units_out else None
     if redate.get("redated_from"):
         _audit_credit_event("RETURN_RECORD_REDATED", {"entry_id": f"return:{return_id}", "store_id": store_id,
                                                       "order_id": order_id})
-    _audit_complete(return_id, store_id, current_user, recovered, now)
+    _audit_complete_or_503(doc)
     if doc.get("restock_left_to_counter"):
         stock_message = (" Before putting any of its units back in stock by hand, check that unit first: if it "
                          "already shows in stock, the counter put it back - do not add it again.")
@@ -7028,11 +7159,15 @@ async def mark_owed_paid(
                 raise HTTPException(status_code=503, detail=(
                     "The payment could not be booked - press again (it is booked once).")) from exc
             payout, first = stored, False
-        else:
-            _audit_complete(return_id, doc.get("store_id"), current_user,
-                            {"owed_paid": owed, "method": body.method, "cash_paid_from": body.cash_paid_from,
-                             "note": body.note or ""}, now)
     method = payout.get("method") or body.method
+    # Its audit row, from the STORED payment under a fixed id: a re-press after
+    # a lost answer writes the row its first press never reached, once.
+    _audit_once(f"return_owed_paid:{return_id}", {
+        "action": "RETURN_RECORD_COMPLETED", "entity_type": "return", "entity_id": return_id,
+        "store_id": doc.get("store_id"), "user_id": payout.get("created_by"),
+        "details": {"owed_paid": owed, "method": method, "cash_paid_from": payout.get("cash_paid_from"),
+                    "note": payout.get("note") or ""},
+        "created_at": payout.get("created_at")})
     try:
         coll.update_one({"return_id": return_id, "status": "COMPLETED", "owed_paid_at": None},
                         {"$set": {"owed_paid_at": payout.get("created_at"), "owed_paid_by": payout.get("created_by"),
@@ -7060,17 +7195,33 @@ def _close_task(dedupe_ref: str, current_user: dict, note: str) -> None:
         logger.warning("[RETURNS] task %s not closed: %s", dedupe_ref, exc)
 
 
-def _audit_complete(return_id, store_id, current_user, details, now) -> None:
-    try:
-        from ..dependencies import get_audit_repository
+def _own_recovered(stored: Dict[str, Any], recovered: Dict[str, Any]) -> bool:
+    """The record that is there is the one THIS answer just wrote: its insert
+    landed and only the acknowledgement was lost (who answered, and when).
+    Its writer finishes its steps; anyone else's record is only read."""
+    mine = stored.get("recovered")
+    return (isinstance(mine, dict) and mine.get("by") == recovered.get("by")
+            and mine.get("at") == recovered.get("at"))
 
-        audit = get_audit_repository()
-        if audit is not None:
-            audit.create({"action": "RETURN_RECORD_COMPLETED", "entity_type": "return", "entity_id": return_id,
-                          "store_id": store_id, "user_id": current_user.get("user_id"),
-                          "details": details, "created_at": now})
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[RETURNS] complete-record audit skipped: %s", exc)
+
+def _audit_complete(rec: Dict[str, Any]) -> bool:
+    """D84: ONE RETURN_RECORD_COMPLETED audit row per record Needs completing
+    wrote, under a fixed id (who answered, what, when: the record's own
+    ``recovered``), written by the answer that wrote the record or by the next
+    press / read of it. False: not confirmed."""
+    answer = rec.get("recovered") if isinstance(rec.get("recovered"), dict) else {}
+    return _audit_once(f"return_completed:{rec.get('return_id')}", {
+        "action": "RETURN_RECORD_COMPLETED", "entity_type": "return", "entity_id": rec.get("return_id"),
+        "store_id": rec.get("store_id"), "user_id": answer.get("by"), "details": answer,
+        "created_at": answer.get("at")})
+
+
+def _audit_complete_or_503(rec: Dict[str, Any]) -> None:
+    """D84: the audit row before the success answer, or an error that says
+    press again (the record is there: the next press writes only the row)."""
+    if not _audit_complete(rec):
+        raise HTTPException(status_code=503, detail=RECORD_AUDIT_AGAIN_MESSAGE)
+    _mark_audited(rec.get("return_id"))
 
 
 _MONEY_MOVED = ("Money moved on this return (store credit, or the counter finished its refund), so it "
@@ -7079,25 +7230,16 @@ _MONEY_MOVED = ("Money moved on this return (store credit, or the counter finish
 
 def _fence_void_move(row: Dict[str, Any]) -> None:
     """D85: a VOID credit line's balance move could still land late (a
-    stalled press) and be healed beside a NOTHING_PAID record. One
-    compare-and-set on the customer decides: the move is fenced
-    (customers.STORE_CREDIT_FENCED) only while it has not landed -- from then
-    on it never can. Landed first: 409, the money moved. Unknown: 503."""
-    from .customers import STORE_CREDIT_FENCED, STORE_CREDIT_REFS
+    stalled press) and be healed beside a NOTHING_PAID record. THE fence on
+    the customer decides (customers.fence_credit_move): fenced only while it
+    has not landed -- from then on it never can. Landed first: 409, the money
+    moved. Unknown: 503."""
+    from .customers import fence_credit_move
 
-    eid, cid = row.get("entry_id"), row.get("customer_id")
-    coll = getattr(get_customer_repository(), "collection", None) if cid else None
-    if coll is None or not eid:
-        return  # no customer balance: no move can land
-    try:
-        res = coll.update_one({"customer_id": cid, STORE_CREDIT_REFS: {"$ne": eid}},
-                              {"$addToSet": {STORE_CREDIT_FENCED: eid}})
-        matched = getattr(res, "matched_count", getattr(res, "modified_count", 0))
-        landed = not matched and coll.find_one({"customer_id": cid, STORE_CREDIT_REFS: eid}) is not None
-    except Exception as exc:  # noqa: BLE001
-        logger.error("[RETURNS] late credit of %s not fenced: %s", eid, exc)
+    landed = fence_credit_move(get_customer_repository(), row.get("customer_id"), row.get("entry_id"))
+    if landed is None:
         raise HTTPException(status_code=503, detail=(
-            "Could not mark this return as nothing paid just now - nothing was changed. Try again.")) from exc
+            "Could not mark this return as nothing paid just now - nothing was changed. Try again."))
     if landed:
         raise HTTPException(status_code=409, detail=_MONEY_MOVED)
 
@@ -7212,17 +7354,17 @@ def _complete_nothing_paid(return_id, line, order, hold, store_id, recovered, cu
     tomb = {"return_id": return_id, "order_id": order_id, "store_id": store_id, "status": "NOTHING_PAID",
             "net_refund": 0.0, "refund_amount": 0.0, "credit_amount": 0.0, "items": lines,
             "credit_note_number": number, "created_at": now, "created_by": current_user.get("user_id"),
-            "recovered": dict(recovered, source="nothing paid")}
+            "audited": False, "recovered": dict(recovered, source="nothing paid")}
     try:
         # D95(1): the same insert-once; the counter's record already there
         # owns the return and nothing is given back here.
         stored = _insert_record(coll, tomb)
     except RecordUnknown as exc:
         raise HTTPException(status_code=503, detail="The record could not be saved - nothing changed. Try again.") from exc
-    if stored is not None:
+    if stored is not None and not _own_recovered(stored, recovered):
         return _replayed(stored)
     _nothing_paid_steps(return_id, line, tomb, current_user)
-    _audit_complete(return_id, store_id, current_user, recovered, now)
+    _audit_complete_or_503(tomb)
     return {**tomb, "message": "Nothing was paid on this return: its units and the bill were released, "
                                "and its credit-note number was written off."}
 
@@ -7332,6 +7474,18 @@ async def retry_restock(
             # any press runs): what it placed is not known, so IMS places
             # nothing more -- a second run could add a unit twice (D92(5)).
             _task_units_not_placed(doc)
+            # D92(2): a DAMAGED unit is still set aside -- never gated on the
+            # restock (it moves only the units this return names, once).
+            stale_lines = [ReturnLine(**{"unit_price": 0.0, **it}) for it in (doc.get("items") or [])]
+            if not doc.get("shopify_refund_id") and any(ln.condition == "DAMAGED" for ln in stale_lines):
+                aside = await _set_aside_damaged(stale_lines, _load_order_for_restock(doc.get("order_id")),
+                                                 doc, current_user)
+                if aside:
+                    try:
+                        coll.update_one({"return_id": return_id}, {"$addToSet": {
+                            "quarantined_stock_ids": {"$each": [u["stock_id"] for u in aside]}}})
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("[RETURNS] quarantined units of %s not noted on its record: %s", return_id, exc)
             return {
                 "return_id": return_id,
                 "restock_applied": False,
@@ -7352,6 +7506,30 @@ async def retry_restock(
     existing_ids = list(claim.get("restock_stock_ids") or [])
     # A record completed in Needs completing keeps no price (restock needs none).
     lines = [ReturnLine(**{"unit_price": 0.0, **it}) for it in (claim.get("items") or [])]
+
+    if claim.get("restock_applied"):
+        # D95(2): the GOOD units are back already; the step was left open only
+        # for a DAMAGED unit that was not set aside. Nothing is restocked
+        # again: only the set-aside runs (idempotent on the units it names).
+        units = await _set_aside_damaged(lines, _load_order_for_restock(claim.get("order_id")), claim, current_user)
+        done = _damaged_set_aside_done(return_id, lines)
+        change: Dict[str, Any] = {"$set": {"restock_in_progress": False, "stock_pending": not done}}
+        if units:
+            change["$addToSet"] = {"quarantined_stock_ids": {"$each": [u["stock_id"] for u in units]}}
+        try:
+            coll.update_one({"return_id": return_id}, change)
+        except Exception as exc:  # noqa: BLE001 -- the step reads as open: pressed again, it moves nothing more
+            logger.warning("[RETURNS] set-aside of %s not stamped on its record: %s", return_id, exc)
+        if done:
+            _close_task(f"return_restock_blocked:{return_id}", current_user, "The damaged unit is set aside.")
+        return {
+            "return_id": return_id,
+            "restock_applied": True,
+            "restock_stock_ids": existing_ids,
+            "stock_pending": not done,
+            "message": ("Stock updated: the damaged unit is set aside" if done else
+                        "The damaged unit could not be set aside just now - press Update stock again"),
+        }
 
     # F9: the order is the ONLY record of which physical shop shipped each unit.
     # Load it ONCE here and hand it to the router, so this door runs on VERIFIED
@@ -7513,18 +7691,21 @@ async def retry_restock(
         ),
         "restock_store_reason": restock_result.get("restock_store_reason"),
     }
-    if "stock_pending" in claim:
-        # D95(2): a counter return's record says whether its stock step is
-        # still open (its button and its task follow this flag).
-        update["stock_pending"] = not restock_result.get("applied")
     # D95(2): a counter return's DAMAGED units are set aside by this step too
     # (its press may have stopped before it did). Idempotent: only the unit
     # THIS order sold moves, out of SOLD, once.
     set_aside: Dict[str, Any] = {}
+    damaged_done = True
     if not refund_id and any(ln.condition == "DAMAGED" for ln in lines):
         units = await _set_aside_damaged(lines, retry_order, claim, current_user)
         if units:
             set_aside = {"$addToSet": {"quarantined_stock_ids": {"$each": [u["stock_id"] for u in units]}}}
+        damaged_done = _damaged_set_aside_done(return_id, lines)
+    if "stock_pending" in claim or not damaged_done:
+        # D95(2): a counter return's record says whether its stock step is
+        # still open (its button and its task follow this flag) -- open until
+        # the GOOD units are back AND the DAMAGED ones are really set aside.
+        update["stock_pending"] = not (restock_result.get("applied") and damaged_done)
     try:
         coll.update_one({"return_id": return_id}, {"$set": update, **set_aside})
     except Exception as exc:  # noqa: BLE001
@@ -7548,7 +7729,7 @@ async def retry_restock(
         except Exception as exc:  # noqa: BLE001
             logger.debug("[RETURNS] retry write-back skipped: %s", exc)
 
-    if update["restock_applied"]:
+    if update["restock_applied"] and not update.get("stock_pending"):
         # The step the blocked-restock task asked for is done.
         _close_task(f"return_restock_blocked:{return_id}", current_user, "Restocked: the units are back in stock.")
     booked_earlier = False
@@ -7570,6 +7751,8 @@ async def retry_restock(
             "Booked. This order predates IMS stock: a task asks the shop's store "
             "manager to add the frame(s) through stock-in"
             if restock_result.get("stock_in_task") or (update["restock_applied"] and booked_earlier)
+            else "Restocked, but the damaged unit could not be set aside just now - press Update stock again"
+            if update["restock_applied"] and not damaged_done
             else "Restock applied"
             if update["restock_applied"]
             else "Nothing booked: the stock-in task could not be saved - retry shortly"

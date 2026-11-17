@@ -168,7 +168,8 @@ def _pay(rid="RET-O", **body):
 def test_a_lost_flip_keeps_the_return_owed_and_a_re_press_replays_the_stored_payment(till, monkeypatch):
     monkeypatch.setattr(returns_router, "_close_task", lambda *a, **k: None)
     audits = []
-    monkeypatch.setattr(returns_router, "_audit_complete", lambda rid, *a, **k: audits.append(rid))
+    # By its fixed id: every press writes the stored payment's row, once.
+    monkeypatch.setattr(returns_router, "_audit_once", lambda log_id, row: audits.append(log_id) or True)
     _owed(till)
     returns = till["db"].get_collection("returns")
     real = returns.update_one
@@ -191,7 +192,7 @@ def test_a_lost_flip_keeps_the_return_owed_and_a_re_press_replays_the_stored_pay
     assert again["method"] == "UPI" and again["replayed"] is True
     payouts = list(returns.find({"payout_of": "RET-O"}))
     assert len(payouts) == 1 and payouts[0]["refund_tenders"] == [{"method": "UPI", "amount": 600.0}]
-    assert returns.find_one({"return_id": "RET-O"})["owed_paid_method"] == "UPI" and audits == ["RET-O"]
+    assert returns.find_one({"return_id": "RET-O"})["owed_paid_method"] == "UPI" and sorted(set(audits)) == ["return_owed_paid:RET-O"]
 
 
 def test_a_lost_payout_write_books_nothing_and_stays_owed(till, monkeypatch):
