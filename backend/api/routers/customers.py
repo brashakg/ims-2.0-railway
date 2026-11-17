@@ -559,19 +559,6 @@ def _row_is_online_origin(row: Dict[str, Any]) -> bool:
     return bool(sid) and sid not in (None, "")
 
 
-def _row_matches_channel(row: Dict[str, Any], channel: Optional[str]) -> bool:
-    """In-Python equivalent of `_build_channel_clause` for the search path (which
-    returns repo rows, not a Mongo cursor). Unknown channel -> keep the row."""
-    if not channel:
-        return True
-    val = str(channel).strip().upper()
-    if val in _ONLINE_CHANNEL_VALUES:
-        return _row_is_online_origin(row)
-    if val in _STORE_CHANNEL_VALUES:
-        return not _row_is_online_origin(row)
-    return True
-
-
 def _build_channel_clause(channel: Optional[str]) -> Optional[Dict[str, Any]]:
     """Return a Mongo filter fragment segregating online-origin vs in-store
     customers, or None when no recognised channel was requested (no filtering).
@@ -739,7 +726,10 @@ async def list_customers(
         # Build filter
         filter_dict: Dict[str, Any] = {}
         if customer_type:
-            filter_dict["customer_type"] = customer_type
+            # B2C includes untyped (imported) customers: CustomerRepository.type_scope.
+            from database.repositories.customer_repository import CustomerRepository
+
+            filter_dict.update(CustomerRepository.type_scope(customer_type))
         # Additive tier filter: exclude email-only MARKETING contacts when asked.
         # ``$ne`` also keeps docs where the field is ABSENT (normal customers +
         # FULL upgrades never carry it), so only true MARKETING rows drop out.
@@ -763,16 +753,12 @@ async def list_customers(
             # one, else the first own shop: store_in_view).
             effective_store = store_in_view(None, current_user)
 
-        store_clause: Optional[Dict[str, Any]] = None
-        if effective_store:
-            # Match either home_store_id (seed/old) or preferred_store_id
-            # (TechCherry import + future inserts).
-            store_clause = {
-                "$or": [
-                    {"home_store_id": effective_store},
-                    {"preferred_store_id": effective_store},
-                ]
-            }
+        # The one customer-ownership rule (home_store_id or preferred_store_id).
+        from database.repositories.customer_repository import CustomerRepository
+
+        store_clause: Optional[Dict[str, Any]] = (
+            CustomerRepository.store_scope(effective_store) if effective_store else None
+        )
 
         # Channel segregation (step-4): online-origin vs in-store, by tag.
         channel_clause = _build_channel_clause(channel)
@@ -787,24 +773,30 @@ async def list_customers(
         elif sub_clauses:
             filter_dict.update(sub_clauses[0])
 
-        # If search provided, use search method (also respects store filter).
-        # The search path can't compose the $and, so the channel tag is applied
-        # post-hoc to the search results to keep segregation consistent.
-        if search:
-            rows = repo.search_customers(search, effective_store)
-            if channel_clause is not None:
-                rows = [r for r in rows if _row_matches_channel(r, channel)]
-            if exclude_marketing:
-                # Mirror the Mongo $ne filter for the search path (repo rows, not a
-                # cursor): drop only rows explicitly tagged MARKETING.
-                rows = [
-                    r
-                    for r in rows
-                    if str(r.get("contact_tier") or "").upper() != "MARKETING"
-                ]
-            customers = _annotate_customer_matches(rows, search)
-        else:
-            customers = repo.find_many(filter_dict, skip=skip, limit=limit)
+        # Search pages on the SAME filter as the browse list (store, channel,
+        # customer_type, exclude_marketing) and is counted on it, so skip/limit
+        # and the total are real (audit R31: it used to return the first 100
+        # matches for every page and filter channel/tier after that cap).
+        # strict reads: a failed read is a 503, never an empty list / total 0.
+        try:
+            if search:
+                customers = _annotate_customer_matches(
+                    repo.search_customers(
+                        search, filter=filter_dict, skip=skip, limit=limit, strict=True
+                    ),
+                    search,
+                )
+                total = repo.count_search_customers(search, filter=filter_dict, strict=True)
+            else:
+                customers = repo.find_many(
+                    filter_dict, sort=[("_id", 1)], skip=skip, limit=limit, strict=True
+                )
+                total = repo.count(filter_dict, strict=True)
+        except Exception as exc:  # noqa: BLE001 -- any read fault
+            raise HTTPException(
+                status_code=503,
+                detail="Could not read the customer list. Please try again.",
+            ) from exc
 
         # OS-026: the online-segment list drives the Online-customers screen's
         # Orders / Lifetime columns -- fields nothing persists. Enrich the page
@@ -816,15 +808,16 @@ async def list_customers(
 
         from ..utils.pagination import paginate
 
-        total = repo.count(filter_dict) if not search else len(customers)
         page = (skip // limit) + 1 if limit > 0 else 1
         result = paginate(customers, page=page, page_size=limit, total=total)
         # Keep backward compat: also include "customers" key
         result["customers"] = result["data"]
         return result
 
-    # No database available - return empty
-    return {"customers": [], "total": 0}
+    # No database is not "no customers": say the list could not be read.
+    raise HTTPException(
+        status_code=503, detail="Could not read the customer list. Please try again."
+    )
 
 
 @router.post("", status_code=201)

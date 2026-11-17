@@ -47,27 +47,62 @@ class CustomerRepository(BaseRepository):
     def find_by_gstin(self, gstin: str) -> Optional[Dict]:
         return self.find_one({"gstin": gstin})
     
-    def search_customers(self, query: str, store_id: str = None) -> List[Dict]:
-        # Match the account holder's name + both phone fields + email, AND any
-        # family member under the account (patients[].name / .mobile) -- searching
-        # a patient's name or number must surface their customer record (the bug:
-        # patient data was never searched). Native docs store the number in
-        # `mobile`; TechCherry-imported docs in `phone`. Store scope matches
-        # home_store_id (native) or preferred_store_id (import).
-        store_filter = None
+    # Match the account holder's name + both phone fields + email, AND any
+    # family member under the account (patients[].name / .mobile) -- searching
+    # a patient's name or number must surface their customer record (the bug:
+    # patient data was never searched). Native docs store the number in
+    # `mobile`; TechCherry-imported docs in `phone`.
+    SEARCH_FIELDS = ["name", "mobile", "phone", "email", "patients.name", "patients.mobile"]
+
+    @staticmethod
+    def store_scope(store_id: str) -> Dict:
+        """THE customer-ownership rule: a shop's customers are those whose
+        home_store_id (native create door) or preferred_store_id (import) is
+        that shop. The list, search and the customer report all use it."""
+        return {"$or": [{"home_store_id": store_id}, {"preferred_store_id": store_id}]}
+
+    @staticmethod
+    def type_scope(customer_type: str) -> Dict:
+        """THE customer-type rule: B2B means customer_type == 'B2B'; B2C is
+        every other customer, including rows with no type at all (TechCherry
+        imports never write one, and every screen shows them as B2C).
+        A field clause, so it ANDs with the store/channel $or clauses."""
+        ctype = str(customer_type or "").strip().upper()
+        if ctype == "B2C":
+            return {"customer_type": {"$in": ["B2C", None, ""]}}
+        return {"customer_type": ctype}
+
+    @classmethod
+    def _search_scope(cls, store_id: str = None, filter: Dict = None) -> Optional[Dict]:
+        """Store scope (store_scope), ANDed with the caller's own filter."""
+        clauses = [filter] if filter else []
         if store_id:
-            store_filter = {
-                "$or": [
-                    {"home_store_id": store_id},
-                    {"preferred_store_id": store_id},
-                ]
-            }
-        return self.search(
-            query,
-            ["name", "mobile", "phone", "email", "patients.name", "patients.mobile"],
-            store_filter,
+            clauses.append(cls.store_scope(store_id))
+        if not clauses:
+            return None
+        return clauses[0] if len(clauses) == 1 else {"$and": clauses}
+
+    def search_customers(
+        self, query: str, store_id: str = None, filter: Dict = None,
+        skip: int = 0, limit: int = 100, strict: bool = False,
+    ) -> List[Dict]:
+        """One page of matches, in a stable order (_id) so skip/limit pages
+        are disjoint (audit R31)."""
+        return self.find_many(
+            self._search_query(query, self.SEARCH_FIELDS, self._search_scope(store_id, filter)),
+            sort=[("_id", 1)],
+            skip=skip,
+            limit=limit,
+            strict=strict,
         )
-    
+
+    def count_search_customers(self, query: str, store_id: str = None, filter: Dict = None,
+                               strict: bool = False) -> int:
+        """Total the SAME search_customers query matches, before skip/limit."""
+        return self.search_count(
+            query, self.SEARCH_FIELDS, self._search_scope(store_id, filter), strict=strict
+        )
+
     def find_b2b_customers(self, store_id: str = None) -> List[Dict]:
         filter = {"customer_type": "B2B"}
         if store_id:

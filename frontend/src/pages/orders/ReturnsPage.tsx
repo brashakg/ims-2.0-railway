@@ -248,7 +248,7 @@ function ReturnsDesk({ canComplete }: { canComplete: boolean }) {
       // stamps the sale on that unit (order_id), so the code finds its order.
       // Any letter case; a name or number that is no unit code finds nothing.
       const [response, unit] = await Promise.all([
-        orderApi.getOrders({ storeId: user?.activeStoreId }),
+        orderApi.getOrders({ storeId: user?.activeStoreId, limit: 500 }),
         /^[A-Za-z0-9-]+$/.test(q) ? inventoryApi.getStockByBarcode(q).catch(() => null) : null,
       ]);
       const soldOn = unit?.order_id || unit?.orderId;

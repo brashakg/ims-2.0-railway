@@ -144,6 +144,12 @@ export function OrdersPage() {
   // Pagination state
   const [currentPage, setCurrentPage] = useState(1);
   const pageSize = 50;
+  // The server's count of every order the filters match (audit R30). The list
+  // is the server's page; it is never sliced again here.
+  const [serverTotal, setServerTotal] = useState(0);
+  // While the search box is in use the page searches the newest 500 matching
+  // orders in the browser (as it always did) and pages that result locally.
+  const searching = searchQuery.trim() !== '';
 
   // Sync status filter from URL query params (e.g. /orders?status=READY)
   // Also honour order_id deep-links from the global command palette so the
@@ -203,7 +209,7 @@ export function OrdersPage() {
   // data stays pinned to the old store. (May 2026 store-switch reactivity fix.)
   useEffect(() => {
     loadOrders();
-  }, [statusFilter, dateFilter, currentPage, user?.activeStoreId]);
+  }, [statusFilter, dateFilter, currentPage, user?.activeStoreId, searching]);
 
   // Resolve the open order's public tracking token for the QR. Use the value
   // already on the row if present; otherwise fetch the full order (the backend
@@ -266,13 +272,16 @@ export function OrdersPage() {
         const d = String(start.getDate()).padStart(2, '0');
         params.from_date = `${y}-${m}-${d}`;
       }
-      params.skip = (currentPage - 1) * pageSize;
-      params.limit = pageSize;
+      params.skip = searching ? 0 : (currentPage - 1) * pageSize;
+      params.limit = searching ? 500 : pageSize;
       const response = await orderApi.getOrders(params);
-      setOrders(response.orders || response || []);
+      const list = response.orders || response || [];
+      setOrders(list);
+      setServerTotal(response.pagination?.total ?? list.length);
     } catch {
       setError('Failed to load orders. Please try again.');
       setOrders([]);
+      setServerTotal(0);
     } finally {
       setIsLoading(false);
     }
@@ -288,11 +297,11 @@ export function OrdersPage() {
     return matchesSearch;
   });
 
-  // Paginate filtered results (client-side slice for local search)
-  const paginatedOrders = filteredOrders.slice(
-    (currentPage - 1) * pageSize,
-    currentPage * pageSize
-  );
+  // Browsing: the server already returned exactly this page. Searching: page
+  // the locally filtered result.
+  const paginatedOrders = searching
+    ? filteredOrders.slice((currentPage - 1) * pageSize, currentPage * pageSize)
+    : orders;
 
   // IST-correct: backend timestamps are naive UTC; format in Asia/Kolkata.
   const formatDate = (dateStr: string) => formatDateIST(dateStr);
@@ -652,7 +661,7 @@ export function OrdersPage() {
           </div>
           <Pagination
             currentPage={currentPage}
-            totalItems={filteredOrders.length}
+            totalItems={searching ? filteredOrders.length : serverTotal}
             pageSize={pageSize}
             onPageChange={setCurrentPage}
           />

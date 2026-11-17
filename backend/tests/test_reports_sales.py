@@ -644,11 +644,11 @@ def test_customer_acquisition_retention_pct_is_share_of_buyers(
     now = datetime.now()
     # 2 customers exist (1 new in window, 1 created last year)
     fake_db.get_collection("customers").insert_one({
-        "customer_id": "cust-new", "store_id": "BV-TEST-01",
+        "customer_id": "cust-new", "home_store_id": "BV-TEST-01",
         "name": "New", "created_at": now,
     })
     fake_db.get_collection("customers").insert_one({
-        "customer_id": "cust-old", "store_id": "BV-TEST-01",
+        "customer_id": "cust-old", "preferred_store_id": "BV-TEST-01",
         "name": "Old", "created_at": now - timedelta(days=400),
     })
 
