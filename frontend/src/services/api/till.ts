@@ -15,8 +15,11 @@ export type TillStatus = 'OPEN' | 'BLIND_SUBMITTED' | 'LOCKED';
 // nothing (more cash refunded than it took in) -- a cash-in is missing, so the
 // server withholds the over/short VERDICT rather than crediting a phantom
 // overage. The figures themselves are still shown.
+// COMPARISON_UNAVAILABLE (D76): an earlier drawer of the day was recorded by
+// an older version (whole-day cash), so this drawer has no expected figure,
+// no variance and no verdict; its count is kept.
 export type VarianceStatus =
-  | 'BALANCED' | 'OVERAGE' | 'SHORTAGE' | 'NEGATIVE_EXPECTED' | null;
+  | 'BALANCED' | 'OVERAGE' | 'SHORTAGE' | 'NEGATIVE_EXPECTED' | 'COMPARISON_UNAVAILABLE' | null;
 
 export interface DenominationLine {
   face: number;
@@ -87,9 +90,10 @@ export interface ZRead {
   // Z-Read identity: opening + cash_sales - cash_refunds - cash_payouts.
   // cash_sales_paisa is GROSS collected; cash_refunds_paisa is the recorded
   // customer cash refunds already auto-deducted from the expected drawer.
-  cash_sales_paisa: number;
+  // NULL (D86) on a COMPARISON_UNAVAILABLE drawer: not available.
+  cash_sales_paisa: number | null;
   cash_refunds_paisa?: number | null;
-  cash_payouts_paisa: number;
+  cash_payouts_paisa: number | null;
   refund_double_entry_advisory?: boolean | null;
   negative_expected_advisory?: boolean | null;
   negative_expected_message?: string | null;

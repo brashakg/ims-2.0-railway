@@ -18,7 +18,16 @@ export type ReconStatus =
   | 'OVERAGE'
   | 'SHORTAGE'
   | 'NEGATIVE_EXPECTED'
-  | 'NOT_COUNTED';
+  | 'NOT_COUNTED'
+  // D53: a Cash Register close on a day with several drawers; no single
+  // variance is true for it (each drawer has its own Z-Read row).
+  | 'SEVERAL_DRAWERS'
+  // No comparison could be trusted: the close could not read the day's
+  // drawers, or an earlier drawer was recorded by an older version (D76).
+  | 'COMPARISON_UNAVAILABLE'
+  // D111: a Cash Register session with no count of its own on a drawer that
+  // was counted earlier that day. The till's count is shown, not compared.
+  | 'COUNTED_EARLIER';
 export type ReconSource = 'CASH_REGISTER' | 'BLIND_EOD';
 
 export interface ReconByModeRow {
@@ -42,11 +51,14 @@ export interface ReconRow {
   session_date: string;
   shift?: string | null;
   opening_float: number;
-  cash_sales: number;
-  cash_refunds: number;
-  cash_expenses: number;
+  // NULL (D86): COMPARISON_UNAVAILABLE -- no cash figures of its own; the
+  // totals leave it out. Never render a null as zero.
+  cash_sales: number | null;
+  cash_refunds: number | null;
+  cash_expenses: number | null;
   bank_deposit: number;
-  expected_cash: number;
+  // NULL: no comparison is made for this drawer (COMPARISON_UNAVAILABLE).
+  expected_cash: number | null;
   // NULL means nobody counted this drawer -- there is no counted figure and no
   // variance. Never render a null as zero.
   counted_cash: number | null;
@@ -74,11 +86,22 @@ export interface ReconRow {
   closed_by_name?: string | null;
   closed_at?: string | null;
   zread_number?: string | null;
+  // D88: a Cash Register close that did not land on one till drawer of its
+  // own, on a store-day that also has a Z-Read row: shown, but left out of
+  // the totals (the till's rows already hold that cash).
+  also_counted_on_till?: boolean;
   signoff?: ReconSignoff;
 }
 
 export interface ReconTotals {
   sessions: number;
+  // D88: rows shown but not added to the totals.
+  also_counted_on_till?: number;
+  // D121: later Cash Register closes on an already counted drawer (among the
+  // rows above), and the sum of their own shortages and of their own excesses.
+  later_closes?: number;
+  later_closes_short?: number;
+  later_closes_over?: number;
   balanced: number;
   overage: number;
   shortage: number;

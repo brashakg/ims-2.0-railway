@@ -6,6 +6,7 @@
 // Import directly (not via the api barrel) per the established convention.
 
 import api from './client';
+import type { TillDrawerSummary } from './reports';
 
 export type DenomKind = 'note' | 'coin';
 
@@ -47,6 +48,13 @@ export interface CashRegisterSession {
     | 'SHORT'
     | 'NEGATIVE_EXPECTED'
     | 'NOT_COUNTED'
+    // D53: the day had several drawers; no single verdict is true for it.
+    | 'SEVERAL_DRAWERS'
+    // The close could not read the day's drawers: no verdict is claimed.
+    | 'COMPARISON_UNAVAILABLE'
+    // D111: opened on a drawer already counted and closed with no count of
+    // its own. The till's count is shown; nothing is compared with it.
+    | 'COUNTED_EARLIER'
     | null;
   tolerance?: number | null;
   closing_note?: string | null;
@@ -61,8 +69,22 @@ export interface CashRegisterSession {
   till_count_differs?: boolean;
   counted_from_shared_record?: boolean;
   till_opening_float_not_recorded?: boolean;
+  // D111: this session opened on a drawer that was already counted. Its
+  // expected cash starts from that count (`till_standing_count`), not from the
+  // float typed at opening, and covers the cash moved since that count.
+  till_counted_earlier?: boolean;
+  till_standing_count?: number | null;
+  // Cash drawers on this shop-day. Above 1, `counted` is the latest drawer's
+  // count only, not the day's total (D40).
+  till_drawers_on_day?: number | null;
+  // D53: each drawer's own count and (once locked) variance; never summed.
+  till_drawers?: TillDrawerSummary[] | null;
   // The day already carried a declared opening float; that one stands.
   till_float_already_declared?: boolean;
+  // The manager task(s) this close owes (a variance alert, "count the drawer
+  // on the till"). `pending` true = not raised yet; the server raises it on
+  // the next retry or load of this screen.
+  manager_followup?: { pending: boolean; tasks?: Array<{ kind: string }> } | null;
 }
 
 export interface ExpectedPreview {

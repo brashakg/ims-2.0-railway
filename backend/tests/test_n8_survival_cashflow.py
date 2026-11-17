@@ -203,6 +203,11 @@ def routed(db, monkeypatch):
     monkeypatch.setattr(fin, "_get_db", lambda: db)
     monkeypatch.setattr(fin, "now_ist_naive", lambda: FIXED_NOW)
     monkeypatch.setattr(fin, "now_ist", lambda: FIXED_NOW)
+    # GET /finance/budget reads the plan through budgets.plan_and_actuals
+    # (audit L3-15). No plan is seeded here: keep that read off any live DB.
+    from api.routers import budgets as _budgets_router
+
+    monkeypatch.setattr(_budgets_router, "plan_and_actuals", lambda s, p: ({}, {}))
     monkeypatch.setattr(
         fin.policy_engine,
         "get_policy",

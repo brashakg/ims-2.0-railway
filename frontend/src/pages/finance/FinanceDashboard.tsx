@@ -108,6 +108,15 @@ function mapBudget(d: any): BudgetData[] {
   });
 }
 
+function mapBudgetMeta(d: any): BudgetMeta {
+  return {
+    period: typeof d?.period === 'string' ? d.period : undefined,
+    revenue: d?.revenue
+      ? { target: Number(d.revenue.budget || 0), actual: Number(d.revenue.actual || 0) }
+      : undefined,
+  };
+}
+
 function mapVendorPayments(d: any): VendorPaymentData[] {
   const list = Array.isArray(d) ? d : [];
   return list.map((v: any) => {
@@ -135,7 +144,7 @@ import GSTPanel from './GSTPanel';
 import OutstandingPanel from './OutstandingPanel';
 import CashFlowPanel from './CashFlowPanel';
 import PeriodManagement from './PeriodManagement';
-import BudgetPanel from './BudgetPanel';
+import BudgetPanel, { type BudgetMeta } from './BudgetPanel';
 import RestrictedTotalsNotice from './RestrictedTotalsNotice';
 import VendorPayments from './VendorPayments';
 import JournalEntriesPanel from './JournalEntriesPanel';
@@ -181,6 +190,10 @@ export default function FinanceDashboard() {
   const [outstanding, setOutstanding] = useState<OutstandingReceivable[]>([]);
   const [cashFlow, setCashFlow] = useState<CashFlowData[]>([]);
   const [budgets, setBudgets] = useState<BudgetData[]>([]);
+  // Which month the plan is for, and its income target (not an allocation).
+  const [budgetMeta, setBudgetMeta] = useState<BudgetMeta>({});
+  // The budget read FAILED: not the same as "no budget" (a total of Rs 0).
+  const [budgetError, setBudgetError] = useState(false);
   const [vendorPayments, setVendorPayments] = useState<VendorPaymentData[]>([]);
   const [pnlByStore, setPnlByStore] = useState<Array<{ store_id?: string; store_name?: string; entity_id?: string; revenue?: number; cogs?: number; expenses?: number; payroll?: number; net_profit?: number; net_margin?: number }>>([]);
   // Sortable per-store P&L. Default highest-revenue-first (mirrors the backend's
@@ -222,7 +235,7 @@ export default function FinanceDashboard() {
 
   useEffect(() => {
     // R4: a login with no shop is shown NoShopNotice below and reads nothing
-    // -- budgets and the period lock are not shop-scoped, so even they would
+    // -- the period lock is not shop-scoped, so even that would
     // hand it organisation data.
     if (hasNoShop(user)) return;
     loadFinanceData();
@@ -243,7 +256,9 @@ export default function FinanceDashboard() {
         canSeeWhatWePay ? financeApi.getGstSummary() : Promise.resolve(null),
         financeApi.getOutstanding({ store_id: storeId }),
         financeApi.getCashFlow({ period: 'month', store_id: storeId }),
-        financeApi.getBudget(),
+        // The SAME shop the rest of this dashboard reads, so the Budgets tab
+        // shows the plan Budgeting saved for it (audit L3-15).
+        financeApi.getBudget({ store_id: storeId }),
         canSeeWhatWePay ? financeApi.getVendorPayments(storeId) : Promise.resolve([]),
       ]);
 
@@ -256,6 +271,8 @@ export default function FinanceDashboard() {
       setOutstanding(out.status === 'fulfilled' ? mapOutstanding(out.value) : []);
       setCashFlow(cf.status === 'fulfilled' ? mapCashFlow(cf.value) : []);
       setBudgets(bud.status === 'fulfilled' ? mapBudget(bud.value) : []);
+      setBudgetMeta(bud.status === 'fulfilled' ? mapBudgetMeta(bud.value) : {});
+      setBudgetError(bud.status !== 'fulfilled');
       setVendorPayments(vend.status === 'fulfilled' ? mapVendorPayments(vend.value) : []);
       // A failed/absent call must NOT leave a stale "incomplete" banner up, and
       // must not invent one either — default false on anything but an explicit
@@ -671,7 +688,15 @@ export default function FinanceDashboard() {
                 scope="budget rows and totals"
                 className="mb-4"
               />
-              <BudgetPanel budgets={budgets} selectedYear={selectedYear} />
+              {budgetError ? (
+                // Unreadable is not "Total Budget Rs 0" beside a saved plan.
+                <div role="alert" className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900" data-testid="budget-unreadable">
+                  Could not load the budget. Nothing has changed. Please try again.
+                  <button type="button" className="btn sm ml-3" onClick={() => loadFinanceData()}>Try again</button>
+                </div>
+              ) : (
+                <BudgetPanel budgets={budgets} selectedYear={selectedYear} {...budgetMeta} />
+              )}
             </>
           )}
           {activeTab === 'vendor-payments' && canSeeWhatWePay && (

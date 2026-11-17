@@ -240,7 +240,6 @@ from .cash_drawer_window import (  # noqa: F401
 )
 from .cash_drawer import (  # noqa: F401
     open_cash_register,
-    _shared_counted_paisa,
     close_cash_register,
     list_cash_register_sessions,
 )

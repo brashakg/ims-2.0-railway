@@ -1,0 +1,231 @@
+// Audit L3-12 -- the Day-End Report and a drawer the till already counted.
+//
+// The blind count IS the close (owner ruling 2026-08-25). When the till was
+// already counted (and locked) at Rs 1,000 and someone then typed Rs 3,000 on
+// this report, the server used to store 3,000 here while the Z-Read held 1,000.
+// The server now answers with the count that stands (backend:
+// test_audit_b12_budget_till_pettycash.py). What is proved HERE is that the
+// screen shows THAT figure and says why it is not the one that was typed --
+// a number the closer did not enter must not appear unexplained.
+
+import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+vi.mock('../../../services/api', () => ({
+  orderApi: { getOrders: vi.fn() },
+  reportsApi: { getDayEndClose: vi.fn(), createDayEndClose: vi.fn() },
+}));
+vi.mock('../../../context/AuthContext', () => ({
+  useAuth: () => ({ user: { activeStoreId: 'BV-PUN-01', roles: ['STORE_MANAGER'] } }),
+}));
+vi.mock('../../../context/ToastContext', () => ({
+  useToast: () => ({ success: vi.fn(), error: vi.fn(), info: vi.fn() }),
+}));
+vi.mock('../../../hooks/useStorePrintInfo', () => ({
+  useStorePrintInfo: () => ({ storeName: 'Better Vision', storeAddress: '' }),
+}));
+vi.mock('../../../hooks/useIsOnlineStore', () => ({ useIsOnlineStore: () => false }));
+
+import { orderApi, reportsApi } from '../../../services/api';
+import DayEndReport from '../DayEndReport';
+
+const createDayEndClose = reportsApi.createDayEndClose as unknown as ReturnType<typeof vi.fn>;
+const getDayEndClose = reportsApi.getDayEndClose as unknown as ReturnType<typeof vi.fn>;
+const getOrders = orderApi.getOrders as unknown as ReturnType<typeof vi.fn>;
+
+const NOTE = 'day-end-count-from-till';
+
+const closeRecord = (extra: Record<string, unknown>) => ({
+  store_id: 'BV-PUN-01',
+  date: '2026-11-04',
+  closing_cash: 1000,
+  system_cash: 4000,
+  variance: -3000,
+  notes: null,
+  closed_by: 'u-1',
+  closed_at: '2026-11-04T15:00:00',
+  till_link_ok: true,
+  ...extra,
+});
+
+beforeEach(() => {
+  getOrders.mockImplementation(async () => ({ orders: [] }));
+  getDayEndClose.mockImplementation(async () => ({ closed: false, close: null }));
+});
+
+async function typeAndClose(amount: string) {
+  render(<DayEndReport />);
+  await waitFor(() => expect(screen.getByText('Close Day')).toBeInTheDocument());
+  const box = document.querySelector('input[type="number"]') as HTMLInputElement | null;
+  if (box) fireEvent.change(box, { target: { value: amount } });
+  fireEvent.click(screen.getByRole('button', { name: /Confirm Day Closing/i }));
+  await waitFor(() => expect(createDayEndClose).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(screen.getByText('Day Closed')).toBeInTheDocument());
+}
+
+describe('Day-End Report - the till was already counted', () => {
+  it('shows the till count and says that count is the one recorded', async () => {
+    createDayEndClose.mockImplementation(async () => ({
+      closed: true,
+      close: closeRecord({
+        till_already_counted: true, counted_from_shared_record: true, till_count_differs: true,
+      }),
+    }));
+
+    await typeAndClose('3000');
+
+    // The count that stands, never the 3,000 that was typed.
+    expect(screen.getByText(/Counted ₹1,000/)).toBeInTheDocument();
+    expect(screen.queryByText(/Counted ₹3,000/)).not.toBeInTheDocument();
+    expect(screen.getByTestId(NOTE).textContent).toMatch(/already counted at the till/i);
+  });
+
+  it('a reload of that closed day carries the same figure and the same note', async () => {
+    getDayEndClose.mockImplementation(async () => ({
+      closed: true,
+      close: closeRecord({ till_already_counted: true, counted_from_shared_record: true }),
+    }));
+    render(<DayEndReport />);
+    await waitFor(() => expect(screen.getByText('Day Closed')).toBeInTheDocument());
+    expect(screen.getByText(/Counted ₹1,000/)).toBeInTheDocument();
+    expect(screen.getByTestId(NOTE)).toBeInTheDocument();
+  });
+
+  it('counted first, typed total disagrees with the notes: says the notes count stands, not "already counted"', async () => {
+    createDayEndClose.mockImplementation(async () => ({
+      closed: true,
+      close: closeRecord({
+        closing_cash: 500, system_cash: 3000, variance: -2500,
+        till_already_counted: false, counted_from_shared_record: true, till_count_differs: true,
+        entered_closing_cash: 3000,
+      }),
+    }));
+
+    await typeAndClose('3000');
+
+    expect(screen.getByText(/Counted ₹500/)).toBeInTheDocument();
+    const note = screen.getByTestId(NOTE).textContent ?? '';
+    expect(note).not.toMatch(/already counted at the till/i);
+    expect(note).toMatch(/notes count is the one recorded/i);
+    expect(note).toMatch(/₹3,000/);
+  });
+
+  it('before Close: a typed total that disagrees with the notes is warned and the notes are previewed', async () => {
+    render(<DayEndReport />);
+    await waitFor(() => expect(screen.getByText('Close Day')).toBeInTheDocument());
+    const box = document.querySelector('input[type="number"]') as HTMLInputElement;
+    fireEvent.change(box, { target: { value: '3000' } });
+    expect(screen.queryByTestId('day-end-typed-vs-notes')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText(/Count the notes and coins/));
+    fireEvent.change(screen.getByLabelText('note of 500 rupees, pieces'), { target: { value: '1' } });
+    const warn = screen.getByTestId('day-end-typed-vs-notes').textContent ?? '';
+    expect(warn).toMatch(/₹500/);
+    expect(warn).toMatch(/₹3,000/);
+    // Both figures still go to the server: the typed one is kept as evidence.
+    fireEvent.click(screen.getByRole('button', { name: /Confirm Day Closing/i }));
+    await waitFor(() => expect(createDayEndClose).toHaveBeenCalled());
+    const sent = createDayEndClose.mock.calls.at(-1)![0];
+    expect(sent.closing_cash).toBe(3000);
+    expect(sent.closing_count.rows).toEqual([expect.objectContaining({ face: 500, pieces: 1 })]);
+  });
+
+  it('POSITIVE CONTROL: a day this screen counted itself carries no such note', async () => {
+    createDayEndClose.mockImplementation(async () => ({
+      closed: true,
+      close: closeRecord({
+        closing_cash: 3000, system_cash: 3000, variance: 0,
+        till_already_counted: false, counted_from_shared_record: false,
+      }),
+    }));
+
+    await typeAndClose('3000');
+
+    expect(screen.getByText(/Counted ₹3,000/)).toBeInTheDocument();
+    expect(screen.queryByTestId(NOTE)).not.toBeInTheDocument();
+    expect(screen.queryByTestId('day-end-several-drawers')).not.toBeInTheDocument();
+  });
+
+  it('D53: a day with two drawers shows each drawer and no whole-day comparison', async () => {
+    // Codex's replay: drawers Rs 1,000 and Rs 3,000, system Rs 4,000. The
+    // record holds no day variance; each drawer carries its own.
+    getDayEndClose.mockImplementation(async () => ({
+      closed: true,
+      close: closeRecord({
+        closing_cash: 3000, system_cash: 4000, variance: null, till_drawers_on_day: 2,
+        variance_withheld_several_drawers: true,
+        till_drawers: [
+          { session_id: 'A', status: 'LOCKED', counted_paisa: 100000, variance_paisa: -5000 },
+          { session_id: 'B', status: 'BLIND_SUBMITTED', counted_paisa: 300000, variance_paisa: null },
+        ],
+      }),
+    }));
+    render(<DayEndReport />);
+    await waitFor(() => expect(screen.getByText('Day Closed')).toBeInTheDocument());
+    const note = screen.getByTestId('day-end-several-drawers').textContent ?? '';
+    expect(note).toMatch(/2 cash drawers/);
+    expect(note).toMatch(/not added together/);
+    // No single "Counted X vs system Y" comparison and no "Matches".
+    expect(screen.queryByText(/Counted ₹3,000 vs system/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Matches/)).not.toBeInTheDocument();
+    const list = screen.getByTestId('day-end-drawer-list').textContent ?? '';
+    expect(list).toMatch(/Drawer 1: counted ₹1,000, variance -₹50/);
+    expect(list).toMatch(/Drawer 2: counted ₹3,000, variance shown once a manager locks it/);
+  });
+
+  // Reviewer replay of 1421-R5 IN THE SAME SESSION: drawers A Rs 1,000 and
+  // B Rs 3,000, POS cash Rs 4,000. After Close the Cash Reconciliation card
+  // used to work out its own whole-day verdict from the typed box ("Matches"
+  // for 4000, "Cash short" -1,000 for 3000) above a panel saying no whole-day
+  // variance is shown. After Close the card reads the RECORD, never the box.
+  const cashDay = [{ orderStatus: 'COMPLETED', grandTotal: 4000, items: [], payments: [{ method: 'CASH', amount: 4000 }] }];
+  const severalDrawerClose = () => ({
+    closed: true,
+    close: closeRecord({
+      closing_cash: 3000, system_cash: 4000, variance: null, till_drawers_on_day: 2,
+      variance_withheld_several_drawers: true,
+      till_drawers: [
+        { session_id: 'A', status: 'LOCKED', counted_paisa: 100000, variance_paisa: 0 },
+        { session_id: 'B', status: 'BLIND_SUBMITTED', counted_paisa: 300000, variance_paisa: null },
+      ],
+    }),
+  });
+
+  it.each(['4000', '3000'])('D53 in session: typed %s, several-drawer close -> the card shows no Matches and no Cash short', async (typed) => {
+    getOrders.mockImplementation(async () => ({ orders: cashDay }));
+    createDayEndClose.mockImplementation(async () => severalDrawerClose());
+    await typeAndClose(typed);
+    expect(screen.getByTestId('day-end-several-drawers')).toBeInTheDocument();
+    expect(screen.queryByText(/Matches/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Cash short/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Excess cash/)).not.toBeInTheDocument();
+    expect(screen.getByTestId('day-end-card-variance').textContent).toMatch(/each drawer/i);
+  });
+
+  it('L3-12 in session: till locked at Rs 1,000, typed 3000 -> the card shows the stored count and its variance, not the typed one', async () => {
+    getOrders.mockImplementation(async () => ({ orders: cashDay }));
+    createDayEndClose.mockImplementation(async () => ({
+      closed: true,
+      close: closeRecord({
+        closing_cash: 1000, system_cash: 4000, variance: -3000,
+        till_already_counted: true, counted_from_shared_record: true, till_count_differs: true,
+        entered_closing_cash: 3000,
+      }),
+    }));
+    await typeAndClose('3000');
+    const box = screen.getByTestId('day-end-card-variance').textContent ?? '';
+    // 3000 typed against 4000 system would say -1,000. The record says -3,000.
+    expect(box).toMatch(/₹-3,000/);
+    expect(box).not.toMatch(/1,000/);
+    expect(screen.getByTestId('day-end-card-counted').textContent).toMatch(/₹1,000/);
+  });
+
+  it('in session, one drawer, record matches: the card says Matches from the record', async () => {
+    getOrders.mockImplementation(async () => ({ orders: cashDay }));
+    createDayEndClose.mockImplementation(async () => ({
+      closed: true,
+      close: closeRecord({ closing_cash: 4000, system_cash: 4000, variance: 0 }),
+    }));
+    await typeAndClose('4000');
+    expect(screen.getByTestId('day-end-card-variance').textContent).toMatch(/Matches/);
+  });
+});

@@ -95,6 +95,9 @@ const STATUS_CHIP: Record<ReconStatus, string> = {
   // colouring them as one is how a drawer nobody counted read as stolen cash.
   NEGATIVE_EXPECTED: 'bg-gray-100 text-gray-600',
   NOT_COUNTED: 'bg-gray-100 text-gray-600',
+  SEVERAL_DRAWERS: 'bg-gray-100 text-gray-600',
+  COMPARISON_UNAVAILABLE: 'bg-gray-100 text-gray-600',
+  COUNTED_EARLIER: 'bg-gray-100 text-gray-600',
 };
 const STATUS_ROW: Record<ReconStatus, string> = {
   BALANCED: '',
@@ -102,6 +105,9 @@ const STATUS_ROW: Record<ReconStatus, string> = {
   SHORTAGE: 'bg-red-50/40',
   NEGATIVE_EXPECTED: '',
   NOT_COUNTED: '',
+  SEVERAL_DRAWERS: '',
+  COMPARISON_UNAVAILABLE: '',
+  COUNTED_EARLIER: '',
 };
 
 const HQ_ROLES = ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'ACCOUNTANT'];
@@ -122,6 +128,7 @@ export default function CashReconciliationPage() {
   const [stores, setStores] = useState<StoreOpt[]>([]);
   const [loading, setLoading] = useState(true);
   const [data, setData] = useState<CashReconSummary | null>(null);
+  const [loadError, setLoadError] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [signingId, setSigningId] = useState<string | null>(null);
 
@@ -143,12 +150,15 @@ export default function CashReconciliationPage() {
         store_id: storeId || undefined,
       });
       setData(res);
+      setLoadError(false);
     } catch (e: unknown) {
       const msg =
         getErrorMessage(e, '') ||
         (e instanceof Error ? e.message : 'Failed to load reconciliation');
       toast.error(msg);
       setData(null);
+      // A failed read is not an empty range: the table says so until a load works.
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -213,6 +223,9 @@ export default function CashReconciliationPage() {
       'Closed At',
       'Z-Read',
       'Reviewed',
+      // D88: a close also counted on the till is not in the totals; say so
+      // in the file too, so a sum of the column does not add it twice.
+      'In Totals',
     ];
     const esc = (v: unknown) => {
       const s = v === null || v === undefined ? '' : String(v);
@@ -237,6 +250,7 @@ export default function CashReconciliationPage() {
         r.closed_at || '',
         r.zread_number || '',
         r.signoff?.reviewed ? 'YES' : 'NO',
+        r.also_counted_on_till ? 'NO - also counted on the till' : 'YES',
       ]
         .map(esc)
         .join(','),
@@ -249,6 +263,15 @@ export default function CashReconciliationPage() {
     a.download = `cash-reconciliation_${from}_to_${to}.csv`;
     a.click();
     URL.revokeObjectURL(url);
+  };
+
+  // D121: short and over apart, so one cannot cancel the other.
+  const laterDifferences = (t: CashReconSummary['totals']) => {
+    const parts = [
+      (t.later_closes_short ?? 0) > 0 ? `${inr(t.later_closes_short ?? 0)} short` : '',
+      (t.later_closes_over ?? 0) > 0 ? `${inr(t.later_closes_over ?? 0)} over` : '',
+    ].filter(Boolean);
+    return parts.length ? parts.join(' and ') : 'none';
   };
 
   const netVarianceTone =
@@ -373,6 +396,12 @@ export default function CashReconciliationPage() {
                     <Loader2 className="w-4 h-4 animate-spin inline mr-2" /> Loading…
                   </td>
                 </tr>
+              ) : loadError ? (
+                <tr>
+                  <td colSpan={11} className="px-4 py-10 text-center text-red-600" data-testid="recon-load-error">
+                    Closes could not be read - try again.
+                  </td>
+                </tr>
               ) : rows.length === 0 ? (
                 <tr>
                   <td colSpan={11} className="px-4 py-10 text-center text-gray-400">
@@ -401,6 +430,24 @@ export default function CashReconciliationPage() {
                   <td className="px-2 py-2" />
                   <td className="px-3 py-2" colSpan={3}>
                     Totals · {totals.sessions} session{totals.sessions === 1 ? '' : 's'}
+                    {(totals.also_counted_on_till ?? 0) > 0 && (
+                      <span className="block text-xs font-normal text-gray-500">
+                        {totals.also_counted_on_till} also counted on the till, not added
+                      </span>
+                    )}
+                    {(totals.later_closes ?? 0) > 0 && (
+                      <span
+                        data-testid="later-closes"
+                        className={`block text-xs font-normal ${
+                          (totals.later_closes_short ?? 0) > 0 ? 'text-red-600' : 'text-gray-500'
+                        }`}
+                      >
+                        {totals.later_closes} later Cash Register close(s) on an already counted
+                        drawer are on their own rows and not in these totals; their own
+                        differences: {laterDifferences(totals)}. The totals describe each drawer at
+                        its first count of the day.
+                      </span>
+                    )}
                   </td>
                   <td className="px-3 py-2 text-right tabular-nums">{inr(totals.opening_float)}</td>
                   <td className="px-3 py-2 text-right tabular-nums">{inr(totals.cash_sales)}</td>
@@ -457,10 +504,15 @@ function RowGroup({
         <td className="px-3 py-2 text-gray-700">{row.store_name}</td>
         <td className="px-3 py-2">
           <SourceChip source={row.source} blind={row.blind} />
+          {row.also_counted_on_till && (
+            <span className="ml-1 inline-flex items-center rounded px-2 py-0.5 text-xs font-medium bg-amber-50 text-amber-700">
+              Also counted on the till
+            </span>
+          )}
         </td>
         <td className="px-3 py-2 text-right text-gray-600">{inr(row.opening_float)}</td>
-        <td className="px-3 py-2 text-right text-gray-600">{inr(row.cash_sales)}</td>
-        <td className="px-3 py-2 text-right text-gray-700">{inr(row.expected_cash)}</td>
+        <td className="px-3 py-2 text-right text-gray-600">{row.cash_sales == null ? 'Not available' : inr(row.cash_sales)}</td>
+        <td className="px-3 py-2 text-right text-gray-700">{row.expected_cash == null ? '—' : inr(row.expected_cash)}</td>
         <td className="px-3 py-2 text-right text-gray-900 font-medium">
           {row.counted_cash == null ? (
             <span className="text-gray-500 text-xs font-normal">Not counted</span>
@@ -508,18 +560,18 @@ function RowGroup({
                 </h3>
                 <dl className="text-sm space-y-1.5">
                   <DRow label="Opening float" value={inr(row.opening_float)} />
-                  <DRow label="+ Cash sales" value={inr(row.cash_sales)} tone="good" />
-                  {row.cash_refunds > 0 && (
+                  <DRow label="+ Cash sales" value={row.cash_sales == null ? 'Not available' : inr(row.cash_sales)} tone="good" />
+                  {(row.cash_refunds ?? 0) > 0 && (
                     <DRow label="− Cash refunds" value={inr(row.cash_refunds)} tone="bad" />
                   )}
-                  {row.cash_expenses > 0 && (
+                  {(row.cash_expenses ?? 0) > 0 && (
                     <DRow label="− Cash expenses / payouts" value={inr(row.cash_expenses)} tone="bad" />
                   )}
                   {row.bank_deposit > 0 && (
                     <DRow label="− Bank deposit" value={inr(row.bank_deposit)} tone="bad" />
                   )}
                   <div className="border-t border-gray-100 pt-1.5">
-                    <DRow label="Expected in drawer" value={inr(row.expected_cash)} strong />
+                    <DRow label="Expected in drawer" value={row.expected_cash == null ? '—' : inr(row.expected_cash)} strong />
                   </div>
                   <DRow
                     label="Counted (physical)"
@@ -688,6 +740,36 @@ function VarianceChip({ status, variance }: { status: ReconStatus; variance: num
   // A withheld verdict shows WHY it is withheld -- never a number that reads
   // as a real over or short. NOT_COUNTED is a drawer nobody counted;
   // NEGATIVE_EXPECTED is an expected figure that computed below zero.
+  if (status === 'SEVERAL_DRAWERS') {
+    return (
+      <span
+        title="This day had several cash drawers, so no single variance is true for it. Each drawer's own variance is on its Z-Read row."
+        className={`inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs font-medium ${STATUS_CHIP.SEVERAL_DRAWERS}`}
+      >
+        Several drawers
+      </span>
+    );
+  }
+  if (status === 'COMPARISON_UNAVAILABLE') {
+    return (
+      <span
+        title="No comparison is made for this drawer: the day's drawers could not be read, or an earlier drawer was recorded by an older version."
+        className={`inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs font-medium ${STATUS_CHIP.COMPARISON_UNAVAILABLE}`}
+      >
+        Comparison not available
+      </span>
+    );
+  }
+  if (status === 'COUNTED_EARLIER') {
+    return (
+      <span
+        title="This register session opened on a drawer that was already counted and closed without a count of its own. The till's count stands; nothing is compared with it. Cash sales on this row are the cash taken after that count."
+        className={`inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs font-medium ${STATUS_CHIP.COUNTED_EARLIER}`}
+      >
+        Counted earlier today on the till
+      </span>
+    );
+  }
   if (status === 'NOT_COUNTED' || variance == null) {
     return (
       <span
