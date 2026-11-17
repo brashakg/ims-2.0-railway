@@ -994,6 +994,13 @@ _SAYS_BOTH = {
     "status1-irn-still-active": {"Status": "1", "data": {"Irn": "SYNTHETIC-IRN-NOT-VALID", "Status": "ACT"}},
     "status1-unknown-status-word": {"Status": "1", "status": "unsuccessful"},
     "gsp-success-uppercase-error": {"status": "success", "ERROR": {"code": 17}},
+    # the other direction (reviewers on 7750086d): a refusal beside a "yes"
+    # the refusal guard did not know -- success: true, or status in any case
+    "status0-success-true": {"Status": "0", "success": True},
+    "status0-gsp-success-titlecase": {"Status": "0", "status": "Success"},
+    "status0-int-inner-success-upper": {"Status": 0, "data": {"status": "SUCCESS"}},
+    "error-list-success-true": {"ErrorDetails": [{"ErrorCode": "9999", "ErrorMessage": "Invoice is not active"}],
+                                "success": True},
 }
 
 
@@ -1122,6 +1129,8 @@ _GEN_NOT_ISSUED = {
     "status0-alone": {"Status": 0, **_IRP_OK},
     "error-list-no-status": {"ErrorDetails": _R3B_ERR, **_IRP_OK},
     "duplicate-beside-accepted": {**_NIC_DUPLICATE, "Status": "1"},
+    "duplicate-beside-success-true": {**_NIC_DUPLICATE, "success": True},
+    "duplicate-beside-inner-success-upper": {**_NIC_DUPLICATE, "data": {"status": "SUCCESS"}},
     "irn-status-not-a-yes": {**_IRP_OK, "Status": "CNL"},
     "refusal-as-json-text": {**_IRP_OK, "info": json.dumps([{"ErrorDetails": _R3B_ERR}])},
 }

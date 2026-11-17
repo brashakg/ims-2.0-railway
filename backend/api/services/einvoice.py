@@ -942,6 +942,19 @@ def _irp_says_ok(body: Any) -> bool:
 _IRP_YES = ("1", "true", "success")
 
 
+def _irp_says_yes(node: Any) -> bool:
+    """This object says "accepted" anywhere a reader could take it so: a
+    status / success field (any letter case) holding a known yes (any case).
+    The ONE reader for a yes beside a refusal (D114: the refusal guard in
+    _irp_cancel_verdict and _irp_says_duplicate), so "success": true or
+    "Success" is never missed there. Deliberately wider than _irp_says_ok,
+    which alone decides acceptance."""
+    return isinstance(node, dict) and any(
+        str(key).lower() in ("status", "success") and val is not None and str(val).strip().lower() in _IRP_YES
+        for key, val in node.items()
+    )
+
+
 def _irp_says_no(node: Dict[str, Any], also_yes: tuple = ()) -> bool:
     """This object speaks against "accepted": a status / success field (any
     letter case) holding anything but a known yes, or anything at all under a
@@ -965,7 +978,8 @@ def _irp_cancel_verdict(body: Any, irn: str) -> Optional[str]:
     proves neither.
 
     "no"  -- NIC Status 0, or a readable error list (_irp_error_list), with no
-             "accepted" anywhere in the answer.
+             "accepted" anywhere in the answer (_irp_says_yes: success true,
+             status "Success" in any case, at any depth).
     "ok"  -- Status 1 / "success" at the top and nothing at any depth that
              speaks against it (_irp_says_no).
     None  -- everything else: not an object, empty, no Status, error data that
@@ -979,7 +993,7 @@ def _irp_cancel_verdict(body: Any, irn: str) -> Optional[str]:
     if any(str(n.get(k)).strip() != irn for n in nodes for k in ("Irn", "irn") if n.get(k) is not None):
         return None
     if str(body.get("Status")) == "0" or _irp_error_list(body):
-        return None if any(_irp_says_ok(n) for n in nodes) else "no"
+        return None if any(_irp_says_yes(n) for n in nodes) else "no"
     if _irp_says_ok(body) and not any(_irp_says_no(n) for n in nodes):
         return "ok"
     return None
@@ -993,7 +1007,7 @@ def _irp_says_duplicate(body: Any) -> bool:
     a lost answer is recovered (audit L3-21). The exact sandbox reply is not
     yet verified -- D31 blocker (6)."""
     nodes = list(_irp_nodes(body))
-    return not any(_irp_says_ok(n) for n in nodes) and any(
+    return not any(_irp_says_yes(n) for n in nodes) and any(
         str(n.get("ErrorCode") or "") == "2150" or n.get("InfCd") == "DUPIRN" for n in nodes
     )
 
