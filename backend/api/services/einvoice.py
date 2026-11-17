@@ -112,14 +112,16 @@ def _env_enabled() -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _load_creds(db, gstin: str) -> Dict[str, Any]:
+def _load_creds(db, gstin: str, strict: bool = False) -> Dict[str, Any]:
     """Load the ENABLED `integrations` config doc for type="einvoice" whose
     config.gstin is exactly `gstin`.
 
     Fails closed (audit L3-20): a blank gstin, a disabled doc or another
     GSTIN's doc is never returned -- one legal entity's IRP credentials never
-    sign another's invoice. Returns {} on any error or when no such doc
-    exists. Never raises.
+    sign another's invoice. Returns {} when no such doc exists, and on any
+    error -- unless ``strict``, where a failed read raises so generate_irn /
+    cancel_irn answer FAILED, never "no credentials, still dark" (audit 1409
+    round 3).
     """
     gstin = str(gstin or "").strip()
     if db is None or not gstin:
@@ -136,6 +138,8 @@ def _load_creds(db, gstin: str) -> Dict[str, Any]:
         return cred_crypto.decrypt_config(doc.get("config") or {})
     except Exception as exc:  # noqa: BLE001
         logger.debug("[EINVOICE] creds load failed for gstin=%s: %s", gstin, exc)
+        if strict:
+            raise
         return {}
 
 
@@ -149,14 +153,16 @@ def _seller(db, order: Dict[str, Any]):
     order's OWN shop (order.store_id), whose ``gstin`` is the GSTIN its tax
     invoice, GSTR-1 and the delivery challan issue from. ``reason`` refuses:
     a routed online order its booking held (online_fulfillment_route
-    .seller_problem, the one seller check), or a shop with no GSTIN."""
+    .seller_problem, the one seller check), or a shop with no GSTIN. A failed
+    read of the order's own shop raises: the caller answers FAILED, never
+    "no GSTIN" or "dark" (audit 1409 round 3); a leg shop that cannot be read
+    is a seller problem (seller_problem)."""
     from .online_fulfillment_route import seller_problem
 
     def find(sid):
-        try:
-            return db.get_collection("stores").find_one({"store_id": sid}, {"_id": 0}) if sid else None
-        except Exception:  # noqa: BLE001 -- unreadable: no seller GSTIN, refused below
+        if not sid or db is None:
             return None
+        return db.get_collection("stores").find_one({"store_id": sid}, {"_id": 0})
 
     store = find(order.get("store_id")) or {}
     bad = seller_problem(order, store, find)
@@ -488,38 +494,43 @@ def _parse_irp_response(body: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(body, dict):
         return {}
 
+    def text(val: Any) -> str:
+        """A string or a number as text; any other value (an object, a list,
+        true) is not something the IRP sends here and is never stored."""
+        ok = isinstance(val, (str, int, float)) and not isinstance(val, bool)
+        return str(val).strip() if ok else ""
+
+    def fields(c: Dict[str, Any], low: bool) -> Dict[str, Any]:
+        def get(name: str, alt: str) -> Any:
+            return c.get(name) or (c.get(alt) if low else None)
+
+        irn = get("Irn", "irn")
+        return {
+            # an IRN is text (64 hex characters): a number, a list or an
+            # object there is no IRN (audit 1409 round 3)
+            "irn": irn.strip() if isinstance(irn, str) else "",
+            "ack_no": text(get("AckNo", "ack_no")),
+            "ack_date": text(get("AckDt", "ack_date")),
+            "signed_qr": text(get("SignedQRCode", "signed_qr")),
+            "signed_invoice": text(get("SignedInvoice", "signed_invoice")),
+        }
+
     # Shape 1: NIC standard InfoDtls
     info_list = body.get("InfoDtls") or []
     if isinstance(info_list, list) and info_list and isinstance(info_list[0], dict):
         desc = info_list[0].get("Desc") or {}
-        if isinstance(desc, dict) and desc.get("Irn"):
-            return {
-                "irn": desc.get("Irn") or "",
-                "ack_no": str(desc.get("AckNo") or ""),
-                "ack_date": str(desc.get("AckDt") or ""),
-                "signed_qr": desc.get("SignedQRCode") or "",
-                "signed_invoice": desc.get("SignedInvoice") or "",
-            }
+        if isinstance(desc, dict):
+            found = fields(desc, low=False)
+            if found["irn"]:
+                return found
 
     # Shape 2: flattened GSP wrapper (data.Irn / Irn at root)
     for container in (body.get("data") or {}, body):
         if not isinstance(container, dict):
             continue
-        irn = container.get("Irn") or container.get("irn")
-        if irn:
-            return {
-                "irn": str(irn),
-                "ack_no": str(container.get("AckNo") or container.get("ack_no") or ""),
-                "ack_date": str(
-                    container.get("AckDt") or container.get("ack_date") or ""
-                ),
-                "signed_qr": container.get("SignedQRCode")
-                or container.get("signed_qr")
-                or "",
-                "signed_invoice": container.get("SignedInvoice")
-                or container.get("signed_invoice")
-                or "",
-            }
+        found = fields(container, low=True)
+        if found["irn"]:
+            return found
 
     return {}
 
@@ -718,7 +729,17 @@ async def generate_irn(db, order: Dict[str, Any]) -> Dict[str, Any]:
         }
 
     # ── The seller: the order's own shop, refused LOUDLY when it cannot issue
-    seller, refused = _seller(db, order)
+    # (a shop or a configuration that cannot be READ is a failure, not "dark")
+    try:
+        seller, refused = _seller(db, order)
+        gstin = str(seller.get("gstin") or "").strip()
+        cfg = {} if refused else _load_creds(db, gstin, strict=True)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[EINVOICE] order %s: shop / e-invoice config unreadable: %s", order_id, exc)
+        refused = (
+            "Not sent to the IRP -- the order's shop or its e-invoice configuration "
+            f"could not be read: {str(exc)[:300]}"
+        )
     if refused:
         return {
             "status": STATUS_FAILED,
@@ -729,9 +750,7 @@ async def generate_irn(db, order: Dict[str, Any]) -> Dict[str, Any]:
             "reason": refused,
             "einvoice_json": None,
         }
-    gstin = str(seller["gstin"]).strip()
 
-    cfg = _load_creds(db, gstin)
     if not (
         cfg.get("gsp_url")
         and cfg.get("username")
@@ -859,18 +878,43 @@ async def generate_irn(db, order: Dict[str, Any]) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _irp_cancel_ok(body: Any) -> bool:
-    """The IRP / GSP accepted the cancel (NIC Status 1, as a string or int)."""
-    return isinstance(body, dict) and (
-        str(body.get("Status")) == "1" or body.get("status") == "success"
+def _irp_error_list(body: Any) -> bool:
+    """The body carries errors in the shape the IRP sends them: one error
+    object or a list of them, each naming an ErrorCode or ErrorMessage.
+    Anything else under ErrorDetails (a number, text, a list of non-objects,
+    an object with neither field) cannot be read as an error."""
+    details = body.get("ErrorDetails") if isinstance(body, dict) else None
+    if isinstance(details, dict):
+        details = [details]
+    return (
+        isinstance(details, list)
+        and bool(details)
+        and all(isinstance(d, dict) and bool(d.get("ErrorCode") or d.get("ErrorMessage")) for d in details)
     )
 
 
+def _irp_says_ok(body: Any) -> bool:
+    """NIC Status 1 (as a string or int), or a GSP's status "success"."""
+    return isinstance(body, dict) and (str(body.get("Status")) == "1" or body.get("status") == "success")
+
+
+def _irp_cancel_ok(body: Any) -> bool:
+    """The IRP / GSP accepted the cancel and carries nothing under
+    ErrorDetails: an answer that says both proves neither (audit 1409 round
+    3)."""
+    return _irp_says_ok(body) and not body.get("ErrorDetails")
+
+
 def _irp_refused(body: Any) -> bool:
-    """The IRP / GSP said NO to this request (NIC Status 0 or an error list).
-    Any other answer -- not an object, empty, no Status -- says nothing about
-    the outcome (audit 1409-P2 round 2)."""
-    return isinstance(body, dict) and (str(body.get("Status")) == "0" or bool(body.get("ErrorDetails")))
+    """The IRP / GSP said NO to this request: NIC Status 0, or a readable
+    error list (_irp_error_list) with no "accepted" beside it. Any other
+    answer -- not an object, empty, no Status, error data that cannot be read
+    -- says nothing about the outcome (audit 1409-P2 round 2; R3-A round 3:
+    ``{"ErrorDetails": 17}`` was taken as a refusal and the request record
+    was deleted)."""
+    if not isinstance(body, dict):
+        return False
+    return str(body.get("Status")) == "0" or (_irp_error_list(body) and not _irp_says_ok(body))
 
 
 def _irp_says_already_cancelled(body: Any) -> bool:
@@ -956,18 +1000,26 @@ async def cancel_irn(
             "status": STATUS_SIMULATED,
             "reason": "DARK: IMS_EINVOICE_ENABLED is not set",
         }
-    # The IRN was issued under the order's own shop's GSTIN: its creds cancel it.
-    gstin = str(_seller(db, order)[0].get("gstin") or "")
 
-    cfg = _load_creds(db, gstin)
+    def failed(reason: str) -> Dict[str, Any]:
+        return {"status": STATUS_FAILED, "reason": reason[:400], "persisted": False}
+
+    # The IRN was issued under the order's own shop's GSTIN: its creds cancel
+    # it. A shop or a configuration that cannot be READ is a failure, not "dark".
+    try:
+        gstin = str(_seller(db, order)[0].get("gstin") or "")
+        cfg = _load_creds(db, gstin, strict=True)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[EINVOICE] cancel not sent, shop / e-invoice config unreadable: %s", exc)
+        return failed(
+            "Not sent to the IRP -- the order's shop or its e-invoice configuration "
+            f"could not be read: {exc}"
+        )
     if not cfg.get("gsp_url"):
         return {
             "status": STATUS_SIMULATED,
             "reason": f"DARK: no GSP creds for GSTIN={gstin!r}",
         }
-
-    def failed(reason: str) -> Dict[str, Any]:
-        return {"status": STATUS_FAILED, "reason": reason[:400], "persisted": False}
 
     # ── The order as STORED decides; the request is recorded before it is sent
     order_id = _order_key(order)
@@ -1027,8 +1079,9 @@ async def cancel_irn(
         note = "The IRP says this IRN is already cancelled (IMS asked earlier); recorded now."
     elif not refused:
         # An answer that neither accepts nor refuses (not an object, empty,
-        # no Status): the IRP may have cancelled it. The request stays on
-        # record, so the next press can take "already cancelled" as its answer.
+        # no Status, error data that cannot be read, "accepted" next to an
+        # error): the IRP may have cancelled it. The request stays on record,
+        # so the next press can take "already cancelled" as its answer.
         return failed(
             "The IRP's answer could not be read, so the cancel may or may not have "
             f"happened; press cancel again to confirm: {str(body)[:250]}"

@@ -873,6 +873,186 @@ async def test_1409_p2r2_a_refusal_with_odd_error_entries_is_a_refusal(monkeypat
         assert stored["einvoice_status"] == "GENERATED" and "einvoice_cancel_pending" not in stored
 
 
+# --- 1409 round 3 (Codex R3-A): error data that cannot be read is not a "no".
+# Without a Status, only the IRP's own error shape (one error object or a list
+# of them, each naming an ErrorCode or ErrorMessage) is a refusal; anything
+# else says nothing, so the request stays on record -- unknown stays unknown.
+
+_UNREADABLE_ERRORS = [
+    17, "gateway down", [17], [{}], True, {"x": 1}, ["Invalid Token"],
+    [{"ErrorCode": "1005", "ErrorMessage": "Invalid Token"}, 17],
+]
+_BOTH_RECORDS = [("orders", "order_id"), ("invoices", "invoice_id")]
+
+
+@pytest.mark.parametrize("coll,key", _BOTH_RECORDS, ids=["orders", "invoices"])
+@pytest.mark.parametrize(
+    "details", _UNREADABLE_ERRORS,
+    ids=["int", "text", "list-int", "list-empty-obj", "true", "obj-no-code", "list-text", "mixed"],
+)
+@pytest.mark.asyncio
+async def test_1409_r3a_unreadable_error_details_keep_the_request_for_the_next_press(
+    monkeypatch, cancel_db, coll, key, details
+):
+    """Codex's case: {"ErrorDetails": 17} (HTTP 200, no Status) was read as a
+    definite refusal and the request was deleted; the IRP's later "already
+    cancelled" was then refused for ever and the record stayed GENERATED."""
+    rec = _issued(cancel_db, coll, **{key: "REC-R3A"})
+    posts = _cancel_irp(monkeypatch, {"ErrorDetails": details}, _IRP_ALREADY)
+
+    first = await einvoice.cancel_irn(cancel_db, rec)
+    stored = _row(cancel_db, coll, **{key: "REC-R3A"})
+    assert (first["status"], first["persisted"]) == (einvoice.STATUS_FAILED, False)
+    assert "could not be read" in first["reason"]
+    assert stored["einvoice_status"] == "GENERATED"
+    assert stored["einvoice_cancel_pending"]["irn"] == "SYNTHETIC-IRN-NOT-VALID"
+
+    retry = await einvoice.cancel_irn(cancel_db, rec)
+    stored = _row(cancel_db, coll, **{key: "REC-R3A"})
+    assert (retry["status"], retry["persisted"]) == ("CANCELLED", True)
+    assert stored["einvoice_status"] == "CANCELLED" and "einvoice_cancel_pending" not in stored
+
+    for _ in range(2):  # Codex pressed four times: recorded once, never re-sent
+        again = await einvoice.cancel_irn(cancel_db, rec)
+        assert (again["status"], again["persisted"], len(posts)) == ("CANCELLED", True, 2)
+    assert _row(cancel_db, coll, **{key: "REC-R3A"})["einvoice_cancelled_at"] == stored["einvoice_cancelled_at"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [{"ErrorDetails": [{"ErrorCode": "1005", "ErrorMessage": "Invalid Token"}]},
+     {"ErrorDetails": {"ErrorCode": "2150", "ErrorMessage": "Duplicate IRN"}},
+     {"ErrorDetails": [{"ErrorMessage": "Cancel window is over"}]},
+     {"Status": 0}, {"Status": "0", "ErrorDetails": 17}],
+    ids=["error-list", "error-object", "message-only", "status0", "status0-odd-errors"],
+)
+@pytest.mark.asyncio
+async def test_1409_r3a_a_recognisable_refusal_still_settles_this_press(monkeypatch, cancel_db, body):
+    """The other side of the rule: a "no" the IRP is known to send clears the
+    request made in the same press, so a later "already cancelled" (someone
+    else's cancel) is not taken as the answer to it."""
+    order = _issued(cancel_db, order_id="ORD-L3")
+    posts = _cancel_irp(monkeypatch, body, _IRP_ALREADY)
+
+    for _ in range(2):
+        out = await einvoice.cancel_irn(cancel_db, order)
+        stored = _row(cancel_db, "orders", order_id="ORD-L3")
+        assert (out["status"], out["persisted"]) == (einvoice.STATUS_FAILED, False)
+        assert stored["einvoice_status"] == "GENERATED" and "einvoice_cancel_pending" not in stored
+    assert len(posts) == 2
+
+
+@pytest.mark.parametrize(
+    "both",
+    [{"Status": "1", "ErrorDetails": [{"ErrorCode": "2270", "ErrorMessage": "synthetic"}]},
+     {"Status": "1", "ErrorDetails": 17},
+     {"status": "success", "ErrorDetails": [{"ErrorCode": "2270", "ErrorMessage": "synthetic"}]}],
+    ids=["error-list", "unreadable", "gsp-success-with-errors"],
+)
+@pytest.mark.asyncio
+async def test_1409_r3a_an_answer_that_accepts_and_also_reports_an_error_is_not_a_cancel(
+    monkeypatch, cancel_db, both
+):
+    """"Accepted" next to anything under ErrorDetails proves neither outcome:
+    nothing is recorded as CANCELLED on it, the request is kept, and the next
+    clear answer settles it."""
+    order = _issued(cancel_db, order_id="ORD-L3")
+    posts = _cancel_irp(monkeypatch, both, {"Status": "1", "ErrorDetails": None})
+
+    first = await einvoice.cancel_irn(cancel_db, order)
+    stored = _row(cancel_db, "orders", order_id="ORD-L3")
+    assert (first["status"], first["persisted"]) == (einvoice.STATUS_FAILED, False)
+    assert stored["einvoice_status"] == "GENERATED" and stored["einvoice_cancel_pending"]
+
+    retry = await einvoice.cancel_irn(cancel_db, order)  # a clean accept (a null error field is no error)
+    assert retry == {"status": "CANCELLED", "reason": None, "persisted": True}
+    assert _row(cancel_db, "orders", order_id="ORD-L3")["einvoice_status"] == "CANCELLED" and len(posts) == 2
+
+
+# --- 1409 round 3, the same failure classes hunted on the paths this PR
+# touches: a read that FAILS is never answered as "dark" / "no GSTIN" (a
+# false empty), and a provider value that is not text is never stored as one.
+
+
+def _break_reads(monkeypatch, db, coll_name):
+    """Every find_one on ``coll_name`` raises, as an unreachable database does
+    (the strict fake's collection class, or pymongo's on a real Mongo)."""
+    cls = type(db.get_collection(coll_name))
+    real = cls.find_one
+
+    def find_one(self, *a, **k):
+        if self.name == coll_name:
+            raise ConnectionError("synthetic: the database is unreachable")
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(cls, "find_one", find_one)
+
+
+@pytest.mark.parametrize("unreadable", ["stores", "integrations"])
+@pytest.mark.asyncio
+async def test_1409_r3_a_shop_or_config_that_cannot_be_read_is_failed_not_dark(
+    monkeypatch, cancel_db, unreadable
+):
+    """With the gate lifted, a failed read of the shop or of the e-invoice
+    configuration answered SIMULATED "DARK: no GSP creds" on both doors (and
+    "the shop has no GSTIN" on generation): a broken read looked like a
+    feature that is simply off. Now FAILED, not sent, nothing stored."""
+    issued = _issued(cancel_db, order_id="ORD-L3")
+    fresh = _issued(cancel_db, order_id="ORD-L3-NEW")
+    fresh.pop("irn"), fresh.pop("einvoice_status")
+    cancel_db.get_collection("orders").update_one(
+        {"order_id": "ORD-L3-NEW"}, {"$unset": {"irn": "", "einvoice_status": ""}})
+    posts = _cancel_irp(monkeypatch, {"Status": "1"})
+    calls = _provider(monkeypatch, _IRP_OK)
+    _break_reads(monkeypatch, cancel_db, unreadable)
+
+    cancel = await einvoice.cancel_irn(cancel_db, issued)
+    gen = await einvoice.generate_irn(cancel_db, fresh)
+
+    for out in (cancel, gen):
+        assert out["status"] == einvoice.STATUS_FAILED, out
+        assert "could not be read" in out["reason"] and "DARK" not in out["reason"]
+    assert posts == [] and calls == []
+    monkeypatch.undo()
+    assert _row(cancel_db, "orders", order_id="ORD-L3")["einvoice_status"] == "GENERATED"
+    assert "einvoice_cancel_pending" not in _row(cancel_db, "orders", order_id="ORD-L3")
+    assert "irn" not in _row(cancel_db, "orders", order_id="ORD-L3-NEW")
+
+
+@pytest.mark.parametrize(
+    "body",
+    [{"Irn": 17}, {"Irn": ["SYNTHETIC"]}, {"Irn": {"value": "SYNTHETIC"}}, {"Irn": True}, {"Irn": "   "},
+     {"InfoDtls": [{"Desc": {"Irn": 17}}]}, {"data": {"Irn": {"x": 1}}}],
+    ids=["int", "list", "object", "true", "blank", "nested-int", "data-object"],
+)
+@pytest.mark.asyncio
+async def test_1409_r3_an_irn_that_is_not_text_is_never_stored_as_one(monkeypatch, body):
+    """A parseable answer whose IRN is a number / list / object was stored on
+    the order as its IRN with status GENERATED."""
+    order = _till_order([FRAME])
+    db = _db(order, [_creds(JH_GSTIN)])
+    _provider(monkeypatch, body)
+
+    out = await einvoice.generate_irn(db, order)
+    stored = db.get_collection("orders").find_one({"order_id": "ORD-L3"})
+    assert (out["status"], out["irn"]) == (einvoice.STATUS_FAILED, None)
+    assert "IRP returned no IRN" in out["reason"]
+    assert "irn" not in stored and "einvoice_status" not in stored
+
+
+def test_1409_r3_ack_and_qr_values_that_are_not_text_are_left_blank():
+    """The IRN is real text; an ack / QR that is an object or a list is not a
+    value to print or store (a number, as NIC sends AckNo, is kept as text)."""
+    got = einvoice._parse_irp_response(
+        {"InfoDtls": [{"Desc": {"Irn": " SYNTHETIC-IRN-NOT-VALID ", "AckNo": 112010012345,
+                                "AckDt": ["2026-11-04"], "SignedQRCode": {"qr": "x"}}}]})
+    assert got == {"irn": "SYNTHETIC-IRN-NOT-VALID", "ack_no": "112010012345", "ack_date": "",
+                   "signed_qr": "", "signed_invoice": ""}
+    assert einvoice._parse_irp_response(_IRP_OK) == {
+        "irn": "SYNTHETIC-IRN-NOT-VALID", "ack_no": "SYNTHETIC-ACK", "ack_date": "2026-11-04",
+        "signed_qr": "SYNTHETIC-QR-NOT-VALID", "signed_invoice": ""}
+
+
 # --- the same proof on a REAL MongoDB (CI's mongo:7.0; skipped on a PC without one)
 
 MONGO_HOST = os.getenv("MONGO_HOST", "127.0.0.1")
