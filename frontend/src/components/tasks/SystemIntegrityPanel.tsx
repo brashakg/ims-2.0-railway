@@ -14,26 +14,36 @@ import { useToast } from '../../context/ToastContext';
 
 const MANAGER_ROLES = ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'];
 
+type Count = number | null | 'error';
+
+function countOf(r: PromiseSettledResult<{ count?: unknown }>): Count {
+  if (r.status !== 'fulfilled') return 'error';
+  const n = Number(r.value?.count);
+  return Number.isFinite(n) ? n : 'error';
+}
+
+const shown = (c: Count): string => (c === 'error' ? 'Unavailable' : c === null ? '—' : String(c));
+
 export function SystemIntegrityPanel({ storeId }: { storeId?: string }) {
   const { user } = useAuth();
   const toast = useToast();
   const isManager = (user?.roles || []).some((r) => MANAGER_ROLES.includes(r));
 
-  const [silent, setSilent] = useState<number | null>(null);
-  const [fake, setFake] = useState<number | null>(null);
+  // A count, null while loading, or 'error' when its read failed (R45: a
+  // failed read used to show as 0 suspect tasks). Each count stands alone.
+  const [silent, setSilent] = useState<Count>(null);
+  const [fake, setFake] = useState<Count>(null);
   const [scanning, setScanning] = useState(false);
 
   const load = useCallback(async () => {
-    try {
-      const [s, f] = await Promise.all([
-        tasksApi.getSilentTasks(storeId).catch(() => ({ count: 0 })),
-        tasksApi.getFakeClosures(storeId).catch(() => ({ count: 0 })),
-      ]);
-      setSilent(s.count ?? 0);
-      setFake(f.count ?? 0);
-    } catch {
-      /* fail-soft */
-    }
+    setSilent(null);
+    setFake(null);
+    const [s, f] = await Promise.allSettled([
+      tasksApi.getSilentTasks(storeId),
+      tasksApi.getFakeClosures(storeId),
+    ]);
+    setSilent(countOf(s));
+    setFake(countOf(f));
   }, [storeId]);
 
   useEffect(() => { if (isManager) load(); }, [isManager, load]);
@@ -68,13 +78,20 @@ export function SystemIntegrityPanel({ storeId }: { storeId?: string }) {
       <div className="grid grid-cols-2 gap-3">
         <div className="rounded-lg border border-gray-200 p-3">
           <div className="text-xs text-gray-500 flex items-center gap-1"><Clock className="w-3 h-3" /> Silent (unacknowledged)</div>
-          <div className="text-2xl font-bold text-amber-600">{silent ?? '—'}</div>
+          <div className={silent === 'error' ? 'text-sm font-semibold text-gray-600 py-1.5' : 'text-2xl font-bold text-amber-600'}>{shown(silent)}</div>
         </div>
         <div className="rounded-lg border border-gray-200 p-3">
           <div className="text-xs text-gray-500 flex items-center gap-1"><AlertTriangle className="w-3 h-3" /> Fast-closed (suspect)</div>
-          <div className="text-2xl font-bold text-red-600">{fake ?? '—'}</div>
+          <div className={fake === 'error' ? 'text-sm font-semibold text-gray-600 py-1.5' : 'text-2xl font-bold text-red-600'}>{shown(fake)}</div>
         </div>
       </div>
+      {(silent === 'error' || fake === 'error') && (
+        <div className="flex items-center gap-2 mt-2 text-xs text-red-700">
+          <AlertTriangle className="w-3.5 h-3.5" />
+          <span>Could not read {silent === 'error' && fake === 'error' ? 'these counts' : 'one count'} - this is not a zero.</span>
+          <button onClick={() => load()} className="btn sm ml-auto">Retry</button>
+        </div>
+      )}
       <p className="text-[11px] text-gray-400 mt-2">
         Stock-count variances raise tasks automatically on count completion.
       </p>

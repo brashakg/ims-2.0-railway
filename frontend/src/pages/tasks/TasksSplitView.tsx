@@ -39,6 +39,7 @@ import {
 } from './tasksQueries';
 import { canSeeTeamTasks } from './taskRoles';
 import { getErrorMessage } from '../../utils/errorHandler';
+import { formatDateTimeIST } from '../../utils/datetime';
 
 const PRI_VAR: Record<PCode, string> = {
   P0: 'var(--p0)',
@@ -66,6 +67,10 @@ export function TasksSplitView({ scope, emptyLine }: TasksSplitViewProps) {
   const [status, setStatus] = useState<TaskStatus | 'ALL'>('ALL');
   const [priority, setPriority] = useState<PCode | 'ALL'>('ALL');
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // R07: only a task the person OPENED takes over a narrow screen. The
+  // automatic pick (most urgent row) fills the side panel on a wide screen
+  // but must never hide the list on a phone or tablet.
+  const [opened, setOpened] = useState(false);
 
   // THE FIX: the assignee filter is a SERVER filter. The old pages fetched the
   // store's first 50 tasks and narrowed them in the browser, so past 50 tasks
@@ -195,7 +200,7 @@ export function TasksSplitView({ scope, emptyLine }: TasksSplitViewProps) {
         </div>
       )}
 
-      <div className={'t-body' + (selected ? ' detail-open' : '')}>
+      <div className={'t-body' + (selected && opened ? ' detail-open' : '')}>
         <div className="t-list">
           <div className="pri-strip">
             {(Object.keys(PRIORITY_META) as PCode[]).map((p) => (
@@ -224,7 +229,10 @@ export function TasksSplitView({ scope, emptyLine }: TasksSplitViewProps) {
                 key={t.id || `task-${i}`}
                 task={t}
                 selected={selectedId === t.id}
-                onSelect={() => setSelectedId(t.id)}
+                onSelect={() => {
+                  setSelectedId(t.id);
+                  setOpened(true);
+                }}
               />
             ))
           )}
@@ -255,7 +263,10 @@ export function TasksSplitView({ scope, emptyLine }: TasksSplitViewProps) {
           {selected ? (
             <TaskDetailPanel
               task={selected}
-              onClose={() => setSelectedId(null)}
+              onClose={() => {
+                setSelectedId(null);
+                setOpened(false);
+              }}
               onChanged={reload}
             />
           ) : (
@@ -522,6 +533,24 @@ function TaskDetailPanel({
                   <Link to={l.to} style={{ fontSize: 12.5, textDecoration: 'underline' }}>
                     {l.label}
                   </Link>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {task.notes.length > 0 && (
+          <div className="d-sec">
+            <h4>Notes</h4>
+            <ul style={{ display: 'grid', gap: 8 }}>
+              {task.notes.map((n, i) => (
+                <li key={i} style={{ fontSize: 12.5, lineHeight: 1.5, color: 'var(--ink-2)' }}>
+                  <p style={{ whiteSpace: 'pre-line' }}>{n.text}</p>
+                  {(n.by || n.at) && (
+                    <div style={{ fontSize: 11, color: 'var(--ink-4)' }}>
+                      {[n.by, n.at ? formatDateTimeIST(n.at, '') : ''].filter(Boolean).join(' · ')}
+                    </div>
+                  )}
                 </li>
               ))}
             </ul>

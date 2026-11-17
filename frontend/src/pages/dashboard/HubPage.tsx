@@ -127,6 +127,9 @@ export default function HubPage() {
   const [priorityTasks, setPriorityTasks] = useState<PriorityTask[]>([]);
   const [sopTemplates, setSopTemplates] = useState<SopTemplate[]>([]);
   const [loadingWork, setLoadingWork] = useState(true);
+  // A read that failed is said so -- never "all caught up" / "no checklists".
+  const [tasksFailed, setTasksFailed] = useState(false);
+  const [sopsFailed, setSopsFailed] = useState(false);
 
   // "Send a file" now routes through the TASK flow (owner item #5): sharing a
   // file = creating a task assigned to someone with the file attached. The
@@ -235,6 +238,8 @@ export default function HubPage() {
       ),
     ]).then(([tRes, sRes]) => {
       if (cancelled) return;
+      setTasksFailed(tRes.status === 'rejected');
+      setSopsFailed(sRes.status === 'rejected');
       if (tRes.status === 'fulfilled') {
         const data: any = tRes.value;
         const list: any[] = Array.isArray(data) ? data : data?.tasks ?? [];
@@ -506,6 +511,8 @@ export default function HubPage() {
           </div>
           {loadingWork ? (
             <p className="hub-work-empty">Loading…</p>
+          ) : tasksFailed ? (
+            <p className="hub-work-empty" role="alert">Tasks could not be loaded. Refresh to try again.</p>
           ) : priorityTasks.length === 0 ? (
             <p className="hub-work-empty">
               <CheckCircle2 size={16} /> Nothing urgent — you're all caught up.
@@ -545,6 +552,8 @@ export default function HubPage() {
           </div>
           {loadingWork ? (
             <p className="hub-work-empty">Loading…</p>
+          ) : sopsFailed ? (
+            <p className="hub-work-empty" role="alert">Checklists could not be loaded. Refresh to try again.</p>
           ) : sopTemplates.length === 0 ? (
             <p className="hub-work-empty">No checklists assigned to this store yet.</p>
           ) : (
@@ -644,9 +653,10 @@ export default function HubPage() {
           setShareFile(null);
         }}
         onCreated={() => {
-          setShowShareFile(false);
-          setShareFile(null);
-          // Refresh the work row so the new task shows up.
+          // Refresh the work row so the new task shows up. Closing is
+          // onClose's job (the modal calls it on success): a 409 "already
+          // saved with earlier details" also refreshes, and must keep the
+          // form open with that message (D49).
           setInboxRefreshKey((k) => k + 1);
         }}
       />

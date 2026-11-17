@@ -124,7 +124,17 @@ export function TasksChecklistPage() {
         ))}
       </div>
 
-      {checklistQ.isPending ? (
+      {checklistQ.isError ? (
+        // R26: a failed read of THIS checklist is not "nothing selected".
+        <div
+          className="s-section flex items-center gap-2"
+          style={{ padding: 12, borderColor: 'var(--err-50)', background: 'var(--err-50)' }}
+        >
+          <AlertTriangle className="w-5 h-5" style={{ color: 'var(--err)' }} />
+          <span style={{ color: 'var(--err)' }}>Could not load today's ticks for this checklist.</span>
+          <button onClick={() => checklistQ.refetch()} className="btn sm ml-auto">Retry</button>
+        </div>
+      ) : checklistQ.isPending ? (
         <div className="flex items-center justify-center h-40">
           <Loader2 className="w-8 h-8 animate-spin text-bv-red-600" />
         </div>

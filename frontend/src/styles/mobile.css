@@ -234,7 +234,9 @@
     transform: translateX(100%);
     transition: transform .22s ease-out;
   }
-  body[data-task-open="1"] .t-detail {
+  /* Opened = the container class TasksSplitView sets (R07). This waited for
+     a body attribute nothing ever set, so an opened task slid off-screen. */
+  .t-body.detail-open .t-detail {
     transform: translateX(0);
   }
   .t-detail .d-back-btn {

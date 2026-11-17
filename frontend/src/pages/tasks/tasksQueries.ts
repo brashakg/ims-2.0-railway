@@ -77,12 +77,31 @@ export interface Task {
   storeId: string;
   category: string;
   completionNotes?: string;
+  /** Every note added to the task, oldest first (R05). */
+  notes: TaskNote[];
   attachment?: { file_id?: string; filename?: string; mime_type?: string } | null;
   /** In-app page where the work is done (a system task's `link`, e.g. a held
    *  receipt's items in Catalogue > Needs review). Only a same-app path. */
   link?: string;
   /** In-app pages the task points at (e.g. each flagged product's edit page). */
   links?: Array<{ label: string; to: string }>;
+}
+
+export interface TaskNote {
+  text: string;
+  by: string;
+  at?: string;
+}
+
+/** The note trail (`notes_log`); a task noted before the trail existed has
+ *  only the single `notes` text, shown unattributed rather than dropped. */
+function notesFor(t: Record<string, any>): TaskNote[] {
+  if (Array.isArray(t.notes_log) && t.notes_log.length > 0) {
+    return t.notes_log
+      .filter((n: any) => n && typeof n.text === 'string' && n.text.trim())
+      .map((n: any) => ({ text: n.text, by: n.by_name || n.by || '', at: n.at || undefined }));
+  }
+  return typeof t.notes === 'string' && t.notes.trim() ? [{ text: t.notes, by: '' }] : [];
 }
 
 // --- normalisation ---------------------------------------------------------
@@ -138,6 +157,7 @@ export function normaliseTask(t: Record<string, any>): Task {
     storeId: t.store_id || '',
     category: t.category || 'ADHOC',
     completionNotes: t.completion_notes,
+    notes: notesFor(t),
     attachment: t.attachment || null,
     link: sameAppPath(t.link),
     // Only in-app addresses (sameAppPath, the one rule): a link off the app

@@ -26,7 +26,7 @@ class TaskRepository(BaseRepository):
             data = {**data, "required_role": "CASHIER"}
         return super().create(data, raise_on_duplicate=raise_on_duplicate)
 
-    def update(self, id: str, data: Dict) -> bool:
+    def update(self, id: str, data: Dict, push: Optional[Dict] = None) -> bool:
         # All assignment doors (manual, PATCH, escalation and scheduled jobs)
         # retain the requirement when replacing a role with a named person.
         if "assigned_to" in data:
@@ -35,7 +35,17 @@ class TaskRepository(BaseRepository):
             previous = self.collection.find_one({self.id_field: id}) or {}
             if requires_cashier(previous) or requires_cashier(data):
                 data = {**data, "required_role": "CASHIER"}
-        return super().update(id, data)
+        if not push:
+            return super().update(id, data)
+        # ``push`` appends in the SAME write (e.g. the task note trail), so
+        # two notes at once can never overwrite each other.
+        try:
+            data["updated_at"] = datetime.now()
+            result = self.collection.update_one({self.id_field: id}, {"$set": data, "$push": push})
+            return result.modified_count > 0
+        except Exception as e:
+            print(f"Error updating {self.entity_name}: {e}")
+            return False
     
     def find_by_number(self, task_number: str) -> Optional[Dict]:
         return self.find_one({"task_number": task_number})

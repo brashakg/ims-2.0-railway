@@ -128,12 +128,14 @@ class BaseRepository(ABC, Generic[T]):
             print(f"Error creating {self.entity_name}: {e}")
             return None
 
-    def find_by_id(self, id: str) -> Optional[Dict]:
+    def find_by_id(self, id: str, *, strict: bool = False) -> Optional[Dict]:
         """
         Find document by ID
 
         Args:
             id: Document ID
+            strict: a read error RAISES instead of reading as "not found"
+                (the default keeps the historical fail-soft None)
 
         Returns:
             Document or None
@@ -141,15 +143,18 @@ class BaseRepository(ABC, Generic[T]):
         try:
             return self._clean_id(self.collection.find_one({self.id_field: id}))
         except Exception as e:
+            if strict:
+                raise
             print(f"Error finding {self.entity_name}: {e}")
             return None
 
-    def find_one(self, filter: Dict) -> Optional[Dict]:
+    def find_one(self, filter: Dict, *, strict: bool = False) -> Optional[Dict]:
         """
         Find single document by filter
 
         Args:
             filter: MongoDB filter
+            strict: a read error RAISES instead of reading as "no match"
 
         Returns:
             Document or None
@@ -157,6 +162,8 @@ class BaseRepository(ABC, Generic[T]):
         try:
             return self._clean_id(self.collection.find_one(filter))
         except Exception as e:
+            if strict:
+                raise
             print(f"Error finding {self.entity_name}: {e}")
             return None
 
@@ -166,6 +173,8 @@ class BaseRepository(ABC, Generic[T]):
         sort: List[tuple] = None,
         skip: int = 0,
         limit: int = 100,
+        *,
+        strict: bool = False,
     ) -> List[Dict]:
         """
         Find multiple documents
@@ -175,6 +184,7 @@ class BaseRepository(ABC, Generic[T]):
             sort: Sort specification [(field, direction)]
             skip: Number to skip
             limit: Maximum to return
+            strict: a read error RAISES instead of reading as an empty list
 
         Returns:
             List of documents
@@ -191,6 +201,8 @@ class BaseRepository(ABC, Generic[T]):
 
             return [self._clean_id(doc) for doc in cursor]
         except Exception as e:
+            if strict:
+                raise
             print(f"Error finding {self.entity_name}s: {e}")
             return []
 
@@ -262,12 +274,13 @@ class BaseRepository(ABC, Generic[T]):
         """
         return self.update(id, {"is_active": False, "deleted_at": datetime.now()})
 
-    def count(self, filter: Dict = None) -> int:
+    def count(self, filter: Dict = None, *, strict: bool = False) -> int:
         """
         Count documents
 
         Args:
             filter: MongoDB filter
+            strict: a read error RAISES instead of counting as zero
 
         Returns:
             Count
@@ -275,6 +288,8 @@ class BaseRepository(ABC, Generic[T]):
         try:
             return self.collection.count_documents(filter or {})
         except Exception as e:
+            if strict:
+                raise
             print(f"Error counting {self.entity_name}s: {e}")
             return 0
 

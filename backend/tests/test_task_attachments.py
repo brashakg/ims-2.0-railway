@@ -114,9 +114,19 @@ def _make_app(roles=None, active_store="S1", store_ids=None) -> FastAPI:
     return app
 
 
+class _Colleagues:
+    """Create checks the named assignee (R27): user-1 works at S1."""
+
+    def find_by_id(self, user_id):
+        if user_id == "user-1":
+            return {"user_id": "user-1", "roles": ["SALES_STAFF"], "store_ids": ["S1"], "is_active": True}
+        return None
+
+
 @pytest.fixture
-def fs():
+def fs(monkeypatch):
     """A fresh in-memory file store wired in for the duration of a test."""
+    monkeypatch.setattr(tasks_mod, "get_user_repository", lambda: _Colleagues())
     store = InMemoryFileStore()
     set_file_store(store)
     yield store

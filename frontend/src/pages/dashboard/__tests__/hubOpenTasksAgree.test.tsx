@@ -114,3 +114,21 @@ describe('Hub task links', () => {
     r.unmount();
   });
 });
+
+// A read that failed is said so: never "all caught up" or "no checklists"
+// when the task or checklist list could not be read (R26, Codex #1431 r2).
+describe('Hub work panels on a failed read', () => {
+  it('says the lists could not be loaded', async () => {
+    mocked(tasksApi.getTasks).mockRejectedValue({ response: { status: 503 } });
+    mocked(tasksApi.getSopTemplates).mockRejectedValue({ response: { status: 503 } });
+    render(
+      <MemoryRouter>
+        <HubPage />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText(/Tasks could not be loaded/)).toBeInTheDocument();
+    expect(screen.getByText(/Checklists could not be loaded/)).toBeInTheDocument();
+    expect(screen.queryByText(/Nothing urgent/)).toBeNull();
+    expect(screen.queryByText(/No checklists assigned/)).toBeNull();
+  });
+});
