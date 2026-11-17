@@ -17,7 +17,7 @@ vi.mock('../../../context/ToastContext', () => ({ useToast: () => toast }));
 vi.mock('../../../context/AuthContext', () => ({
   useAuth: () => ({ user: { id: 'me', roles: ['SUPERADMIN'], activeRole: 'SUPERADMIN', storeIds: ['S1'] } }),
 }));
-vi.mock('../../../components/permissions/PermissionDeltaEditor', () => ({ PermissionDeltaEditor: () => null }));
+vi.mock('../../../components/permissions/PermissionDeltaEditor', () => ({ PermissionDeltaEditor: () => null, roleStandardCap: () => null }));
 vi.mock('../../../components/permissions/UserPermissionsPanel', () => ({ UserPermissionsPanel: () => null }));
 
 const createUser = vi.fn();
@@ -29,6 +29,7 @@ vi.mock('../../../services/api', () => ({
     getUsers: () => getUsers(),
     createUser: (...a: unknown[]) => createUser(...a),
     updateUser: vi.fn(),
+    getPermissionOptions: () => Promise.resolve({}),
   },
   adminStoreApi: { getStores: () => Promise.resolve({ stores: [{ store_id: 'S1', store_name: 'Store A', store_code: 'A' }] }) },
   adminBrandApi: { getBrands: () => getBrands(), createBrand: (...a: unknown[]) => createBrand(...a) },
@@ -48,7 +49,7 @@ async function fillNewUser() {
   fireEvent.change(screen.getByLabelText('Email *'), { target: { value: 'audit@example.invalid' } });
   fireEvent.change(screen.getByLabelText('Phone'), { target: { value: '9876543210' } });
   fireEvent.change(screen.getByLabelText('Password *'), { target: { value: 'Draft@Pass9' } });
-  fireEvent.click(screen.getByRole('checkbox', { name: 'SALES STAFF' }));
+  fireEvent.click(screen.getByRole('checkbox', { name: 'Sales Staff' }));
 }
 
 function expectDraftIntact() {
@@ -57,12 +58,12 @@ function expectDraftIntact() {
   expect(screen.getByLabelText('Email *')).toHaveValue('audit@example.invalid');
   expect(screen.getByLabelText('Phone')).toHaveValue('9876543210');
   expect(screen.getByLabelText('Password *')).toHaveValue('Draft@Pass9');
-  expect(screen.getByRole('checkbox', { name: 'SALES STAFF' })).toBeChecked();
+  expect(screen.getByRole('checkbox', { name: 'Sales Staff' })).toBeChecked();
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
-  getUsers.mockResolvedValue({ users: [] });
+  getUsers.mockResolvedValue([]);
   getBrands.mockResolvedValue({ brands: [] });
 });
 

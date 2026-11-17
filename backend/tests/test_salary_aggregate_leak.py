@@ -557,7 +557,7 @@ class _FakeUserRepo:
     def search_users(self, q, store_id=None):
         return [dict(_EMPLOYEE_DOC)]
 
-    def find_many(self, query=None, skip=0, limit=100):
+    def find_many(self, query=None, sort=None, skip=0, limit=100, strict=False):  # real signature
         return [dict(_EMPLOYEE_DOC)]
 
 
