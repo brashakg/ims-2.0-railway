@@ -1841,6 +1841,47 @@ def count_by_another(
     return {"paisa": paisa, "at": at}
 
 
+def unlocked_count_variance(drawer: Optional[Dict[str, Any]]) -> tuple:
+    """``(variance_paisa, tolerance_paisa)`` of a drawer's OWN count while no
+    lock has taken its note. The variance is None once the drawer is LOCKED
+    (its lock took the note and raised the alert) or when it has none; the
+    band is the one stored with the count, None on a legacy row."""
+    d = drawer or {}
+    band = d.get("tolerance_paisa")
+    return (
+        d.get("variance_paisa") if d.get("status") != STATUS_LOCKED else None,
+        int(band) if band is not None else None,
+    )
+
+
+def count_awaiting_its_note(
+    drawer: Optional[Dict[str, Any]], own: Optional[str] = None, default_band: Any = 0
+) -> Optional[Dict[str, int]]:
+    """The drawer's own count when it is beyond the band and NOBODY has taken
+    its note yet, as ``{"variance_paisa", "tolerance_paisa"}``; else None.
+
+    Owner ruling 2026-08-25: above the band an explanation is mandatory and
+    the manager is alerted. The Blind EOD Tally and Day-End take no note at
+    the count -- the note and the alert come when the Z-Read is LOCKED, which
+    may be much later or never. A Cash Register close that starts from such a
+    count (D120) reads balanced on its own sheet, so it must take them, or a
+    real shortage closes the day with nothing said.
+
+    Not awaiting: a LOCKED drawer (its lock took both); a count made by
+    ANOTHER register session's close (judged, noted and alerted at that
+    close). ``own``: the register session asking -- its own count, refused
+    for the note, is still awaiting it. A count with no recorded door
+    (stored by the previous version) is read as awaiting."""
+    d = drawer or {}
+    if d.get("blind_count_origin") not in (None, COUNT_ORIGIN_TILL, COUNT_ORIGIN_DAY_END, own):
+        return None
+    variance, band = unlocked_count_variance(d)
+    band = default_band if band is None else band
+    if not needs_variance_note(variance, band):
+        return None
+    return {"variance_paisa": int(variance), "tolerance_paisa": int(band or 0)}
+
+
 # ---------------------------------------------------------------------------
 # Lifecycle: lock (manager reveals variance + soft-locks the Z-Read)
 # ---------------------------------------------------------------------------
