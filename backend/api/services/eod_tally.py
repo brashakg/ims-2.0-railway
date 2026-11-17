@@ -34,7 +34,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from pymongo.errors import DuplicateKeyError
@@ -506,6 +506,29 @@ def settle_followup(coll, key: Dict[str, Any], doc: Optional[Dict[str, Any]]) ->
         logger.exception("Manager follow-up could not be settled for %s", key)
 
 
+def _settle_each(coll, docs) -> None:
+    """D110: every read of till drawers pays what each still owes."""
+    for doc in docs:
+        settle_followup(coll, {"_id": doc.get("_id") or doc.get("session_id")}, doc)
+
+
+def settle_drawers(db, session_ids) -> None:
+    """D110: whoever reads or retries a record that NAMES a till drawer (a
+    Cash Register or Day-End close, the Cash Reconciliation) pays what that
+    drawer still owes -- the audit row of its open, count, lock or reopen and
+    any manager task -- not only the Blind EOD screens. One read for the lot;
+    a drawer that owes nothing is left alone. Never raises: a failed read
+    here leaves the rows owed, for the next retry or read."""
+    ids = sorted({str(i) for i in session_ids or [] if i})
+    coll = _sessions_coll(db)
+    if coll is None or not ids:
+        return
+    try:
+        _settle_each(coll, list(coll.find({"_id": {"$in": ids}})))
+    except Exception:  # noqa: BLE001
+        logger.exception("Owed till rows could not be settled for %s", ids)
+
+
 def _stored_instant(value: Any) -> Any:
     """A datetime as Mongo hands it back (millisecond precision)."""
     if isinstance(value, datetime):
@@ -681,7 +704,7 @@ def _counted_drawers(db, session: Dict[str, Any]) -> List[Dict[str, Any]]:
     if coll is None:
         raise RuntimeError("till sessions unavailable")
     own = session.get("_id") or session.get("session_id")
-    return [
+    others = [
         s
         for s in coll.find(
             {
@@ -692,6 +715,8 @@ def _counted_drawers(db, session: Dict[str, Any]) -> List[Dict[str, Any]]:
         )
         if (s.get("_id") or s.get("session_id")) != own
     ]
+    _settle_each(coll, others)
+    return others
 
 
 def _own_share(exp: Dict[str, Any], earlier: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -1461,6 +1486,7 @@ def day_drawers(db, store_id: str, session_date: str) -> Optional[List[Dict[str,
     except Exception:  # noqa: BLE001
         logger.exception("Drawer list read failed for %s %s", store_id, session_date)
         return None
+    _settle_each(coll, rows)
     out = []
     for s in sorted(rows, key=_drawer_order):
         locked = s.get("status") == STATUS_LOCKED
@@ -1551,6 +1577,9 @@ def _record_screen_close(
         ]
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": f"read_failed:{exc}"}
+    # D110: a close that reads the day's drawers pays what they still owe
+    # (a drawer already counted is not written again below).
+    _settle_each(coll, on_day)
     uncounted = [s for s in on_day if s.get("status") == STATUS_OPEN]
     existing = max(uncounted or on_day, key=_drawer_order, default=None)
     # How many drawers the day has. More than one means the count linked here
@@ -1712,6 +1741,33 @@ def shared_counted_paisa(till_link: Optional[Dict[str, Any]]) -> Optional[int]:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def counted_before(
+    till_link: Optional[Dict[str, Any]], opened_at: Any
+) -> Optional[Dict[str, Any]]:
+    """D111: the drawer's count that was ALREADY STANDING when a Cash
+    Register session opened, as ``{"paisa", "at"}``, or None.
+
+    Such a session's opening cash is that count, so it is judged on its own
+    sheet against that count plus the cash moved since it -- never the earlier
+    count against the later cash (a shortage that does not exist). A count
+    made WHILE the session was open (the other door, or this close's own
+    earlier attempt) is not this case: that count is the session's own drawer
+    moment and stands for it (L3-12). Both instants are naive UTC; a count
+    with no recorded instant cannot be placed and is not this case either."""
+    link = till_link or {}
+    at = (link.get("session") or {}).get("blind_submitted_at")
+    paisa = shared_counted_paisa(link)
+    if not link.get("already_counted") or paisa is None:
+        return None
+    if not isinstance(at, datetime) or not isinstance(opened_at, datetime):
+        return None
+    if at.tzinfo is not None:
+        at = at.astimezone(timezone.utc).replace(tzinfo=None)
+    if at > opened_at:
+        return None
+    return {"paisa": paisa, "at": at}
 
 
 # ---------------------------------------------------------------------------
@@ -2172,6 +2228,7 @@ def _own_face_ledger(db, session: Dict[str, Any]) -> Dict[str, Any]:
             ),
             key=_drawer_order,
         )
+        _settle_each(coll, day)
     except Exception:  # noqa: BLE001
         day, read_ok = [], False
 

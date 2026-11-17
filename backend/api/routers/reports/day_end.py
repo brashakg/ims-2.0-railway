@@ -132,6 +132,8 @@ async def get_day_end_close(
         # process stopped before raising it) is finished on this read: once
         # the day shows as closed the screen offers no retry.
         till_service.settle_followup(closes, {"_id": doc.get("_id")}, doc)
+        # D110: and what the till drawer it opened or counted still owes.
+        till_service.settle_drawers(db, [doc.get("till_session_id")])
     return {
         "closed": bool(doc),
         "store_id": sid,
@@ -179,6 +181,8 @@ async def create_day_end_close(
         owes the manager its task (its reply was lost: this retry is how the
         screen finds out the close was saved), the task is raised here, once."""
         till_service.settle_followup(closes, {"_id": stored.get("_id")}, stored)
+        # D110: and the audit rows the till drawer it opened or counted owes.
+        till_service.settle_drawers(db, [stored.get("till_session_id")])
         raise HTTPException(
             status_code=409,
             detail={
