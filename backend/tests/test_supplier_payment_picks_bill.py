@@ -436,6 +436,10 @@ def test_a_half_done_application_counts_for_every_reader_of_supplier_money(ap, m
     report = world.ok("/vendors/purchases-this-month", ACCT_PUNE, month="2026-10")
     # The report nets every payment against the supplier: all Rs 1,000 paid.
     assert (report["totals"]["paid"], report["totals"]["owed"]) == (1000, 0)
+    # The TDS threshold's FY cumulative reads through the same rule (decision
+    # D103(3)): the Rs 400 applied is paid money whether or not its row is
+    # stored -- it read Rs 600, low by the applied amount.
+    assert _tds_cumulative(world) == 1000
     # The over-pay guard (A12-2): a payment naming the bill, and a second
     # advance applied to it, are held to the Rs 600 really left.
     over = _pay(world, {"amount": 1000, "bill_id": "B1"})
@@ -449,7 +453,33 @@ def test_a_half_done_application_counts_for_every_reader_of_supplier_money(ap, m
     assert _recorded(memory, adv) == (1000, 1)
     assert sum(r["amount"] for r in memory.vendor_payments.find({"bill_id": "B1"})) == 1000
     assert _owed_and_advances(world) == (0, 1300)
+    assert _tds_cumulative(world) == 2300  # the stored row counts once, not twice
     assert world.ok("/vendors/V1/bills", ACCT_PUNE)["bills"][0]["status"] == "PAID"
+
+
+def _tds_cumulative(world):
+    return world.ok("/vendors/tds/threshold-status", ACCT_PUNE, vendor_id="V1", section="194C_OTHER",
+                    current_payment=0, fy_start="2026-04-01")["cumulative_fy_payments"]
+
+
+@pytest.mark.parametrize("down", ["vendor_payments", "tds_rate_config"])
+def test_the_tds_threshold_never_answers_from_a_read_that_failed(ap, monkeypatch, down):
+    """A failed read of the supplier's payments used to answer a cumulative
+    of 0 (200): "threshold not crossed". A failed read of the admin's TDS
+    rates used the built-in ones. Both are no answer now (503)."""
+    memory, world = ap
+    assert _pay(world, {"amount": 1000}).status_code == 201
+    assert _tds_cumulative(world) == 1000
+
+    def refuse(*_a, **_k):
+        raise OSError(f"{down}: read refused")
+
+    broken = SimpleNamespace(find=refuse, find_one=refuse)
+    monkeypatch.setattr(vendors_pkg, "_get_db", lambda: SimpleNamespace(
+        get_collection=lambda name: broken if name == down else memory[name]))
+    res = world.get("/vendors/tds/threshold-status", ACCT_PUNE, vendor_id="V1", section="194C_OTHER",
+                    current_payment=0, fy_start="2026-04-01")
+    assert res.status_code == 503 and "Try again" in res.json()["detail"]
 
 
 def test_a_whole_apply_whose_reply_was_lost_says_so_and_is_applied_once(ap, monkeypatch):
