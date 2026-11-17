@@ -1856,6 +1856,10 @@ def _book_historical_refund_credit_notes(
                 "status": "PENDING",
                 "historical": True,
                 "created_at": cn_date,
+                # Decision D119: a worker still running the code before
+                # this claim existed must not take it over as a dead run's
+                # (it is "old" by its historical date) -- see the marker.
+                "reprocessing_at": shopify_refund.IMPORT_CLAIM_MARKER,
             }
             if covered_by:
                 doc["covered_by_ref"] = covered_by
@@ -1888,7 +1892,8 @@ def _book_historical_refund_credit_notes(
         try:
             res = returns_coll.update_one(
                 {"return_id": f"RET-HIST-{refund_id}", "source": "shopify_order_history"},
-                {"$set": {"credit_note_issued": True, "status": "COMPLETED"}})
+                {"$set": {"credit_note_issued": True, "status": "COMPLETED"},
+                 "$unset": {"reprocessing_at": ""}})  # the D119 marker: finished
             if getattr(res, "matched_count", 1) == 0:
                 raise RuntimeError("no record to stamp")
         except Exception:  # noqa: BLE001

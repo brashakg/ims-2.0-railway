@@ -291,6 +291,37 @@ def test_a_refund_the_import_claimed_and_did_not_finish_is_reported_not_passed_o
     assert swept["refund_calls"] == []
 
 
+def test_a_claim_the_sweep_cannot_read_is_reported_not_passed_over(swept, monkeypatch):
+    """Decision D118 (PR #1423): the sweep's guard read "is it booked" (yes:
+    a returns doc carries the refund id) and then whose claim that is. When
+    that second read failed it took the answer for "not the import's" and
+    passed the refund over in silence. A read that fails is reported: the
+    order is listed failed and the next run asks again."""
+    doc = _book(swept, 30778)
+    swept["returns"].insert_one({
+        "return_id": "RET-HIST-700778", "shopify_refund_id": "700778", "order_id": doc["order_id"],
+        "source": "shopify_order_history", "status": "PENDING", "credit_note_issued": False,
+        "created_at": "2026-01-05T05:00:00+00:00"})
+    swept["state"]["orders"] = [
+        _pulled(30778, financial_status="refunded", refunds=[_refund(700778, 30778, restock_type="return")])
+    ]
+    real, reads = swept["returns"].find_one, []
+
+    def find_one(flt=None, *a, **k):
+        if flt == {"shopify_refund_id": "700778"}:
+            reads.append(1)
+            if len(reads) == 2:
+                raise ConnectionError("the returns read failed")
+        return real(flt, *a, **k)
+
+    monkeypatch.setattr(swept["returns"], "find_one", find_one)
+    p = swept["run"]().payload
+
+    assert len(reads) == 2 and swept["refund_calls"] == []
+    assert p["status_failed"] == ["30778"] and "the returns read failed" in p["failed_reasons"]["30778"]
+    assert swept["ledger"].count_documents({}) == 0 and swept["review"].count_documents({}) == 0
+
+
 def test_cancel_refund_puts_the_claimed_unit_back_once_under_auto_posture(swept, monkeypatch):
     """With the owner's opt-in (SHOPIFY_REFUND_AUTO) the sweep's refund call
     restocks the serialized unit ingest claimed -- through the refund handler's

@@ -533,7 +533,8 @@ def webhook_that_read_first_never_takes_the_claim_over(db, monkeypatch, tag="P")
     claim = db.returns.find_one({"shopify_refund_id": s.refund_id})
     assert (claim["return_id"], claim["status"], claim["credit_note_issued"]) == (
         f"RET-HIST-{s.refund_id}", "PENDING", False)
-    assert "reprocessing_at" not in claim and not books(db, s).rows
+    # not re-claimed: a takeover stamps its own time over the import's marker (D119)
+    assert claim["reprocessing_at"] == shopify_refund.IMPORT_CLAIM_MARKER and not books(db, s).rows
     row = db.shopify_refund_review.find_one({"shopify_refund_id": s.refund_id})
     assert row is not None and "order-history import" in row["note"]
     run = import_run(db, s)
@@ -684,6 +685,360 @@ def test_a_finish_stamp_that_cannot_be_written_is_reported_failed_not_complete(d
     assert claims(db, s) == [(f"RET-HIST-{s.refund_id}", "COMPLETED", True)] and len(books(db, s).rows) == 1
 
 
+# --- decision D117: the GST returns count a historical refund once --------------
+
+
+def gst_shop(db, s, shop):
+    """The order in a shop of its own that has a GST record, so the two
+    returns' figures for that shop are this order's alone."""
+    own_shop(db, s, shop)
+    db.stores.insert_one({"store_id": shop, "store_code": shop, "store_name": shop, "gstin": "27AAECT9999Q1Z3",
+                          "state": "Maharashtra", "state_code": "27"})
+    return shop
+
+
+def gst_filed(db, shop):
+    """What the two GST returns file for the shop's November credit notes:
+    GSTR-3B's own reader (tax, taxable) and GSTR-1's CDNR rows (tax each)."""
+    from api.routers.reports import gstr1, gstr3b
+
+    g = gstr3b._credit_note_totals(db, [shop], 2026, 11, 30)
+    cdnr = gstr1._compute_gstr1("2026-11", shop, db=db)["cdnr"]
+    return (round(g[0] + g[1] + g[2], 2), g[3]), [e["taxValue"] for e in cdnr]
+
+
+def gst_returns_file_a_historical_refund_once(db, monkeypatch, tag="G"):
+    """Decision D117 (F-1423-J). A finished historical refund is two stored
+    records that each carry the tax -- the ledger row SHOPIFY-HIST-REFUND-<id>
+    and the returns record RET-HIST-<id> (COMPLETED, gst_breakup) -- and
+    GSTR-3B and GSTR-1 filed both: the reversal doubled from the moment the
+    claim was stamped finished. They are one credit note, at every state of
+    the claim: nothing while no GST row is stored, once from then on."""
+    one, nothing = ((47.62, 952.38), [47.62]), ((0.0, 0.0), [])
+    # killed before the ledger row, then finished
+    s = seed(db, f"{tag}1")
+    shop = gst_shop(db, s, f"S-{tag}1")
+    killed_import(monkeypatch, db, s)
+    assert gst_filed(db, shop) == nothing
+    import_run(db, s)
+    assert claims(db, s) == [(f"RET-HIST-{s.refund_id}", "COMPLETED", True)] and len(books(db, s).rows) == 1
+    assert gst_filed(db, shop) == one
+    # killed between the ledger row and the finish stamp, then finished
+    s2 = seed(db, f"{tag}2")
+    shop2 = gst_shop(db, s2, f"S-{tag}2")
+    killed_import(monkeypatch, db, s2, "returns", "update_one",
+                  lambda flt, upd, *a: (upd.get("$set") or {}).get("credit_note_issued") is True)
+    assert claims(db, s2) == [(f"RET-HIST-{s2.refund_id}", "PENDING", False)] and gst_filed(db, shop2) == one
+    import_run(db, s2)
+    assert claims(db, s2) == [(f"RET-HIST-{s2.refund_id}", "COMPLETED", True)] and gst_filed(db, shop2) == one
+    # a whole-order note over two amount-only refunds
+    s3, _ids, _ = whole_order(db, f"{tag}3")
+    shop3 = gst_shop(db, s3, f"S-{tag}3")
+    assert import_run(db, s3)["credit_notes"] == 1
+    assert gst_filed(db, shop3) == ((95.24, 1904.76), [95.24])
+    # the pair as the importer on main stored it (rows production may hold):
+    # a ledger row with no key of its own beside a COMPLETED record
+    s4 = seed(db, f"{tag}4")
+    shop4 = gst_shop(db, s4, f"S-{tag}4")
+    gst = {"gross": 1000.0, "taxable": 952.38, "tax": 47.62, "gst_rate": 5.0}
+    db.credit_note_ledger.insert_one({
+        "entry_id": f"E-{tag}4", "customer_id": s4.order["customer_id"], "type": "ISSUED", "amount": 1000.0,
+        "delta": 0.0, "settlement": "EXTERNAL", "ref": f"SHOPIFY-HIST-REFUND-{s4.refund_id}",
+        "reason": f"Shopify refund {s4.refund_id} for order {s4.oid} (historical import)",
+        "note_number": f"CNH-{tag}4", "store_id": shop4, "created_at": REFUND_AT, "gross_refund": 1000.0,
+        "net_refund": 1000.0, "taxable": 952.38, "tax": 47.62, "gst_rate": 5.0,
+        "shopify_refund_id": s4.refund_id, "channel": "ONLINE", "historical": True})
+    db.returns.insert_one({
+        "return_id": f"RET-HIST-{s4.refund_id}", "shopify_refund_id": s4.refund_id, "order_id": s4.oid,
+        "customer_id": s4.order["customer_id"], "store_id": shop4, "return_type": "CREDIT_NOTE",
+        "source": "shopify_order_history", "channel": "ONLINE", "returned_value": 1000.0, "gross_refund": 1000.0,
+        "net_refund": 1000.0, "gst_breakup": gst, "credit_note_issued": True, "settled_externally": True,
+        "status": "COMPLETED", "historical": True, "created_at": REFUND_AT})
+    assert gst_filed(db, shop4) == one
+    return s
+
+
+def test_the_gst_returns_file_a_historical_refund_once(db, monkeypatch):
+    gst_returns_file_a_historical_refund_once(db, monkeypatch)
+
+
+# --- decision D118: a live door reads the claim strictly ------------------------
+
+
+def failing_claim_reads(monkeypatch, db, refund_id, which=None):
+    """The plain read of the refund's returns doc by its refund id fails,
+    before the read: every one, or the 1-based read numbers in `which`.
+    Works on mongomock and on native pymongo. Returns (reads seen, undo)."""
+    cls = type(db.returns)
+    real, seen = cls.find_one, []
+
+    def find_one(self, flt=None, *a, **k):
+        if self.name == "returns" and flt == {"shopify_refund_id": refund_id}:
+            seen.append(1)
+            if which is None or len(seen) in which:
+                raise ConnectionError("the returns read failed")
+        return real(self, flt, *a, **k)
+
+    monkeypatch.setattr(cls, "find_one", find_one)
+    return seen, lambda: monkeypatch.setattr(cls, "find_one", real)
+
+
+def inbox_marks_it_done(result):
+    """The webhook inbox's own rule for a handler's answer: False = the row is
+    recorded failed and retried."""
+    from agents.implementations.nexus import _raise_if_failed
+
+    try:
+        _raise_if_failed(result)
+        return True
+    except RuntimeError:
+        return False
+
+
+def webhook_whose_read_of_the_claim_fails(db, monkeypatch, tag="F"):
+    """Decision D118. The webhook's "is it booked" read answers and its next
+    read of the same returns doc -- the claim -- fails. It answered
+    "duplicate" and the inbox row was marked done. It answers an error the
+    inbox retries; nothing is written. The same for a finished refund: a
+    failed read is never "duplicate", an answered one is."""
+    monkeypatch.setenv("SHOPIFY_REFUND_AUTO", "on")
+    s = seed(db, tag, never_shipped=True)
+    killed_import(monkeypatch, db, s)
+    before = db.returns.find_one({"shopify_refund_id": s.refund_id})
+    for finished in (False, True):
+        seen, undo = failing_claim_reads(monkeypatch, db, s.refund_id, {2})
+        hook = live_webhook(db, s)
+        undo()
+        assert len(seen) == 2 and (hook["status"], hook["reason"]) == ("error", "claim_unreadable"), hook
+        assert "could not be read" in hook["error"] and not inbox_marks_it_done(hook)
+        assert db.shopify_refund_review.count_documents({"shopify_refund_id": s.refund_id}) == 0
+        if not finished:
+            assert db.returns.find_one({"shopify_refund_id": s.refund_id}) == before and not books(db, s).rows
+            assert import_run(db, s)["unfinished_claims_finished"] == 1
+    assert live_webhook(db, s)["status"] == "duplicate" and len(books(db, s).rows) == 1
+    return s
+
+
+def live_post_whose_read_of_the_claim_fails(db, monkeypatch, tag="H"):
+    """Decision D118, the other read. The webhook passed its "is it booked"
+    read before the import's claim; at its own claim the unique index refuses
+    it and the read of whose claim that is (import_holds) fails. It answered
+    "duplicate". It answers the retried error: no review row, nothing booked,
+    the import's claim untouched."""
+    from api.services import shopify_refund
+
+    monkeypatch.setenv("SHOPIFY_REFUND_AUTO", "on")
+    s = seed(db, tag, never_shipped=True)
+    real, box = shopify_refund._mark_order, {}
+
+    def mark(d, order_id):  # inside the live post, right before its claim
+        real(d, order_id)
+        if not box:
+            box["x"] = 1
+            killed_import(monkeypatch, db, s)
+            box["claim"] = db.returns.find_one({"shopify_refund_id": s.refund_id})
+            box["seen"], box["undo"] = failing_claim_reads(monkeypatch, db, s.refund_id, {1})
+
+    monkeypatch.setattr(shopify_refund, "_mark_order", mark)
+    hook = live_webhook(db, s)
+    monkeypatch.setattr(shopify_refund, "_mark_order", real)
+    box["undo"]()
+    assert len(box["seen"]) == 1 and (hook["status"], hook["reason"]) == ("error", "claim_unreadable"), hook
+    assert not inbox_marks_it_done(hook) and not books(db, s).rows
+    assert db.returns.find_one({"shopify_refund_id": s.refund_id}) == box["claim"]
+    assert db.shopify_refund_review.count_documents({"shopify_refund_id": s.refund_id}) == 0
+    assert import_run(db, s)["credit_notes"] == 1 and live_webhook(db, s)["status"] == "duplicate"
+    assert len(books(db, s).rows) == 1
+    return s
+
+
+def confirm_whose_read_of_the_claim_fails(db, monkeypatch, tag="I"):
+    """Decision D118 at the accountant's Confirm: the claim cannot be read.
+    The screen said "(duplicate)"; it says the record could not be read and
+    that nothing was booked, and the row stays open. After the import has
+    finished the refund, the same Confirm reads it posted."""
+    from fastapi import HTTPException
+
+    monkeypatch.delenv("SHOPIFY_REFUND_AUTO", raising=False)
+    s = seed(db, tag)
+    live = after_the_imports_booked_read(monkeypatch, s.refund_id, lambda: live_webhook(db, s))
+    killed_import(monkeypatch, db, s)
+    assert live[0]["status"] == "queued"
+    before = db.returns.find_one({"shopify_refund_id": s.refund_id})
+    _seen, undo = failing_claim_reads(monkeypatch, db, s.refund_id)
+    with pytest.raises(HTTPException) as refused:
+        confirm_at_the_screen(db, s)
+    undo()
+    assert refused.value.status_code == 422 and "could not be read" in refused.value.detail
+    assert "nothing was booked" in refused.value.detail and "duplicate" not in refused.value.detail
+    row = db.shopify_refund_review.find_one({"shopify_refund_id": s.refund_id})
+    assert (row["status"], row["resolved"], row["post_result"]) == ("CREDIT_FAILED", False, "error")
+    assert db.returns.find_one({"shopify_refund_id": s.refund_id}) == before and not books(db, s).rows
+    assert import_run(db, s)["credit_notes"] == 1
+    assert confirm_at_the_screen(db, s)["status"] == "POSTED" and len(books(db, s).rows) == 1
+    return s
+
+
+def test_a_webhook_whose_read_of_the_claim_fails_answers_an_error_never_duplicate(db, monkeypatch):
+    webhook_whose_read_of_the_claim_fails(db, monkeypatch)
+
+
+def test_a_live_post_whose_read_of_the_claim_fails_answers_an_error_never_duplicate(db, monkeypatch):
+    live_post_whose_read_of_the_claim_fails(db, monkeypatch)
+
+
+def test_a_confirm_whose_read_of_the_claim_fails_says_so_and_keeps_the_row_open(db, monkeypatch):
+    confirm_whose_read_of_the_claim_fails(db, monkeypatch)
+
+
+def test_a_takeover_that_cannot_be_written_is_an_error_never_duplicate(db, monkeypatch):
+    """Decision D118, the takeover itself. A live door's own claim that never
+    credited (finalized CREDIT_FAILED) is re-driven by the accountant's
+    Confirm through an atomic takeover. When that write failed, the failure
+    was swallowed and the Confirm answered "duplicate" for a refund with no
+    credit note. It answers the retried error; with the write working the
+    same Confirm takes the claim over and books the one note."""
+    monkeypatch.delenv("SHOPIFY_REFUND_AUTO", raising=False)
+    s = seed(db, "L")
+    assert live_webhook(db, s)["status"] == "queued"
+    db.returns.insert_one({
+        "return_id": "RET-L-LIVE", "shopify_refund_id": s.refund_id, "order_id": s.oid, "store_id": "S1",
+        "customer_id": s.order["customer_id"], "return_type": "CREDIT_NOTE", "source": "shopify",
+        "status": "CREDIT_FAILED", "credit_note_issued": False, "reprocessing_at": None,
+        "created_at": "2026-11-08T05:00:00+00:00"})
+    cls = type(db.returns)
+    real = cls.find_one_and_update
+
+    def refused(self, *a, **k):
+        raise ConnectionError("the takeover write failed")
+
+    monkeypatch.setattr(cls, "find_one_and_update", refused)
+    out = live_confirm(db, s)
+    monkeypatch.setattr(cls, "find_one_and_update", real)
+    assert (out["status"], out["reason"]) == ("error", "claim_unreadable"), out
+    assert not books(db, s).rows and db.returns.find_one({"return_id": "RET-L-LIVE"})["reprocessing_at"] is None
+    assert live_confirm(db, s)["status"] == "credited"
+    b = books(db, s)
+    assert [r["ref"] for r in b.rows] == ["RET-L-LIVE"] and b.tax == s.tax and len(b.docs) == 1
+
+
+# --- decision D119: a worker on the older code never takes the claim over -------
+# The two functions below are origin/main's (6e10f76b), their bodies VERBATIM
+# from backend/api/services/shopify_refund.py (docstrings left out): the code
+# a web worker that has not been rolled yet runs. They are kept here unchanged
+# so the stored shape of the import's claim is tested against the code that
+# will meet it. (The local native probe ran main's whole module unchanged,
+# handle_shopify_refund and post_from_review included.) Main's last branch --
+# a collection with no find_one_and_update -- is not a pymongo collection.
+
+
+def mains_unfinished_claim(db, refund_id):
+    try:
+        coll = db.get_collection("returns")
+        doc = coll.find_one({"shopify_refund_id": refund_id}) if coll is not None else None
+    except Exception:  # noqa: BLE001
+        return None
+    if doc and doc.get("status") == "PENDING" and doc.get("credit_note_issued") is not True:
+        return doc
+    return None
+
+
+def mains_claim_stale_refund_for_retry(returns_coll, refund_id, now):
+    from api.services.shopify_refund import _stale_cutoff, logger
+
+    stale = _stale_cutoff()
+    fou = getattr(returns_coll, "find_one_and_update", None)
+    if callable(fou):
+        base = {"shopify_refund_id": refund_id, "credit_note_issued": {"$ne": True}}
+        try:
+            for extra in (
+                # Only re-claim a FINALIZED row -- never an in-flight brand-new
+                # PENDING claim (closes the concurrent first-ever double-issue).
+                {"reprocessing_at": None, "status": {"$ne": "PENDING"}},
+                # A PENDING claim whose first run is dead.
+                {"reprocessing_at": None, "status": "PENDING", "created_at": {"$lt": stale}},
+                # A re-drive that took the claim and died.
+                {"reprocessing_at": {"$lt": stale}},
+            ):
+                won = fou({**base, **extra}, {"$set": {"reprocessing_at": now}})
+                if won is not None:
+                    return won
+            return None
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[SHOPIFY_REFUND] retry-claim find_one_and_update failed: %s", exc)
+            return None
+    # No find_one_and_update (mock / no-DB path): best-effort NON-atomic decision.
+    # Still honest -- only re-process when the row was demonstrably never credited.
+    try:
+        existing = returns_coll.find_one({"shopify_refund_id": refund_id})
+    except Exception:  # noqa: BLE001
+        existing = None
+    if (
+        existing
+        and existing.get("credit_note_issued") is not True
+        and (existing.get("status") != "PENDING" or str(existing.get("created_at") or "") < stale)
+    ):
+        return existing
+    return None
+
+
+def an_old_worker_never_takes_the_imports_claim_over(db, monkeypatch, tag="V"):
+    """Decision D119. The import's unfinished claim is dated with the
+    refund's own (old) date, which is exactly what main's takeover reads as a
+    dead run's claim: main's worker re-claimed it at once, booked a credit
+    note under RET-HIST-<id>, and the import's next run booked its own row on
+    top -- two reversals for one refund. Stored with the marker, main's
+    takeover matches no leg at any state of the claim, and main still reads
+    the refund as claimed (never as absent, which would book it afresh)."""
+    from datetime import datetime, timezone
+
+    from api.services import shopify_refund
+
+    def old_worker():
+        now = datetime.now(timezone.utc).isoformat()
+        return mains_claim_stale_refund_for_retry(db.returns, s.refund_id, now)
+
+    monkeypatch.setenv("SHOPIFY_REFUND_AUTO", "on")
+    # unfinished, no ledger row
+    s = seed(db, f"{tag}1", never_shipped=True)
+    killed_import(monkeypatch, db, s)
+    claim = db.returns.find_one({"shopify_refund_id": s.refund_id})
+    assert claim["created_at"] < shopify_refund._stale_cutoff()  # "stale" by its date
+    assert claim["reprocessing_at"] == shopify_refund.IMPORT_CLAIM_MARKER
+    assert mains_unfinished_claim(db, s.refund_id) is not None  # claimed, not absent
+    assert old_worker() is None and db.returns.find_one({"shopify_refund_id": s.refund_id}) == claim
+    assert not books(db, s).rows
+    # this version's own doors read it exactly as before: held by the import
+    assert shopify_refund.import_holds(db, s.refund_id) and live_webhook(db, s)["reason"] == "held_by_import"
+    run = import_run(db, s)
+    assert (run["unfinished_claims_found"], run["unfinished_claims_finished"], run["credit_notes"]) == (1, 1, 1)
+    done = db.returns.find_one({"shopify_refund_id": s.refund_id})
+    assert (done["status"], done["credit_note_issued"]) == ("COMPLETED", True) and "reprocessing_at" not in done
+    assert old_worker() is None and mains_unfinished_claim(db, s.refund_id) is None  # finished: a duplicate
+    assert [r["_id"] for r in books(db, s).rows] == [f"SHOPIFY-HIST-REFUND-{s.refund_id}"]
+    # unfinished with its ledger row stored (killed before the finish stamp)
+    s = seed(db, f"{tag}2", never_shipped=True)
+    killed_import(monkeypatch, db, s, "returns", "update_one",
+                  lambda flt, upd, *a: (upd.get("$set") or {}).get("credit_note_issued") is True)
+    claim = db.returns.find_one({"shopify_refund_id": s.refund_id})
+    assert old_worker() is None and db.returns.find_one({"shopify_refund_id": s.refund_id}) == claim
+    assert import_run(db, s)["unfinished_claims_finished"] == 1 and len(books(db, s).rows) == 1
+    # the claims a whole-order note stands on carry the marker too
+    s, ids, _ = whole_order(db, f"{tag}3")
+    killed_import(monkeypatch, db, s)
+    for rid in ids:
+        doc = db.returns.find_one({"shopify_refund_id": rid})
+        assert doc["reprocessing_at"] == shopify_refund.IMPORT_CLAIM_MARKER
+        assert mains_claim_stale_refund_for_retry(db.returns, rid, "2026-11-17T00:00:00+00:00") is None
+    assert import_run(db, s)["credit_notes"] == 1
+    assert all("reprocessing_at" not in d for d in db.returns.find({"order_id": s.oid}))
+    return s
+
+
+def test_an_old_worker_never_takes_the_imports_unfinished_claim_over(db, monkeypatch):
+    an_old_worker_never_takes_the_imports_claim_over(db, monkeypatch)
+
+
 # --- native Mongo, two threads -------------------------------------------------
 
 
@@ -790,3 +1145,17 @@ def test_native_a_killed_import_is_held_and_finished_by_the_next_run(native_db, 
 def test_native_whole_order_claims_are_given_up_or_finished_with_the_note(native_db, monkeypatch):
     whole_order_note_that_cannot_be_priced(native_db, monkeypatch, tag="NU")
     whole_order_note_killed_before_its_row(native_db, monkeypatch, tag="NW")
+
+
+def test_native_the_gst_returns_file_a_historical_refund_once(native_db, monkeypatch):
+    gst_returns_file_a_historical_refund_once(native_db, monkeypatch, tag="NG")
+
+
+def test_native_a_failed_read_of_the_claim_is_an_error_never_duplicate(native_db, monkeypatch):
+    webhook_whose_read_of_the_claim_fails(native_db, monkeypatch, tag="NF")
+    live_post_whose_read_of_the_claim_fails(native_db, monkeypatch, tag="NH")
+    confirm_whose_read_of_the_claim_fails(native_db, monkeypatch, tag="NI")
+
+
+def test_native_an_old_worker_never_takes_the_imports_unfinished_claim_over(native_db, monkeypatch):
+    an_old_worker_never_takes_the_imports_claim_over(native_db, monkeypatch, tag="NV")
