@@ -1089,11 +1089,13 @@ def _finance_on(rig, monkeypatch):
 class _Unreadable:
     """While open, reads of ONE collection fail, the way a dropped connection
     does: ``find`` raises ("call"), or the cursor raises on its first row
-    ("cursor"). ``find_one`` always raises."""
+    ("cursor"). ``find_one`` always raises. ``when``: only the reads whose
+    filter it accepts fail (a connection that drops between two reads)."""
 
-    def __init__(self, monkeypatch, rig, collection, how="call"):
+    def __init__(self, monkeypatch, rig, collection, how="call", when=None):
         self.ctx = monkeypatch.context()
         self.rig, self.collection, self.how = rig, collection, how
+        self.when = when or (lambda flt: True)
         self.reads = 0
 
     def __enter__(self):
@@ -1104,8 +1106,11 @@ class _Unreadable:
         def boom():
             raise pymongo.errors.AutoReconnect(f"{outer.collection} read failed")
 
+        def hit(coll, a, k):
+            return coll.name == outer.collection and outer.when(a[0] if a else k.get("filter"))
+
         def find(self, *a, **k):
-            if self.name != outer.collection:
+            if not hit(self, a, k):
                 return original_find(self, *a, **k)
             outer.reads += 1
             if outer.how == "call":
@@ -1118,7 +1123,7 @@ class _Unreadable:
             return cursor()
 
         def find_one(self, *a, **k):
-            if self.name != outer.collection:
+            if not hit(self, a, k):
                 return original_one(self, *a, **k)
             outer.reads += 1
             boom()
@@ -1329,6 +1334,134 @@ def test_r4a_company_filter_over_an_unreadable_shop_list_answers_503_on_every_re
     again = read(ENTITY)
     assert again.status_code == 200 and again.content != none.content
     assert read("ENT-B09-NO-SHOP").status_code == 200  # no shop: the plain empty report
+
+
+# ---------------------------------------------------------------------------
+# D106 -- a Tally door never decides a sale's GST head (IGST, or CGST + SGST)
+# from records it could not read
+# ---------------------------------------------------------------------------
+
+INTER = "ORD-B09-INTER"
+B2B_BOOK = "/api/v1/finance/b2b-invoices"
+
+
+def _inter_state_sale(rig, monkeypatch):
+    """A Maharashtra shop's delivered sale to a Jharkhand trade buyer, carrying
+    no ``interstate`` / ``place_of_supply`` / ``customer_gstin`` stamp of its
+    own (an order from before those stamps existed): its GST head is IGST, and
+    it is decided from the shop's and the customer's records."""
+    from api.routers.finance import tally
+
+    monkeypatch.setattr(tally, "_get_db", lambda: rig.db)
+    rig.db.get_collection("stores").insert_one(
+        {"store_id": STORE, "entity_id": ENTITY, "state": "Maharashtra", "state_code": "27"})
+    rig.db.get_collection("customers").insert_one(
+        {"customer_id": "CUST-B09-JH", "name": "ZZ Jharkhand Buyer", "customer_type": "B2B",
+         "gstin": "20ABCDE1234F1Z5", "state": "Jharkhand"})
+    rig.db.get_collection("orders").insert_one(
+        {"order_id": INTER, "order_number": INTER, "store_id": STORE,
+         "customer_id": "CUST-B09-JH", "customer_name": "ZZ Jharkhand Buyer", "status": "DELIVERED",
+         "payment_status": "PAID", "created_at": datetime(YEAR, MONTH, 10, 12),
+         "subtotal": 1000.0, "tax_amount": 180.0, "grand_total": 1180.0,
+         "items": [{"product_id": "P-B09-INTER", "category": "FRAME", "item_type": "FRAME",
+                    "quantity": 1, "unit_price": 1000.0, "line_total": 1000.0, "total": 1000.0,
+                    "gst_rate": 18, "taxable_value": 1000.0, "tax_amount": 180.0}],
+         "payments": [{"method": "CASH", "amount": 1180.0}]})
+
+
+def _tally_doors(c):
+    jv = "/api/v1/finance/tally/sales-jv?"
+    return {
+        "sales JV, every shop in reach": lambda: c.get(jv + RANGE),
+        "sales JV, one shop": lambda: c.get(jv + f"store_id={STORE}&{RANGE}"),
+        "B2B invoice book": lambda: c.get(f"{B2B_BOOK}?{RANGE}"),
+        "one B2B invoice as Tally XML": lambda: c.get(f"{B2B_BOOK}/{INTER}/tally-xml"),
+        "B2B bulk export": lambda: c.post(
+            f"{B2B_BOOK}/export", json={"order_ids": [INTER], "mark_in_tally": True}),
+    }
+
+
+def _tally_mark(rig):
+    return rig.db.get_collection("orders").find_one({"order_id": INTER}).get("tally_status")
+
+
+def _every_door_books_igst(doors):
+    for name, call in doors.items():
+        reply = call()
+        assert reply.status_code == 200, (name, reply.text)
+        if name == "B2B invoice book":
+            (row,) = reply.json()["invoices"]
+            assert (row["interstate"], row["igst"], row["cgst"], row["sgst"]) == (True, 180.0, 0.0, 0.0)
+            assert row["needs_eway"] is True
+        else:
+            assert "IGST Output" in reply.text and "CGST Output" not in reply.text, name
+
+
+@pytest.mark.parametrize("user", [ADMIN, ACCOUNTANT], ids=["admin", "accountant-own-shop"])
+@pytest.mark.parametrize("unreadable", ["stores", "customers", "orders", "the sale read"])
+def test_d106_tally_doors_refuse_when_a_record_the_gst_head_needs_cannot_be_read(
+    rig, monkeypatch, unreadable, user
+):
+    """Decision D106. The Tally sales JV, the B2B invoice book, the single
+    invoice XML and the bulk export read the shops' states leniently: with
+    the shop list unreadable the supplier state was unknown, so an INTER-state
+    sale was written with CGST + SGST ledgers on a 200 (the book also said
+    "no e-way bill needed"), and the bulk export marked that file as handed to
+    Tally. An unreadable customer list did the same on the sales JV and
+    emptied the B2B book; a sale read that failed after the first read left
+    the book empty too. Every one now answers 503 and marks nothing."""
+    _inter_state_sale(rig, monkeypatch)
+    doors = _tally_doors(rig.client(user))
+    orders = rig.db.get_collection("orders")
+    collection, when = unreadable, None
+    if unreadable == "the sale read":  # the connection drops after real_sale_match's own read
+        collection, when = "orders", lambda flt: "advance_refund_status" in (flt or {})
+
+    _every_door_books_igst(doors)
+    assert _tally_mark(rig) == "IN_TALLY"
+    orders.update_one({"order_id": INTER}, {"$unset": {"tally_status": "", "tally_in_tally_at": ""}})
+    for how in ("call", "cursor"):
+        with _Unreadable(monkeypatch, rig, collection, how, when=when) as failing:
+            for name, call in doors.items():
+                reply = call()
+                # Never a file or a list worked out without that record.
+                assert reply.status_code == 503, (name, how, reply.status_code, reply.text)
+                assert "could not be reached" in _detail(reply), (name, reply.text)
+                assert "Output" not in reply.text and "invoices" not in reply.text
+            assert failing.reads >= len(doors)
+        assert _tally_mark(rig) is None  # nothing was marked as handed to Tally
+    _every_door_books_igst(doors)  # the identical requests once the read works
+    assert _tally_mark(rig) == "IN_TALLY"
+
+
+def test_d106_tally_marks_refuse_when_the_orders_cannot_be_read(rig, monkeypatch):
+    """The three Tally worklist writes first read which of the chosen orders
+    the caller may touch. With that read failing they answered "marked 0
+    invoices" on a 200 (mark exported) or "B2B invoice not found" (mark done,
+    attention note). They answer 503 and store nothing."""
+    _inter_state_sale(rig, monkeypatch)
+    c = rig.client()
+    writes = {
+        "mark exported": lambda: c.post(f"{B2B_BOOK}/mark-exported", json={"order_ids": [INTER]}),
+        "mark done": lambda: c.post(f"{B2B_BOOK}/{INTER}/mark-done"),
+        "attention note": lambda: c.post(f"{B2B_BOOK}/{INTER}/attention-note", json={"note": "check"}),
+    }
+    stored = rig.db.get_collection("orders").find_one({"order_id": INTER})
+    for how in ("call", "cursor"):
+        with _Unreadable(monkeypatch, rig, "orders", how):
+            for name, call in writes.items():
+                reply = call()
+                assert reply.status_code == 503, (name, how, reply.status_code, reply.text)
+                assert "ok" not in reply.json()
+        assert rig.db.get_collection("orders").find_one({"order_id": INTER}) == stored
+    for name, call in writes.items():
+        assert call().status_code == 200, name
+    after = rig.db.get_collection("orders").find_one({"order_id": INTER})
+    assert (after["exported_to_tally"], after["tally_status"], after["attention_note"]) == (
+        True, "DONE", "check")
+    # An order that is not there (or not the caller's) is still "not found".
+    assert c.post(f"{B2B_BOOK}/NO-SUCH-ORDER/mark-done").status_code == 404
+    assert c.get(f"{B2B_BOOK}/NO-SUCH-ORDER/tally-xml").status_code == 404
 
 
 @pytest.mark.parametrize("collection", ["payroll", "payslips"])

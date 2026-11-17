@@ -519,11 +519,25 @@ def _company_shop_ids(db, entity_id) -> list:
     company matched no shop and the report answered 200 with nothing in it
     (revenue 0, a Tally file with no voucher) -- it answers 503 instead. A
     company that has no shop still gets [] (its plain empty report)."""
-    try:
-        s2e, _ = _store_maps(db, strict=True)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=503, detail=RECORDS_UNREACHABLE) from exc
+    s2e, _ = _read_or_503(_store_maps, db, strict=True)
     return [sid for sid, eid in s2e.items() if eid == entity_id]
+
+
+def _read_or_503(read, *args, **kwargs):
+    """Run ONE read a report cannot be worked out without; a failure answers
+    503 (RECORDS_UNREACHABLE), never the report built on what an empty read
+    looks like. Decision D106: the Tally sales JV and the B2B invoice book
+    decide IGST versus CGST + SGST from the shop's and the customer's state,
+    so an unreadable shop list wrote an inter-state sale with CGST + SGST
+    ledgers on a 200. Pass the strict form of a reader that has one
+    (``_read_or_503(_store_state_map, db, strict=True)``)."""
+    try:
+        return read(*args, **kwargs)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("report read failed (%s): %s", getattr(read, "__name__", "read"), exc)
+        raise HTTPException(status_code=503, detail=RECORDS_UNREACHABLE) from exc
 
 
 def _store_state_map(db, *, strict=False) -> dict:

@@ -21,6 +21,7 @@ from ._shared import (
     _order_is_interstate,
     _require_org_finance,
     _company_shop_ids,
+    _read_or_503,
     _store_state_map,
     logger,
     router,
@@ -67,31 +68,29 @@ _VALID_TALLY_STATUS = {"PENDING", "IN_TALLY", "DONE"}
 def _b2b_customer_map(db) -> dict:
     """customer_id -> {gstin, customer_type, state, name} for B2B classification.
 
-    Fail-soft: any DB error yields an empty map (callers then treat every order
-    as non-B2B, returning an empty list rather than a 500)."""
+    A failed read RAISES (callers read it through _read_or_503 -> 503): an
+    empty map read every order as non-B2B, so the B2B invoice book answered
+    200 with no invoice in it."""
     out: dict = {}
-    try:
-        for c in db.get_collection("customers").find(
-            {},
-            {
-                "_id": 0,
-                "customer_id": 1,
-                "gstin": 1,
-                "customer_type": 1,
-                "state": 1,
-                "name": 1,
-            },
-        ):
-            cid = c.get("customer_id")
-            if cid:
-                out[cid] = {
-                    "gstin": str(c.get("gstin") or "").strip(),
-                    "customer_type": str(c.get("customer_type") or "").strip().upper(),
-                    "state": str(c.get("state") or ""),
-                    "name": c.get("name") or "",
-                }
-    except Exception:  # noqa: BLE001
-        pass
+    for c in db.get_collection("customers").find(
+        {},
+        {
+            "_id": 0,
+            "customer_id": 1,
+            "gstin": 1,
+            "customer_type": 1,
+            "state": 1,
+            "name": 1,
+        },
+    ):
+        cid = c.get("customer_id")
+        if cid:
+            out[cid] = {
+                "gstin": str(c.get("gstin") or "").strip(),
+                "customer_type": str(c.get("customer_type") or "").strip().upper(),
+                "state": str(c.get("state") or ""),
+                "name": c.get("name") or "",
+            }
     return out
 
 
@@ -228,6 +227,26 @@ def _apply_sale_range(match: dict, from_date, to_date) -> dict:
     return match
 
 
+def _b2b_records(db):
+    """(B2B customer map, shop state map) of the B2B invoice doors, both read
+    strictly (decision D106): the shop's state decides IGST versus CGST + SGST
+    and the e-way hint, the customer record decides whether an order is a B2B
+    invoice at all. Unreadable answers 503, never a wrong ledger or a short
+    list."""
+    return (
+        _read_or_503(_b2b_customer_map, db),
+        _read_or_503(_store_state_map, db, strict=True),
+    )
+
+
+def _sale_orders(db, match: dict) -> List[dict]:
+    """The filed sales matching ``match`` (_filed_orders), read strictly: a
+    failed orders read answers 503, never an empty book or an empty file."""
+    return _read_or_503(
+        lambda: _filed_orders(db, db.get_collection("orders").find(match, {"_id": 0}))
+    )
+
+
 def _b2b_invoices(
     db,
     *,
@@ -240,14 +259,14 @@ def _b2b_invoices(
     """Shared B2B-invoice list builder used by BOTH the export console and the
     worklist. Returns rows for every real (non-DRAFT/CANCELLED) order whose
     customer is B2B, with the per-invoice GST split + needs_eway + tally_status
-    + age/overdue reminder fields. Fail-soft: a DB error yields []."""
+    + age/overdue reminder fields. A record it cannot read answers 503
+    (_b2b_records, _sale_orders), never a short or empty list."""
     from ...routers.orders import _build_invoice_gst_split  # reuse GST math
     from ...utils.online_gst import order_place_of_supply
 
-    cust_map = _b2b_customer_map(db)
-    store_state = _store_state_map(db)
+    cust_map, store_state = _b2b_records(db)
 
-    match: dict = {**real_sale_match(db)}
+    match: dict = {**_read_or_503(real_sale_match, db)}
     store_ids = None
     if store_id:
         store_ids = [store_id]
@@ -257,10 +276,7 @@ def _b2b_invoices(
         match["store_id"] = {"$in": store_ids}
     _apply_sale_range(match, from_date, to_date)
 
-    try:
-        orders = _filed_orders(db, db.get_collection("orders").find(match, {"_id": 0}))
-    except Exception:  # noqa: BLE001
-        return []
+    orders = _sale_orders(db, match)
 
     now = now_ist_naive()
     rows: List[dict] = []
@@ -340,22 +356,16 @@ class B2BAttentionNoteRequest(BaseModel):
 
 def _b2b_fetch_orders(db, order_ids: List[str]) -> List[dict]:
     """Fetch the selected B2B orders (real status only), preserving the
-    per-invoice GST/IGST split the day-voucher builder needs. Fail-soft []."""
-    cust_map = _b2b_customer_map(db)
-    store_state = _store_state_map(db)
-    try:
-        from ...routers.orders import _build_invoice_gst_split
-        from ...utils.online_gst import order_place_of_supply
+    per-invoice GST/IGST split the day-voucher builder needs. A record it
+    cannot read answers 503 (_b2b_records, _sale_orders), never "not found"
+    or a voucher with the wrong tax ledgers."""
+    from ...routers.orders import _build_invoice_gst_split
+    from ...utils.online_gst import order_place_of_supply
 
-        docs = _filed_orders(
-            db,
-            db.get_collection("orders").find(
-                _with_order_ids(real_sale_match(db), order_ids),
-                {"_id": 0},
-            ),
-        )
-    except Exception:  # noqa: BLE001
-        return []
+    cust_map, store_state = _b2b_records(db)
+    docs = _sale_orders(
+        db, _with_order_ids(_read_or_503(real_sale_match, db), order_ids)
+    )
 
     out: List[dict] = []
     for o in docs:
@@ -403,15 +413,18 @@ def _b2b_fetch_orders(db, order_ids: List[str]) -> List[dict]:
 def _ids_in_reach(db, order_ids, current_user: dict) -> List[str]:
     """The orders among `order_ids` the caller may export or mark: an admin's
     every shop's, an accountant's his own shops' only (owner 2026-10-18). An
-    order of another shop reads as one that does not exist. Fail-soft []."""
-    try:
+    order of another shop reads as one that does not exist. A failed read
+    answers 503: it used to read as "none of them", so mark-exported answered
+    "marked 0" on a 200 and the other doors "B2B invoice not found"."""
+
+    def read():
         docs = db.get_collection("orders").find(
             {"order_id": {"$in": list(order_ids or [])}},
             {"_id": 0, "order_id": 1, "store_id": 1},
         )
         return [d["order_id"] for d in filter_docs_by_store(list(docs), current_user)]
-    except Exception:  # noqa: BLE001
-        return []
+
+    return _read_or_503(read)
 
 
 @router.get("/b2b-invoices")
@@ -655,7 +668,7 @@ async def get_tally_sales_jv(
     # Never export DRAFT/CANCELLED orders to Tally -- they aren't real sales
     # vouchers. created_at is a BSON datetime so the range is built as datetimes
     # (a 'YYYY-MM-DD' string bound never matched -> empty export).
-    match: dict = {**real_sale_match(db)}
+    match: dict = {**_read_or_503(real_sale_match, db)}
     store_ids = None
     if store_id:
         store_ids = [store_id]
@@ -665,13 +678,16 @@ async def get_tally_sales_jv(
         match["store_id"] = {"$in": store_ids}
     _apply_sale_range(match, from_date, to_date)
 
-    # A routed online order held on its seller (GSTIN) check is no sale of
-    # this GSTIN until Re-map re-routes it: the one question GSTR-1/3B ask.
-    orders = _filed_orders(db, db.get_collection("orders").find(match, {"_id": 0}))
     # Determine inter-state vs intra-state for each order so the Tally voucher
     # uses the correct output ledger (IGST for inter-state, CGST+SGST for intra).
-    _store_states = _store_state_map(db)
-    _customer_states = _customer_state_map(db)
+    # Both state maps are read strictly (decision D106): with either unreadable
+    # a state was unknown, which reads as intra-state, so an inter-state sale
+    # was exported with CGST + SGST ledgers on a 200. Unreadable answers 503.
+    _store_states = _read_or_503(_store_state_map, db, strict=True)
+    _customer_states = _read_or_503(_customer_state_map, db, strict=True)
+    # A routed online order held on its seller (GSTIN) check is no sale of
+    # this GSTIN until Re-map re-routes it: the one question GSTR-1/3B ask.
+    orders = _sale_orders(db, match)
     for o in orders:
         tax = float(o.get("tax_amount") or o.get("tax_total") or 0)
         grand = float(o.get("grand_total") or o.get("total") or 0)
