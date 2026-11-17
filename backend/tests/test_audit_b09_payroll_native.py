@@ -1222,10 +1222,11 @@ def test_r4a_by_store_company_filter_applies_to_payroll_and_an_unreadable_shop_l
     assert table("ENT-B09-OTHER") == [("ST-B09-OTHER", 11000.0)]
     assert table("ENT-B09-NO-SHOP") == []
     with _Unreadable(monkeypatch, rig, "stores"):
-        for path in (BY_STORE, BY_STORE + f"&entity_id={ENTITY}"):
-            reply = c.get(path)
-            assert reply.status_code >= 500, (path, reply.status_code, reply.text)
-            assert "stores" not in reply.text
+        reply = c.get(BY_STORE + f"&entity_id={ENTITY}")
+        assert reply.status_code >= 500, reply.text  # was 200 with the wrong shops
+        assert "stores" not in reply.text
+        # Without the filter the shop list only labels the rows: figures stay.
+        assert table() == [(STORE, cost), ("ST-B09-OTHER", 11000.0)]
 
 
 @pytest.mark.parametrize("collection", ["payroll", "payslips"])

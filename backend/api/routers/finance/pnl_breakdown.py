@@ -62,9 +62,10 @@ async def get_pnl_by_store(
     if not is_salary_admin(current_user):
         raise HTTPException(status_code=403, detail=SALARY_RESTRICTED_MESSAGE)
     db = _get_db()
-    # strict: an unreadable shop list must not read as "this company has no
-    # shop" (an empty table) -- the request fails instead.
-    s2e, _ = _store_maps(db, strict=True)
+    # With a company filter the shop list decides which shops are in the
+    # table, so it is read strictly: unreadable must not read as "this company
+    # has no shop" (an empty table) -- the request fails instead.
+    s2e, _ = _store_maps(db, strict=True) if entity_id else _store_maps(db)
     store_ids = (
         [sid for sid, eid in s2e.items() if eid == entity_id] if entity_id else None
     )

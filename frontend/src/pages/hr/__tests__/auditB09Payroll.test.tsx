@@ -325,4 +325,16 @@ describe('L3-23 My Work: a payslip still in draft is "not ready yet", with no fi
     expect(await screen.findByText('No payslip generated yet.')).toBeInTheDocument();
     expect(screen.queryByText(/not ready yet/)).not.toBeInTheDocument();
   });
+
+  // Codex round 4 (R4-A class): the server answers 503 when the payslip
+  // cannot be read. The card used to turn any failure into "No payslip
+  // generated yet." while an approved payslip was on file.
+  it('the payslip could not be read: the card says so, never "No payslip generated yet."', async () => {
+    currentUser = { id: 'emp-A', name: 'Sunil Kumar', roles: ['SALES_STAFF'], activeStoreId: 'ZZ-STORE' };
+    getMyPayslip.mockRejectedValue(new Error('Your payslip could not be loaded just now. Try again.'));
+    render(<EmployeeSelfService />);
+    expect(await screen.findByText(/Your payslip could not be loaded just now/)).toBeInTheDocument();
+    expect(screen.queryByText('No payslip generated yet.')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /View \/ Download/ })).not.toBeInTheDocument();
+  });
 });

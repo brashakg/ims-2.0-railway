@@ -355,7 +355,7 @@ def test_every_reader_keeps_the_variance_to_its_shop_and_dates(monkeypatch):
     pnl = asyncio.run(pnl_mod.get_pnl(store_id="S1", from_date=f, to_date=t, current_user=SU))
     assert pnl["cogs_variance"] == 60.0
 
-    monkeypatch.setattr(pb, "_store_maps", lambda _db: ({"S1": "E1", "S2": "E2"}, {}))
+    monkeypatch.setattr(pb, "_store_maps", lambda _db, **_k: ({"S1": "E1", "S2": "E2"}, {}))
     monkeypatch.setattr(pb, "_payroll_by_store", lambda *_a, **_k: {})
     monkeypatch.setattr(pb, "_store_name_map", lambda _db: {"S1": "Shop", "S2": "Two"})
     stores = {r["store_id"]: r for r in asyncio.run(pb.get_pnl_by_store(

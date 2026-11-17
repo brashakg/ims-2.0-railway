@@ -102,6 +102,8 @@ export function EmployeeSelfService() {
   const [payslip, setPayslip] = useState<MyPayslip | null>(null);
   // A newer month whose payroll is still a draft: said plainly, no figures.
   const [payslipNotReady, setPayslipNotReady] = useState<{ month: number; year: number } | null>(null);
+  // The payslip read failed: said so, never "No payslip generated yet".
+  const [payslipFailed, setPayslipFailed] = useState(false);
   const [leaves, setLeaves] = useState<MyLeaves | null>(null);
   const [loadingMonth, setLoadingMonth] = useState(false);
   const [loadingStatic, setLoadingStatic] = useState(true);
@@ -126,9 +128,10 @@ export function EmployeeSelfService() {
     setLoadingStatic(true);
     try {
       const [slip, lv] = await Promise.all([
-        hrApi.getMyPayslip().catch(() => ({ payslip: null, not_ready: undefined })),
+        hrApi.getMyPayslip().catch(() => null),
         hrApi.getMyLeaves({ year: now.getFullYear() }).catch(() => null),
       ]);
+      setPayslipFailed(slip === null);
       setPayslip(slip?.payslip ?? null);
       setPayslipNotReady(slip?.not_ready ?? null);
       setLeaves(lv);
@@ -388,6 +391,10 @@ export function EmployeeSelfService() {
                 <Download className="w-4 h-4" /> View / Download
               </button>
             </div>
+          ) : payslipFailed ? (
+            <p role="alert" className="text-sm text-red-700">
+              Your payslip could not be loaded just now. Reload the page to try again.
+            </p>
           ) : notReadyNote || (
             <p className="text-sm text-gray-400">No payslip generated yet.</p>
           )}

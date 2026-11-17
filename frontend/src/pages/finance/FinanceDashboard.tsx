@@ -195,6 +195,11 @@ export default function FinanceDashboard() {
   // The table's own refusal (503 unreadable, 409 a registration to correct),
   // shown in its place -- never an empty table that reads as "no GST".
   const [gstReconError, setGstReconError] = useState<string | null>(null);
+  // The same for the P&L and the P&L-by-store table (the server answers 503
+  // when the salary cost cannot be read): the refusal is shown in their
+  // place, never dashes or a missing table that read as "nothing to report".
+  const [pnlError, setPnlError] = useState<string | null>(null);
+  const [pnlByStoreError, setPnlByStoreError] = useState<string | null>(null);
   // Bills the return cannot count that need fixing (undated, or a supplier
   // with no valid GSTIN and credit left on) -- a warning, never a refusal.
   const [gstReconWarnings, setGstReconWarnings] = useState<string[]>([]);
@@ -250,6 +255,9 @@ export default function FinanceDashboard() {
 
       setRevenueData(rev.status === 'fulfilled' ? mapRevenue(rev.value) : []);
       setPLStatement(pnl.status === 'fulfilled' ? mapPnl(pnl.value, dateFrom, dateTo) : null);
+      setPnlError(pnl.status === 'rejected'
+        ? (pnl.reason instanceof Error ? pnl.reason.message : 'The profit and loss could not be loaded. Please retry.')
+        : null);
       setGSTSummary(gst.status === 'fulfilled' ? mapGst(gst.value) : null);
       setGSTSummaryError(gst.status === 'rejected'
         ? (gst.reason instanceof Error ? gst.reason.message : 'GST summary could not be calculated. Please retry.')
@@ -301,6 +309,9 @@ export default function FinanceDashboard() {
             : Promise.resolve({ registrations: [] }),
         ]);
         setPnlByStore(ps2.status === 'fulfilled' ? (ps2.value?.stores || []) : []);
+        setPnlByStoreError(ps2.status === 'rejected'
+          ? (ps2.reason instanceof Error ? ps2.reason.message : 'The P&L by store could not be loaded. Please retry.')
+          : null);
         setPnlByCategory(pc2.status === 'fulfilled' ? (pc2.value?.categories || []) : []);
         setGstRecon(gr2.status === 'fulfilled' ? (gr2.value?.registrations || []) : []);
         setGstReconWarnings(gr2.status === 'fulfilled' ? (gr2.value?.warnings || []) : []);
@@ -495,7 +506,17 @@ Lock ${m}/${y} anyway? This cannot be undone.`)
                 scope="profit and expense figures"
                 className="mb-4"
               />
+              {pnlError && (
+                <div role="alert" className="mb-4 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800" data-testid="pnl-error">
+                  Profit and loss: {pnlError}
+                </div>
+              )}
               <FinanceSummary revenueData={revenueData} plStatement={plStatement} />
+              {canSeeStorePayroll && pnlByStoreError && (
+                <div role="alert" className="card mt-4 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800" data-testid="pnl-by-store-error">
+                  P&amp;L by store: {pnlByStoreError}
+                </div>
+              )}
               {!canSeeStorePayroll && (
                 <div className="card mt-4 p-4">
                   <div className="text-sm font-medium text-gray-700">P&amp;L by store</div>

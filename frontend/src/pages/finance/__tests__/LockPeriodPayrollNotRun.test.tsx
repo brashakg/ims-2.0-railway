@@ -72,3 +72,24 @@ it('a draft payroll refusal is never offered "lock anyway"', async () => {
   expect(confirm).not.toHaveBeenCalled();
   expect(fin.lockPeriod).toHaveBeenCalledTimes(1);
 });
+
+// Codex round 4, R4-A: the server answers 503 when the posted payroll cannot
+// be read. The screen used to show dashes and simply drop the by-store table.
+const UNREADABLE =
+  'The salary cost for this period could not be read, so the profit and loss was not worked out. Nothing was changed. Try again.';
+
+it('a P&L the server could not work out is said in its place, for the statement and the by-store table', async () => {
+  fin.getPnl.mockRejectedValue(new ApiError(UNREADABLE, { status: 503 }));
+  fin.getPnlByStore.mockRejectedValue(new ApiError(UNREADABLE, { status: 503 }));
+  render(<ToastProvider><FinanceDashboard /></ToastProvider>);
+  expect((await screen.findByTestId('pnl-error')).textContent).toContain(UNREADABLE);
+  expect((await screen.findByTestId('pnl-by-store-error')).textContent).toContain(UNREADABLE);
+});
+
+it('a P&L that loads carries no such notice', async () => {
+  fin.getPnlByStore.mockResolvedValue({ stores: [{ store_id: 'BV-DHN-01', revenue: 100, payroll: 40, net_profit: 60 }] });
+  render(<ToastProvider><FinanceDashboard /></ToastProvider>);
+  expect(await screen.findByText('P&L by store')).toBeTruthy();
+  expect(screen.queryByTestId('pnl-error')).toBeNull();
+  expect(screen.queryByTestId('pnl-by-store-error')).toBeNull();
+});
