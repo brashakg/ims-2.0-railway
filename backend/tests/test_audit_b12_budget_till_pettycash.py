@@ -3494,8 +3494,10 @@ class TestR11TillLockAndCountKeepTheirFollowUp:
         for res in (
             till.lock_session(db, sid, actor=MANAGER, variance_note="x"),
             till.blind_submit(db, sid, blind_denominations=[], actor=CASHIER),
+            till.reopen_session(db, sid, reason="recount", actor=MANAGER),
         ):
             assert (res["ok"], res["http"], res["error"]) == (False, 503, "session_read_failed")
+            assert "could not be read" in res["message"]
         monkeypatch.setattr(till_router, "_get_db", lambda: db)
         with pytest.raises(HTTPException) as exc:
             asyncio.run(till_router.get_till_session(sid, current_user=MANAGER))

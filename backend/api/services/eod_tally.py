@@ -1838,7 +1838,8 @@ def reopen_session(
     try:
         session = coll.find_one({"_id": session_id})
     except Exception:  # noqa: BLE001
-        session = None
+        logger.exception("Till session read failed before reopening %s", session_id)
+        return {"ok": False, "error": "session_read_failed", "http": 503, "message": _SESSION_READ_FAILED}
     if session is None:
         return {"ok": False, "error": "not_found", "http": 404}
 
