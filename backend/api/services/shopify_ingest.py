@@ -2381,7 +2381,10 @@ def _book_historical_refund_credit_notes(
                 # The whole-order note is stored: the claims standing for it
                 # are finished (decision D103(1)). Not claimed, or the stamp
                 # not written: reported failed (never a run that reads
-                # complete); the next import run stamps it.
+                # complete); the next import run stamps it. A live door's
+                # claim is not this import's to finish.
+                if claims[rid] == "theirs":
+                    continue
                 if claims[rid] is None or not _finish_claim(rid):
                     _record_failed({"id": rid})
 

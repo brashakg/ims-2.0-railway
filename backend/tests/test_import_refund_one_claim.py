@@ -354,6 +354,28 @@ def test_a_whole_order_note_is_not_booked_over_a_refund_a_live_door_holds(db, mo
     assert db.credit_note_ledger.count_documents({}) == 0 and db.returns.count_documents({}) == 1
 
 
+def test_a_live_claim_on_a_refund_a_stored_whole_order_note_covers_is_left_alone(db, monkeypatch):
+    """The whole-order note is stored; the import's claim of one covered
+    refund is gone and a live door claims that refund inside the next run's
+    window. The run books nothing, leaves the live door's claim exactly as
+    it is, and does not report a failure for it (it is not the import's to
+    finish)."""
+    s = seed(db, "L")
+    ids = [f"{s.refund_id}-1", f"{s.refund_id}-2"]
+    s.payload.update(financial_status="refunded", refunds=[
+        {"id": rid, "processed_at": REFUND_AT,
+         "transactions": [{"kind": "refund", "status": "success", "amount": "1000.00"}]} for rid in ids])
+    assert import_run(db, s)["credit_notes"] == 1
+    db.returns.delete_one({"shopify_refund_id": ids[1]})
+    live = {"return_id": "RET-LIVE-L", "shopify_refund_id": ids[1], "order_id": s.oid,
+            "source": "shopify", "status": "PENDING", "created_at": REFUND_AT}
+    after_the_imports_booked_read(monkeypatch, ids[1], lambda: db.returns.insert_one(dict(live)))
+    run = import_run(db, s)
+    assert (run["credit_notes"], run["cn_failed"], run["cn_failed_refund_ids"]) == (0, 0, []), run
+    held = db.returns.find_one({"shopify_refund_id": ids[1]}, {"_id": 0})
+    assert held == live and db.credit_note_ledger.count_documents({}) == 1
+
+
 # --- decision D103: an import claim is unfinished until its GST row exists -----
 
 
