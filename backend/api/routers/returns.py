@@ -32,7 +32,7 @@ import logging
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Path, Query
 from pydantic import BaseModel, Field
@@ -3284,6 +3284,7 @@ def _raise_restock_blocked_task(
     stock_in_failed: bool = False,
     counter_stopped: bool = False,
     stopped_midway: bool = False,
+    damaged: bool = False,
 ) -> bool:
     """Put a BLOCKED restock in front of a human, with its real cause and ONE
     action, naming the order staff can look up (its number) and only the
@@ -3301,7 +3302,12 @@ def _raise_restock_blocked_task(
     `counter_stopped` (D95): the return's record exists but its stock step
     never finished (its press stopped, or Needs completing wrote the record):
     the action is the record's own button, Update stock (Returns > History). `stopped_midway`: a worker stopped WHILE placing the units, so
-    IMS places nothing more by itself -- a person checks each unit.
+    IMS places nothing more by itself -- a person checks each unit. The task
+    carries payload.stopped_midway (closing it records the check, D109(2));
+    an open task raised BEFORE the step stopped is rewritten to say so --
+    nobody closes a 'press Update stock' task and is recorded as having
+    checked. `damaged`: the return has a DAMAGED piece -- never added by
+    hand: closing the task sets it aside (note_units_checked).
 
     Without this the fail-loud branch is one Railway log line while real goods
     sit on the counter with no stock row -- developer-only recovery on a live
@@ -3310,7 +3316,7 @@ def _raise_restock_blocked_task(
     must never break the return."""
     try:
         from ..dependencies import get_task_repository
-        from ..services.task_triggers import active_tasks, create_system_task
+        from ..services.task_triggers import _ACTIVE, active_tasks, create_system_task
 
         lines = ", ".join(
             sorted(
@@ -3333,6 +3339,11 @@ def _raise_restock_blocked_task(
             cause = "IMS stopped part way while placing them, so it places nothing more by itself"
             action = ("check each unit of this return on the shelf and in IMS stock: add one by hand only if "
                       "it is not in stock, then close this task")
+            if damaged:
+                action = ("check each unit of this return on the shelf and in IMS stock: add a GOOD one by "
+                          "hand only if it is not in stock, then close this task. Never add the DAMAGED piece "
+                          "by hand: IMS sets it aside when you close this task (if it cannot, the task stays "
+                          "open - press 'Update stock' on this return in Returns > History, then close it)")
             never = "Never add a unit that already shows in stock - IMS would count it twice."
         elif counter_stopped:
             cause = "the counter's stock step did not run (the return was finished without it)"
@@ -3365,22 +3376,39 @@ def _raise_restock_blocked_task(
                       "of this return")
         ref = order_number or order_id
         repo, task_ref = get_task_repository(), f"return_restock_blocked:{return_id}"
+        title = f"Return {return_id} (order {ref}): {len(units)} unit(s) NOT back in stock"
+        description = (
+            f"The refund for return {return_id} (order {ref}) is "
+            f"recorded, but its returned goods were NOT put back in stock: "
+            f"{cause}. Do this: {action}. {never} "
+            f"Items: {lines or 'see the return'}."
+        )
+        payload: Dict[str, Any] = {"return_id": return_id, "order_id": order_id}
+        if counter_stopped and stopped_midway:
+            title = f"Return {return_id} (order {ref}): stock step stopped - check {len(units)} unit(s) by hand"
+            description = (
+                f"The refund for return {return_id} (order {ref}) is recorded, but IMS does not know which "
+                f"of its returned goods are back in stock: {cause}. Do this: {action}. {never} "
+                f"Items: {lines or 'see the return'}."
+            )
+            payload["stopped_midway"] = True
+            tasks = getattr(repo, "collection", None)
+            if tasks is not None:
+                tasks.update_many(
+                    {"source_ref": task_ref, "status": {"$in": sorted(_ACTIVE)},
+                     "payload.stopped_midway": {"$ne": True}},
+                    {"$set": {"title": title, "description": description, "payload.stopped_midway": True}})
         created = create_system_task(
             repo,
-            title=f"Return {return_id} (order {ref}): {len(units)} unit(s) NOT back in stock",
-            description=(
-                f"The refund for return {return_id} (order {ref}) is "
-                f"recorded, but its returned goods were NOT put back in stock: "
-                f"{cause}. Do this: {action}. {never} "
-                f"Items: {lines or 'see the return'}."
-            ),
+            title=title,
+            description=description,
             priority="P1",
             category="Inventory",
             store_id=processing_store_id,
             dedupe_ref=task_ref,
             extra={
                 "link": "/returns",
-                "payload": {"return_id": return_id, "order_id": order_id},
+                "payload": payload,
             },
         )
         # create_system_task answers None when the insert failed as well as
@@ -3420,6 +3448,7 @@ def _restock_good_items(
     processing_store_id: Optional[str] = None,
     order: Optional[Dict[str, Any]] = None,
     already_back: Optional[Dict[str, float]] = None,
+    fence: Optional[Callable[[], bool]] = None,
 ) -> Dict[str, Any]:
     """Put GOOD-condition returned units BACK into sellable serialized stock.
 
@@ -3446,6 +3475,10 @@ def _restock_good_items(
 
     `already_back` {product id: units}: what an earlier attempt of this
     return put back (_landed_units); those units are not restocked again.
+
+    `fence` (D79): asked before EACH unit is written -- the caller's stock
+    claim must still be its own and younger than the timeout (_claim_live).
+    False: this and every later unit is left out, nothing is applied.
 
     Returns a dict with `restocked` (per-line summary for the return doc),
     `restock_stock_ids` (every stock row touched), `applied`, `skipped`, and the
@@ -3631,6 +3664,15 @@ def _restock_good_items(
                 "store_ids": [],
             },
         )
+        if fence is not None and not fence():
+            # D79: the claim these units are placed under aged out (or is no
+            # longer this worker's): the step reads as stopped to everyone
+            # else and a person may be adding units by hand, so this worker
+            # writes no unit from here on.
+            logger.error("[RETURNS] stock claim of %s is no longer held: no further unit placed", return_id)
+            all_ok = False
+            row["applied"] = False
+            break
         # Never the online store: every source here is filtered through
         # _first_physical_store / _fulfilment_unit_queue, and target_store is
         # physical too (an UNRESOLVED route returned early above).
@@ -4790,20 +4832,28 @@ def _stock_lines(items: Any) -> List[Dict[str, Any]]:
 #                                           'Update stock' = retry_restock) -> R3.
 #                                           finisher: the sweep's P1 task names 'Update stock'.
 #  R3 claim held        A no  P yes I yes   opened: _claim_restock (one worker).
-#                                           closed: that worker's ONE closing stamp -> R2 / R5 / R6.
-#                                           stamp lost or worker dead -> R4.
+#                                           closed: that worker's ONE closing stamp -> R2 / R5 / R6,
+#                                           written only while the claim is still its own and
+#                                           younger than the timeout (_close_claim, D79); it checks
+#                                           the same before each unit it writes (_claim_live).
+#                                           stamp lost, worker dead, or stalled past the timeout -> R4.
 #  R4 stopped part way  A no  P yes I old   what landed is unknown: IMS places no GOOD unit again
-#                                           (D92(5)); 'Update stock' still sets a DAMAGED unit aside.
-#                                           finisher: a PERSON -- the P1 task ('check each unit'),
-#                                           the History label 'Stock step stopped: check these
-#                                           units by hand'; completing the task -> R7 (D109(2)).
+#                                           (D92(5)) -- nor does the stalled holder if it wakes.
+#                                           finisher: a PERSON -- the P1 task ('check each unit'; a
+#                                           task raised before the step stopped is rewritten to say
+#                                           so), the History label 'Stock step stopped: check these
+#                                           units by hand'. Completing the task sets a DAMAGED unit
+#                                           aside FIRST (D92(2)) and only then -> R7 (D109(2)); it
+#                                           cannot: 503, the task, the label and 'Update stock'
+#                                           stay, and that button sets the unit aside too.
 #  R5 damaged open      A yes P yes         opened: a closing stamp with a DAMAGED unit not set aside.
 #                                           closed: the set-aside, with NO claim (idempotent on the
 #                                           units named on the record): 'Update stock', or the
 #                                           identical re-press -> R6. Stamp lost -> still R5: the
 #                                           same button finds the unit set aside and closes it.
 #  R6 done              A yes P no          'Already restocked'. Final.
-#  R7 checked by hand   A no  P no  I yes   stock_checked_by / _at. Final: IMS adds nothing.
+#  R7 checked by hand   A no  P no  I yes   stock_checked_by / _at; its DAMAGED units are set
+#                                           aside. Final: IMS adds nothing, no stamp reopens it.
 #  R8 left to counter   restock_left_to_counter (a hold from before D95): IMS adds
 #                       nothing, a person checks (D92(5)). Final.
 #
@@ -4836,6 +4886,38 @@ def _claim_restock(coll, return_id: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _own_claim(claim: Dict[str, Any]) -> Dict[str, Any]:
+    """The record while ``claim`` is still the stock claim on it: taken at
+    that moment, not given back, not closed by a person's check (R7)."""
+    return {"return_id": claim.get("return_id"), "restock_in_progress": True,
+            "restock_started_at": claim.get("restock_started_at"), "stock_checked_at": None}
+
+
+def _claim_live(coll, claim: Dict[str, Any]) -> bool:
+    """D79: may the holder of ``claim`` still write a unit? Only while the
+    claim is younger than the timeout (after it everyone else reads the step
+    as stopped and a person may be adding units by hand) and the record still
+    carries it. Unreadable: no."""
+    if _step_stale(claim.get("restock_started_at")):
+        return False
+    try:
+        return coll.find_one(_own_claim(claim), {"_id": 1}) is not None
+    except Exception as exc:  # noqa: BLE001 -- unknown: nothing is written on a guess
+        logger.warning("[RETURNS] stock claim of %s unreadable: %s", claim.get("return_id"), exc)
+        return False
+
+
+def _close_claim(coll, claim: Dict[str, Any], change: Dict[str, Any]) -> bool:
+    """D79: THE closing stamp of a stock claim, written only by the worker
+    that still holds it (_claim_live's rule, in the write's own filter). False:
+    the claim aged out or a person closed the step -- nothing was written,
+    the step stays as it reads (R4: a person checks; R7: checked). Raises
+    what the write raises."""
+    if _step_stale(claim.get("restock_started_at")):
+        return False
+    return bool(coll.update_one(_own_claim(claim), change).matched_count)
+
+
 def stock_step_stopped(doc: Optional[Dict[str, Any]]) -> bool:
     """A worker stopped WHILE putting this return's GOOD units back: its
     claim is older than any press runs and its closing stamp never landed.
@@ -4854,19 +4936,51 @@ def _say_stock_step(doc: Dict[str, Any]) -> None:
         doc["stock_step_stopped"] = stock_step_stopped(doc)
 
 
-def note_units_checked(return_id: str, current_user: dict) -> None:
-    """D109(2): a person completed the blocked-restock task of a return whose
-    stock step stopped part way -- the only finisher that state has. The
-    return records who checked and when, and stops saying its units are
-    pending. Any other return is left as it is (its 'Update stock' still
-    works). 503 when it cannot be recorded: the task stays open, press again."""
+# Completing a blocked-restock task (D109(2)): what its 409 / 503 say.
+STEP_STOPPED_TASK_MESSAGE = ("IMS stopped part way while placing this return's units, so this task has changed "
+                             "(open it again to read it). Now check each unit of the return on the shelf and in "
+                             "IMS stock - add a GOOD one by hand only if it is not in stock, never a damaged "
+                             "piece - then close this task again.")
+DAMAGED_NOT_ASIDE_TASK_MESSAGE = ("The damaged unit of this return could not be set aside in stock just now, so "
+                                  "the task stays open. Try again; if it still fails, press 'Update stock' on "
+                                  "this return in Returns > History, then close this task.")
+CHECK_NOT_RECORDED_MESSAGE = "Your check could not be recorded on the return - the task stays open. Try again."
+
+
+async def note_units_checked(return_id: str, current_user: dict, task: Optional[Dict[str, Any]] = None) -> None:
+    """D109(2): a person completes the blocked-restock task of a return whose
+    stock step stopped part way -- the only finisher that state has. In order:
+
+    * the task must have ASKED for the hand check. One raised before the step
+      stopped says 'press Update stock': it is rewritten to say what to check
+      and the close is refused once (409) -- a check nobody was asked to make
+      is never recorded;
+    * a DAMAGED unit of the return is set aside (D92(2): never gated on the
+      restock). Not done: 503, the task stays open and the return keeps its
+      label and its 'Update stock' -- the label is never cleared over a
+      damaged unit that is still SOLD;
+    * the return records who checked and when, and stops saying its units
+      are pending (R7).
+
+    Any other return is left as it is (its 'Update stock' still works). 503
+    when it cannot be read or recorded: the task stays open, press again."""
     coll = _returns_coll()
     if coll is None or not return_id:
         return
     try:
         doc = coll.find_one({"return_id": return_id})
-        if not stock_step_stopped(doc):
-            return
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[RETURNS] return %s unreadable while its task is closed: %s", return_id, exc)
+        raise HTTPException(status_code=503, detail=CHECK_NOT_RECORDED_MESSAGE) from exc
+    if not stock_step_stopped(doc):
+        return
+    if not ((task or {}).get("payload") or {}).get("stopped_midway"):
+        if not _task_units_not_placed(doc, pressed=True):
+            raise HTTPException(status_code=503, detail=CHECK_NOT_RECORDED_MESSAGE)
+        raise HTTPException(status_code=409, detail=STEP_STOPPED_TASK_MESSAGE)
+    if not await _set_aside_recorded(coll, doc, current_user):
+        raise HTTPException(status_code=503, detail=DAMAGED_NOT_ASIDE_TASK_MESSAGE)
+    try:
         coll.update_one(
             {"return_id": return_id, "stock_pending": True, "restock_in_progress": True,
              "restock_applied": {"$ne": True}, "restock_started_at": doc.get("restock_started_at")},
@@ -4874,8 +4988,7 @@ def note_units_checked(return_id: str, current_user: dict) -> None:
                       "stock_checked_at": utc_now_iso()}})
     except Exception as exc:  # noqa: BLE001
         logger.error("[RETURNS] units of %s checked by hand, not recorded: %s", return_id, exc)
-        raise HTTPException(status_code=503, detail=(
-            "Your check could not be recorded on the return - the task stays open. Try again.")) from exc
+        raise HTTPException(status_code=503, detail=CHECK_NOT_RECORDED_MESSAGE) from exc
 
 
 _HOLD_LOST = ("This took too long and another refund or return of this bill may have been "
@@ -6306,6 +6419,51 @@ async def _set_aside_damaged(lines: List[ReturnLine], order: Optional[Dict[str, 
     return units
 
 
+async def _set_aside_recorded(coll, doc: Dict[str, Any], current_user: dict) -> bool:
+    """D92(2): the DAMAGED units of a recorded counter return are set aside,
+    never gated on its restock (only the units the record names move, once)
+    and noted on the record. True: it has none, or every one is set aside."""
+    lines = [ReturnLine(**{"unit_price": 0.0, **it}) for it in (doc.get("items") or [])]
+    if doc.get("shopify_refund_id") or not any(ln.condition == "DAMAGED" for ln in lines):
+        return True
+    rid = doc.get("return_id")
+    aside = await _set_aside_damaged(lines, _load_order_for_restock(doc.get("order_id")), doc, current_user)
+    if aside:
+        try:
+            coll.update_one({"return_id": rid}, {"$addToSet": {
+                "quarantined_stock_ids": {"$each": [u["stock_id"] for u in aside]}}})
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[RETURNS] quarantined units of %s not noted on its record: %s", rid, exc)
+    return _damaged_set_aside_done(rid, lines)
+
+
+STOCK_STOPPED_NOTE = ("IMS took too long placing its units and stopped part way: check each unit by hand - a "
+                      "task says how (add one only if it is not in stock)")
+
+
+async def _stopped_step_answer(coll, doc: Dict[str, Any], current_user: dict) -> Dict[str, Any]:
+    """What 'Update stock' answers on a step that stopped part way (R4), or
+    that a person has since checked (R7). A worker stopped WHILE placing the
+    units (its claim is older than any press runs): what it placed is not
+    known, so IMS places nothing more -- a second run could add a unit twice
+    (D92(5)). Its one finisher is a person: the task is there for whoever
+    pressed, even if an earlier one was closed, and says what to check;
+    completing it records the check on the return (D109(2),
+    note_units_checked). D92(2): a DAMAGED unit is still set aside."""
+    _task_units_not_placed(doc, pressed=True)
+    await _set_aside_recorded(coll, doc, current_user)
+    return {
+        "return_id": doc.get("return_id"),
+        "restock_applied": False,
+        "restock_stock_ids": doc.get("restock_stock_ids", []),
+        "message": ("IMS stopped part way while placing this return's units and a person has since "
+                    "checked them by hand, so it adds nothing here."
+                    if doc.get("stock_checked_at") else
+                    "IMS stopped part way while placing this return's units, so it adds nothing here. "
+                    "Check each unit: add one by hand only if it is not in stock."),
+    }
+
+
 async def _own_record_or_refuse(coll, doc: Dict[str, Any], held: Dict[str, Any], active_lines: List[ReturnLine],
                                 order: Optional[Dict[str, Any]], current_user: dict) -> None:
     """D95(3): the press writes its record and learns who owns the return.
@@ -6441,6 +6599,8 @@ async def _finish_press(coll, doc: Dict[str, Any], active_lines: List[ReturnLine
                 # Already resolved by the press; saves the online branch a second fetch.
                 order=order,
                 already_back=_landed_units(earlier),
+                # D79: no unit once this press's claim aged out.
+                fence=(lambda: _claim_live(coll, claim)) if claim is not None else None,
             )
     except Exception as exc:  # noqa: BLE001
         # A stock-write failure must never break the return record - leave
@@ -6513,17 +6673,38 @@ async def _finish_press(coll, doc: Dict[str, Any], active_lines: List[ReturnLine
         # written over here): only the DAMAGED units' set-aside, which takes
         # no claim, is this request's to report.
         sets["stock_pending"] = bool(_stock_lines(active_lines)) and not damaged_done
+    # D79: the stock step's stamp is this press's to write only while its
+    # claim is still its own and younger than the timeout (_close_claim).
+    # Otherwise the step reads as stopped (R4) or checked (R7) and stays so:
+    # only what is not the stock step's is stamped.
+    stopped = False
     if coll is not None:
         for _ in range(2):
             try:
-                coll.update_one({"return_id": return_id}, stamp)
+                if claim is not None and not stopped and not _close_claim(coll, claim, stamp):
+                    stopped = True
+                    logger.error("[RETURNS] stock claim of %s was no longer held at its stamp", return_id)
+                    stamp = {**stamp, "$set": {"loyalty_reversal_failed": loyalty_reversal_failed,
+                                               "audited": audited}}
+                if claim is None or stopped:
+                    coll.update_one({"return_id": return_id}, stamp)
                 break
             except Exception as exc:  # noqa: BLE001
                 logger.error("[RETURNS] stock / points result of %s not stamped on its record: %s", return_id, exc)
 
     stock_note = None  # shown on the till's done screen when set
     units = _stock_lines(active_lines)
-    if restock_applied and not damaged_done:
+    if stopped:
+        # A person finishes it: the task says what to check (R4). None is
+        # raised on a record a person has already checked (R7).
+        now_reads = {**doc, "stock_pending": bool(units), "restock_in_progress": True}
+        try:
+            now_reads = coll.find_one({"return_id": return_id}) or now_reads
+        except Exception as exc:  # noqa: BLE001 -- unknown: the task is raised (deduped on an open one)
+            logger.warning("[RETURNS] stopped stock step of %s unreadable: %s", return_id, exc)
+        _task_units_not_placed(now_reads, pressed=True)
+        stock_note = STOCK_STOPPED_NOTE if units else None
+    elif restock_applied and not damaged_done:
         # The step stays open on the record (its button, its task: the sweep).
         stock_note = DAMAGED_PENDING_NOTE
     elif not claimed and units and not restock_applied:
@@ -7193,6 +7374,7 @@ def _task_units_not_placed(doc: Dict[str, Any], *, pressed: bool = False) -> boo
     raised = _raise_restock_blocked_task(
         rid, doc.get("order_id"), doc.get("store_id"), _stock_lines(doc.get("items")), doc.get("store_id"),
         counter_stopped=True, stopped_midway=bool(doc.get("restock_in_progress")),
+        damaged=any(isinstance(it, dict) and it.get("condition") == "DAMAGED" for it in doc.get("items") or []),
         historical=doc.get("historical") if isinstance(doc.get("historical"), bool) else None,
         order_number=doc.get("order_number"))
     if raised:
@@ -7619,35 +7801,7 @@ async def retry_restock(
                             "so IMS adds nothing here. Check each unit: add one by hand only if it is not in stock."),
             }
         if doc.get("restock_in_progress") and _step_stale(doc.get("restock_started_at")):
-            # A worker stopped WHILE placing the units (its claim is older than
-            # any press runs): what it placed is not known, so IMS places
-            # nothing more -- a second run could add a unit twice (D92(5)).
-            # Its one finisher is a person: the task is there for whoever
-            # pressed, even if an earlier one was closed; completing it
-            # records the check on the return (D109(2), note_units_checked).
-            _task_units_not_placed(doc, pressed=True)
-            # D92(2): a DAMAGED unit is still set aside -- never gated on the
-            # restock (it moves only the units this return names, once).
-            stale_lines = [ReturnLine(**{"unit_price": 0.0, **it}) for it in (doc.get("items") or [])]
-            if not doc.get("shopify_refund_id") and any(ln.condition == "DAMAGED" for ln in stale_lines):
-                aside = await _set_aside_damaged(stale_lines, _load_order_for_restock(doc.get("order_id")),
-                                                 doc, current_user)
-                if aside:
-                    try:
-                        coll.update_one({"return_id": return_id}, {"$addToSet": {
-                            "quarantined_stock_ids": {"$each": [u["stock_id"] for u in aside]}}})
-                    except Exception as exc:  # noqa: BLE001
-                        logger.warning("[RETURNS] quarantined units of %s not noted on its record: %s", return_id, exc)
-            return {
-                "return_id": return_id,
-                "restock_applied": False,
-                "restock_stock_ids": doc.get("restock_stock_ids", []),
-                "message": ("IMS stopped part way while placing this return's units and a person has since "
-                            "checked them by hand, so it adds nothing here."
-                            if doc.get("stock_checked_at") else
-                            "IMS stopped part way while placing this return's units, so it adds nothing here. "
-                            "Check each unit: add one by hand only if it is not in stock."),
-            }
+            return await _stopped_step_answer(coll, doc, current_user)
         # Someone else is mid-restock; tell the caller to retry shortly.
         return {
             "return_id": return_id,
@@ -7715,7 +7869,7 @@ async def retry_restock(
             "restock_store_reason": _RESTOCK_ROUTE_UNRESOLVED,
         }
         try:
-            coll.update_one({"return_id": return_id}, {"$set": blocked_update})
+            _close_claim(coll, claim, {"$set": blocked_update})
         except Exception as exc:  # noqa: BLE001
             logger.warning("[RETURNS] blocked-retry persist failed: %s", exc)
         return {
@@ -7745,7 +7899,7 @@ async def retry_restock(
         lines, _, unknown = _cap_restock_to_returnable(lines, retry_order, str(refund_id))
         if unknown:
             try:
-                coll.update_one({"return_id": return_id}, {"$set": {"restock_in_progress": False}})
+                _close_claim(coll, claim, {"$set": {"restock_in_progress": False}})
             except Exception:  # noqa: BLE001
                 pass
             return {
@@ -7769,6 +7923,8 @@ async def retry_restock(
             # VERIFIED evidence (non-None was checked above).
             order=retry_order,
             already_back=already_back,
+            # D79: no unit once this worker's claim aged out.
+            fence=lambda: _claim_live(coll, claim),
         )
 
     try:
@@ -7788,10 +7944,7 @@ async def retry_restock(
         # retry isn't deadlocked.
         logger.warning("[RETURNS] restock retry stock writes failed: %s", exc)
         try:
-            coll.update_one(
-                {"return_id": return_id},
-                {"$set": {"restock_in_progress": False}},
-            )
+            _close_claim(coll, claim, {"$set": {"restock_in_progress": False}})
         except Exception:  # noqa: BLE001
             pass
         raise HTTPException(status_code=500, detail="Restock retry failed")
@@ -7837,10 +7990,26 @@ async def retry_restock(
         # still open (its button and its task follow this flag) -- open until
         # the GOOD units are back AND the DAMAGED ones are really set aside.
         update["stock_pending"] = not (restock_result.get("applied") and damaged_done)
+    # D79: the closing stamp is this worker's to write only while its claim
+    # is still its own and younger than the timeout. Otherwise the step reads
+    # as stopped (R4) or a person has checked it (R7): nothing is stamped over
+    # that -- only the units set aside are noted -- and the answer is the
+    # stopped step's.
+    stopped = False
     try:
-        coll.update_one({"return_id": return_id}, {"$set": update, **set_aside})
+        stopped = not _close_claim(coll, claim, {"$set": update, **set_aside})
+        if stopped and set_aside:
+            coll.update_one({"return_id": return_id}, set_aside)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[RETURNS] restock retry persist failed: %s", exc)
+    if stopped:
+        logger.error("[RETURNS] stock claim of %s was no longer held at its stamp", return_id)
+        now_reads = {**claim, "stock_pending": True}
+        try:
+            now_reads = coll.find_one({"return_id": return_id}, {"_id": 0}) or now_reads
+        except Exception as exc:  # noqa: BLE001 -- unknown: answered as stopped
+            logger.warning("[RETURNS] stopped stock step of %s unreadable: %s", return_id, exc)
+        return await _stopped_step_answer(coll, now_reads, current_user)
 
     # A successful retry raised the shelf count exactly like the create path
     # did, so Shopify has to hear about it too. Without this the online path --

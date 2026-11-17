@@ -958,10 +958,11 @@ async def complete_task(
     ref = str(task.get("source_ref") or "")
     if ref.startswith("return_restock_blocked:"):
         # D109(2): the person who checked a stopped stock step by hand is
-        # recorded on the return BEFORE its task closes (503: it stays open).
+        # recorded on the return BEFORE its task closes -- after its damaged
+        # unit is set aside (409 / 503: the task stays open).
         from .returns import note_units_checked
 
-        note_units_checked(ref.split(":", 1)[1], current_user)
+        await note_units_checked(ref.split(":", 1)[1], current_user, task)
 
     now = datetime.now()
     result = repo.update(
