@@ -5,8 +5,13 @@
 import api from './client';
 
 export const hrApi = {
-  getAttendance: async (storeId: string, date?: string) => {
-    const response = await api.get('/hr/attendance', { params: { store_id: storeId, date } });
+  // `date` narrows to one day (the backend filters on from_date/to_date; a
+  // bare `date` param was silently ignored); `employeeId` to one person.
+  getAttendance: async (storeId: string, date?: string, employeeId?: string) => {
+    const params: Record<string, string> = { store_id: storeId };
+    if (date) { params.from_date = date; params.to_date = date; }
+    if (employeeId) params.employee_id = employeeId;
+    const response = await api.get('/hr/attendance', { params });
     const data = response.data;
     // Backend (GET /hr/attendance) returns camelCase keys attendanceId /
     // employeeId / employeeName / checkIn / checkOut. The HR page + self-service
@@ -27,10 +32,13 @@ export const hrApi = {
   // Geo-fenced, late-mark-aware check-in. The backend reads store_id /
   // latitude / longitude as QUERY params (not a JSON body) and enforces the
   // store radius for roles 4-7 server-side, returning is_late + late_minutes.
-  checkIn: async (storeId: string, latitude: number, longitude: number) => {
-    const response = await api.post('/hr/attendance/check-in', null, {
-      params: { store_id: storeId, latitude, longitude },
-    });
+  // Every role may call it (R13); the server pins it to the caller. With no
+  // position the coordinates are OMITTED (never 0,0) so the server's own
+  // location rule answers: exempt roles pass, fenced roles get a clear 403.
+  checkIn: async (storeId: string, latitude?: number, longitude?: number) => {
+    const params: Record<string, string | number> = { store_id: storeId };
+    if (latitude != null && longitude != null) { params.latitude = latitude; params.longitude = longitude; }
+    const response = await api.post('/hr/attendance/check-in', null, { params });
     return response.data as {
       message: string;
       checkInTime: string;
@@ -40,9 +48,13 @@ export const hrApi = {
     };
   },
 
-  checkOut: async (attendanceId: string) => {
-    const response = await api.post(`/hr/attendance/${attendanceId}/check-out`);
-    return response.data;
+  // Own check-out for today (R01/R13): the server finds today's persisted row
+  // and refuses (400) when there is no check-in to close.
+  checkOut: async (storeId: string) => {
+    const response = await api.post('/hr/attendance/check-out', null, {
+      params: storeId ? { store_id: storeId } : {},
+    });
+    return response.data as { attendance_id?: string; message: string; checkOutTime: string };
   },
 
   getLeaves: async (params?: { userId?: string; status?: string }) => {
@@ -216,16 +228,19 @@ export const hrApi = {
     employee_id: string;
     date: string; // 'YYYY-MM-DD'
     status: string;
+    // undefined = leave the stored time alone; null = clear it (R14).
     check_in?: string | null;  // ISO datetime
     check_out?: string | null; // ISO datetime
+    store_id?: string;         // the store being viewed (R15)
   }) => {
     const body: Record<string, unknown> = {
       employee_id: payload.employee_id,
       date: payload.date,
       status: payload.status,
     };
-    if (payload.check_in) body.check_in = payload.check_in;
-    if (payload.check_out) body.check_out = payload.check_out;
+    if (payload.check_in !== undefined) body.check_in = payload.check_in;
+    if (payload.check_out !== undefined) body.check_out = payload.check_out;
+    if (payload.store_id) body.store_id = payload.store_id;
     const response = await api.post('/hr/attendance/mark', body);
     return response.data as { message: string; date: string };
   },
@@ -404,9 +419,21 @@ export interface MyAttendanceSummary {
   late: number;
 }
 
+export interface MyAttendanceToday {
+  attendance_id: string | null;
+  date: string;
+  status: string | null;
+  check_in: string | null;
+  check_out: string | null;
+  is_late: boolean;
+  store_id: string | null;
+}
+
 export interface MyAttendance {
   month: number;
   year: number;
+  /** Today's own row as the server holds it (null = nothing recorded). */
+  today?: MyAttendanceToday | null;
   /** date 'YYYY-MM-DD' -> code (P/A/HD/L/LWP/WO/-). */
   days: Record<string, AttendanceCode>;
   summary: MyAttendanceSummary;
@@ -474,6 +501,8 @@ export interface AttendanceGridEmployee {
   store_id: string;
   days: Record<string, AttendanceCode>;
   summary: AttendanceGridSummary;
+  // D48: days saved without a shop (read-only "Shop not recorded").
+  no_shop_days?: string[];
 }
 
 export interface AttendanceGrid {

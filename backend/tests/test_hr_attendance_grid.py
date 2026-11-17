@@ -17,6 +17,7 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests")
 os.environ.setdefault("MONGODB_URI", "")
 
 import jwt  # noqa: E402
+import pytest  # noqa: E402
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -285,20 +286,18 @@ def test_grid_non_hq_scoped_to_own_store(monkeypatch):
     assert ids == {"E1", "E2"}
 
 
-def test_grid_failsoft_when_no_repos(monkeypatch):
+def test_grid_no_repos_is_unavailable_not_an_empty_month(monkeypatch):
+    # #1433 Codex round 2: an empty grid here read as "No employees". The bare
+    # router has no main.py 503 handler, so the error itself surfaces.
     app = FastAPI()
     app.include_router(hr.router, prefix="/hr")
     monkeypatch.setattr(hr, "get_user_repository", lambda: None)
     monkeypatch.setattr(hr, "get_attendance_repository", lambda: None)
     c = TestClient(app)
     tok = _token(["ADMIN"])
-    r = c.get(
-        "/hr/attendance/grid",
-        params={"month": "2024-02", "store_id": "S1"},
-        headers={"Authorization": f"Bearer {tok}"},
-    )
-    assert r.status_code == 200
-    body = r.json()
-    assert len(body["days"]) == 29  # leap Feb, computed without a DB
-    assert body["employees"] == []
-    assert body["totals"]["present"] == 0
+    with pytest.raises(hr.AttendanceUnavailable):
+        c.get(
+            "/hr/attendance/grid",
+            params={"month": "2024-02", "store_id": "S1"},
+            headers={"Authorization": f"Bearer {tok}"},
+        )

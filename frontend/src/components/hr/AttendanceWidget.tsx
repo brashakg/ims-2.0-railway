@@ -1,138 +1,87 @@
 // ============================================================================
-// IMS 2.0 — Attendance Check-In/Check-Out
+// IMS 2.0 — Attendance Check-In/Check-Out (the ONE self check-in door)
 // ============================================================================
-// Self-service check-in card. Server-authoritative with a localStorage cache
-// for instant paint. Guards against double check-in:
-//   - On mount it reconciles against today's server record (so an already-
-//     checked-in user sees the checked-in state even on a fresh device).
-//   - The Check In button is disabled once checked in.
-// The backend is idempotent on (employee, store, date), so a stray duplicate
-// POST is harmless; this guard keeps the UI honest.
+// R01: this card shows only what the SERVER holds for today (GET /hr/me/
+// attendance -> today). Nothing is cached in the browser and nothing is shown
+// as saved until the server says so: a refused / failed / offline check-in or
+// check-out stays visibly unsaved with the server's reason and a retry. After
+// every successful write the card re-reads the server, so a reload and My Work
+// agree with it. Every role uses it (R13: the routes are not finance-gated).
+// Location: sent when the browser gives it; when it does not, the request goes
+// without coordinates and the server's existing rule decides (exempt roles
+// pass, fenced roles are refused with a clear message).
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { hrApi } from '../../services/api';
-import { Clock, MapPin, LogIn, LogOut, CheckCircle, AlertTriangle } from 'lucide-react';
-import { istDayString } from '../../utils/datetime';
+import type { MyAttendanceToday } from '../../services/api/hr';
+import { Clock, LogIn, LogOut, CheckCircle, AlertTriangle, Loader2 } from 'lucide-react';
+import { formatTimeIST } from '../../utils/datetime';
+import { getErrorMessage } from '../../utils/errorHandler';
 
-interface AttendanceRecord {
-  date: string;
-  attendanceId: string | null;
-  checkIn: string | null;
-  checkOut: string | null;
-  status: 'CHECKED_IN' | 'CHECKED_OUT' | 'NOT_CHECKED_IN';
-  location?: { lat: number; lng: number };
-  late: boolean;
-}
-
-function todayIso(): string {
-  return istDayString(new Date())!;
+function getLocation(): Promise<{ lat: number; lng: number } | null> {
+  return new Promise((resolve) => {
+    if (!navigator.geolocation) { resolve(null); return; }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+      () => resolve(null),
+      { timeout: 10000, enableHighAccuracy: true },
+    );
+  });
 }
 
 export function AttendanceWidget() {
   const { user } = useAuth();
-  const [record, setRecord] = useState<AttendanceRecord>({
-    date: todayIso(),
-    attendanceId: null,
-    checkIn: null, checkOut: null,
-    status: 'NOT_CHECKED_IN', late: false,
-  });
-  const [isLoading, setIsLoading] = useState(false);
-  const [geoError, setGeoError] = useState<string | null>(null);
+  const [today, setToday] = useState<MyAttendanceToday | null>(null);
+  const [loaded, setLoaded] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
 
-  // Optimistic cache key.
-  const cacheKey = `attendance-${user?.id}-${record.date}`;
-
-  // 1) Instant paint from localStorage. 2) Reconcile with the server so an
-  //    already-checked-in user (on any device) sees the real state.
-  useEffect(() => {
-    const saved = localStorage.getItem(cacheKey);
-    if (saved) {
-      try { setRecord((prev) => ({ ...prev, ...JSON.parse(saved) })); } catch { /* ignore */ }
+  const load = useCallback(async () => {
+    try {
+      const data = await hrApi.getMyAttendance();
+      setToday(data?.today ?? null);
+      setLoadError(null);
+    } catch (e) {
+      setLoadError(getErrorMessage(e, "Could not load today's attendance."));
+    } finally {
+      setLoaded(true);
     }
-    let cancelled = false;
-    (async () => {
-      if (!user?.id) return;
-      try {
-        const data = await hrApi.getAttendance(user.activeStoreId || '', todayIso());
-        const records: any[] = data?.records || [];
-        const mine = records.find(
-          (r) => (r.employeeId === user.id || r.userId === user.id) && r.date === todayIso(),
-        );
-        if (mine && !cancelled) {
-          setRecord((prev) => ({
-            ...prev,
-            attendanceId: mine.attendanceId || mine.id || null,
-            checkIn: mine.checkIn ?? prev.checkIn,
-            checkOut: mine.checkOut ?? prev.checkOut,
-            status: mine.checkOut ? 'CHECKED_OUT' : 'CHECKED_IN',
-          }));
-        }
-      } catch {
-        // Offline / no DB — keep the optimistic localStorage state.
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [user?.id, user?.activeStoreId]);
+  }, []);
 
-  const saveRecord = (updated: AttendanceRecord) => {
-    localStorage.setItem(`attendance-${user?.id}-${updated.date}`, JSON.stringify(updated));
-    setRecord(updated);
-  };
+  useEffect(() => { if (user?.id) void load(); }, [user?.id, load]);
 
-  const getLocation = (): Promise<{ lat: number; lng: number } | null> => {
-    return new Promise((resolve) => {
-      if (!navigator.geolocation) { setGeoError('Geolocation not supported'); resolve(null); return; }
-      navigator.geolocation.getCurrentPosition(
-        (pos) => { setGeoError(null); resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude }); },
-        () => { setGeoError('Location access denied — check-in will proceed without location'); resolve(null); },
-        { timeout: 5000 }
-      );
-    });
-  };
+  const checkedIn = !!today?.check_in;
+  const checkedOut = !!today?.check_out;
 
   const handleCheckIn = async () => {
-    // UI guard: never double check-in.
-    if (record.status !== 'NOT_CHECKED_IN') return;
-    setIsLoading(true);
-    const loc = await getLocation();
+    if (busy || checkedIn) return;
+    setBusy(true);
+    setActionError(null);
     try {
-      // Geo-fenced, late-aware check-in (query-param contract). Idempotent server-side.
-      const res = await hrApi.checkIn(user?.activeStoreId || '', loc?.lat ?? 0, loc?.lng ?? 0);
-      saveRecord({
-        ...record,
-        checkIn: res?.checkInTime || new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }),
-        status: 'CHECKED_IN',
-        location: loc || undefined,
-        late: !!res?.is_late,
-      });
-    } catch {
-      // Fail-soft: still reflect locally so the user isn't stuck; the backend
-      // idempotency means a later real check-in won't duplicate.
-      saveRecord({
-        ...record,
-        checkIn: new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }),
-        status: 'CHECKED_IN',
-        location: loc || undefined,
-      });
+      const loc = await getLocation();
+      await hrApi.checkIn(user?.activeStoreId || '', loc?.lat, loc?.lng);
+      await load();
+    } catch (e) {
+      setActionError(getErrorMessage(e, 'Check-in was not saved. Please try again.'));
     } finally {
-      setIsLoading(false);
+      setBusy(false);
     }
   };
 
   const handleCheckOut = async () => {
-    if (record.status !== 'CHECKED_IN') return;
-    setIsLoading(true);
-    const checkOutTime = new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
+    if (busy || !checkedIn || checkedOut) return;
+    setBusy(true);
+    setActionError(null);
     try {
-      if (record.attendanceId) {
-        await hrApi.checkOut(record.attendanceId);
-      }
-    } catch {
-      // Keep local state regardless.
+      await hrApi.checkOut(user?.activeStoreId || '');
+      await load();
+    } catch (e) {
+      setActionError(getErrorMessage(e, 'Check-out was not saved. Please try again.'));
+    } finally {
+      setBusy(false);
     }
-    saveRecord({ ...record, checkOut: checkOutTime, status: 'CHECKED_OUT' });
-    setIsLoading(false);
   };
 
   return (
@@ -141,58 +90,55 @@ export function AttendanceWidget() {
         <h3 className="font-semibold text-gray-900 flex items-center gap-2">
           <Clock className="w-5 h-5 text-bv-red-500" /> Attendance
         </h3>
-        <span className="text-xs text-gray-500">{new Date().toLocaleDateString('en-IN', { weekday: 'long', day: '2-digit', month: 'short' })}</span>
+        <span className="text-xs text-gray-500">{new Date().toLocaleDateString('en-IN', { weekday: 'long', day: '2-digit', month: 'short', timeZone: 'Asia/Kolkata' })}</span>
       </div>
 
-      {record.status === 'NOT_CHECKED_IN' && (
+      {!loaded ? (
+        <div className="flex justify-center py-4"><Loader2 className="w-5 h-5 animate-spin text-gray-400" /></div>
+      ) : !checkedIn ? (
         <div className="text-center py-4">
-          <p className="text-sm text-gray-500 mb-3">You haven't checked in today</p>
-          <button onClick={handleCheckIn} disabled={isLoading}
+          <p className="text-sm text-gray-500 mb-3">
+            {loadError ? "Today's attendance could not be loaded." : "You haven't checked in today"}
+          </p>
+          <button onClick={handleCheckIn} disabled={busy}
             className="flex items-center gap-2 mx-auto px-6 py-3 bg-green-500 text-white rounded-xl font-semibold hover:bg-green-600 disabled:opacity-50 transition-colors">
-            <LogIn className="w-5 h-5" /> {isLoading ? 'Getting location...' : 'Check In'}
+            <LogIn className="w-5 h-5" /> {busy ? 'Saving...' : 'Check In'}
           </button>
         </div>
-      )}
-
-      {record.status === 'CHECKED_IN' && (
+      ) : !checkedOut ? (
         <div className="space-y-3">
-          <div className="bg-green-50 border border-green-200 rounded-lg p-3 flex items-center justify-between">
-            <div>
-              <p className="text-sm font-medium text-green-700 flex items-center gap-1">
-                <CheckCircle className="w-4 h-4" /> Checked in at {record.checkIn}
+          <div className="bg-green-50 border border-green-200 rounded-lg p-3">
+            <p className="text-sm font-medium text-green-700 flex items-center gap-1">
+              <CheckCircle className="w-4 h-4" /> Checked in at {formatTimeIST(today?.check_in)}
+            </p>
+            {today?.is_late && (
+              <p className="text-xs text-amber-600 flex items-center gap-1 mt-1">
+                <AlertTriangle className="w-3 h-3" /> Late arrival
               </p>
-              {record.late && (
-                <p className="text-xs text-amber-600 flex items-center gap-1 mt-1">
-                  <AlertTriangle className="w-3 h-3" /> Late arrival
-                </p>
-              )}
-              {record.location && (
-                <p className="text-xs text-gray-500 flex items-center gap-1 mt-1">
-                  <MapPin className="w-3 h-3" /> Location recorded
-                </p>
-              )}
-            </div>
+            )}
           </div>
-          <button onClick={handleCheckOut} disabled={isLoading}
+          <button onClick={handleCheckOut} disabled={busy}
             className="w-full flex items-center justify-center gap-2 px-6 py-3 bg-red-500 text-white rounded-xl font-semibold hover:bg-red-600 disabled:opacity-50 transition-colors">
-            <LogOut className="w-5 h-5" /> Check Out
+            <LogOut className="w-5 h-5" /> {busy ? 'Saving...' : 'Check Out'}
           </button>
         </div>
-      )}
-
-      {record.status === 'CHECKED_OUT' && (
+      ) : (
         <div className="bg-gray-50 rounded-lg p-4 text-center">
           <CheckCircle className="w-8 h-8 text-green-500 mx-auto mb-2" />
           <p className="font-medium text-gray-900">Day complete</p>
           <div className="flex justify-center gap-4 mt-2 text-sm text-gray-500">
-            <span>In: {record.checkIn}</span>
-            <span>Out: {record.checkOut}</span>
+            <span>In: {formatTimeIST(today?.check_in)}</span>
+            <span>Out: {formatTimeIST(today?.check_out)}</span>
           </div>
-          {record.late && <p className="text-xs text-amber-600 mt-1">Late mark recorded</p>}
+          {today?.is_late && <p className="text-xs text-amber-600 mt-1">Late mark recorded</p>}
         </div>
       )}
 
-      {geoError && <p className="text-xs text-amber-600 mt-2">{geoError}</p>}
+      {actionError && (
+        <p role="alert" className="text-sm text-red-600 mt-3 flex items-start gap-1">
+          <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" /> {actionError}
+        </p>
+      )}
     </div>
   );
 }

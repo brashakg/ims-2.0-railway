@@ -142,7 +142,9 @@ export function FootfallPage() {
         const walkIns = entered.has(id) ? (entered.get(id) as number) : null;
         return {
           staff_id: id,
-          name: nameById[id] || id,
+          // L2-POS-F02: the server names every roster row from the staff
+          // directory; a raw id is never the normal display.
+          name: st.staff_names?.[id] || nameById[id] || `Unknown staff (${id.slice(0, 6)})`,
           walk_ins: walkIns,
           walkouts: f?.walkouts_today ?? 0,
           conversion: f?.conversion_score ?? null,

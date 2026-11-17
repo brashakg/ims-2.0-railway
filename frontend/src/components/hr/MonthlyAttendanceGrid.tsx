@@ -12,13 +12,22 @@
 // save upserts via POST /hr/attendance/mark (keyed on employee_id + date),
 // then refetches the grid. Lower roles see the grid read-only.
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { ChevronLeft, ChevronRight, Loader2, AlertTriangle, Pencil, X } from 'lucide-react';
 import { hrApi } from '../../services/api';
 import type { AttendanceCode, AttendanceGrid, LwpReport } from '../../services/api/hr';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import clsx from 'clsx';
+import { getErrorMessage } from '../../utils/errorHandler';
+
+// Stored ISO instant -> 'HH:MM' IST for an <input type="time"> ('' if none).
+function istHHMM(value: string | null | undefined): string {
+  if (!value) return '';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' });
+}
 
 // Statuses an admin can set from the edit modal. Maps 1:1 to the codes the
 // grid renders (server normalises any of these on POST /attendance/mark).
@@ -96,6 +105,9 @@ export function MonthlyAttendanceGrid({
   const [grid, setGrid] = useState<AttendanceGrid | null>(null);
   const [lwp, setLwp] = useState<LwpReport | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  // #1433: a failed read is said out loud, never shown as an empty month.
+  const [loadError, setLoadError] = useState(false);
+  const [lwpError, setLwpError] = useState(false);
 
   // Admin edit modal state.
   const canEdit = hasRole(['SUPERADMIN', 'ADMIN', 'STORE_MANAGER']);
@@ -103,6 +115,15 @@ export function MonthlyAttendanceGrid({
   const [editStatus, setEditStatus] = useState<string>('PRESENT');
   const [editCheckIn, setEditCheckIn] = useState<string>('');
   const [editCheckOut, setEditCheckOut] = useState<string>('');
+  // R14: the times as recorded when the modal opened. A time box left equal to
+  // these is NOT sent (the server keeps the stored time); emptied = cleared.
+  const [origTimes, setOrigTimes] = useState<{ in: string; out: string }>({ in: '', out: '' });
+  const [timesNote, setTimesNote] = useState<string | null>(null);
+  // While the recorded times load, the time boxes and Save are locked, so a
+  // late answer can never overwrite what the manager typed (#1433). editSeq
+  // drops an answer that belongs to an earlier modal.
+  const [timesLoading, setTimesLoading] = useState(false);
+  const editSeq = useRef(0);
   const [saving, setSaving] = useState(false);
 
   // The store this grid reads. Explicit prop wins so the page can drive it.
@@ -112,20 +133,28 @@ export function MonthlyAttendanceGrid({
     if (!effectiveStore) {
       setGrid(null);
       setLwp(null);
+      setLoadError(false);
+      setLwpError(false);
       return;
     }
     setIsLoading(true);
+    setLoadError(false);
+    setLwpError(false);
     const [y, m] = month.split('-').map(Number);
     try {
       const [gridData, lwpData] = await Promise.all([
         hrApi.getAttendanceGrid({ month, storeId: effectiveStore }),
-        hrApi.getLwpReport({ year: y, month: m, storeId: effectiveStore }).catch(() => null),
+        hrApi.getLwpReport({ year: y, month: m, storeId: effectiveStore }).catch(() => {
+          setLwpError(true);
+          return null;
+        }),
       ]);
       setGrid(gridData);
       setLwp(lwpData);
     } catch {
       setGrid(null);
       setLwp(null);
+      setLoadError(true);
     } finally {
       setIsLoading(false);
     }
@@ -139,43 +168,77 @@ export function MonthlyAttendanceGrid({
   // from the current cell code.
   const openEdit = useCallback((emp: { employee_id: string; name: string }, day: number) => {
     if (!canEdit) return;
-    const code = (grid?.employees.find((e) => e.employee_id === emp.employee_id)?.days[String(day)] || '-') as AttendanceCode;
+    const row = grid?.employees.find((e) => e.employee_id === emp.employee_id);
+    // D48: a day saved without a shop is read-only from a shop's grid.
+    if (row?.no_shop_days?.includes(String(day))) {
+      toast.warning('Shop not recorded for this day. It cannot be corrected from this shop.');
+      return;
+    }
+    const code = (row?.days[String(day)] || '-') as AttendanceCode;
     const match = EDITABLE_STATUSES.find((s) => s.code === code);
     setEditStatus(match?.value || 'PRESENT');
     setEditCheckIn('');
     setEditCheckOut('');
+    setOrigTimes({ in: '', out: '' });
+    setTimesNote(null);
+    const seq = ++editSeq.current;
+    setTimesLoading(false);
+    const date = dateForDay(month, day);
     setEdit({
       employeeId: emp.employee_id,
       employeeName: emp.name,
       day,
-      date: dateForDay(month, day),
+      date,
       currentCode: code,
     });
-  }, [canEdit, grid, month]);
+    // R14: reopen shows the recorded times (same store as the grid, R15).
+    if (code !== '-' && effectiveStore) {
+      setTimesLoading(true);
+      hrApi.getAttendance(effectiveStore, date, emp.employee_id)
+        .then((data) => {
+          if (seq !== editSeq.current) return;
+          const rec = (data?.records || []).find((r: any) => r.employeeId === emp.employee_id && r.date === date);
+          const t = { in: istHHMM(rec?.checkIn), out: istHHMM(rec?.checkOut) };
+          setOrigTimes(t);
+          setEditCheckIn(t.in);
+          setEditCheckOut(t.out);
+        })
+        .catch(() => {
+          if (seq !== editSeq.current) return;
+          setTimesNote('Recorded times could not be loaded. Leave the boxes empty to keep them unchanged.');
+        })
+        .finally(() => {
+          if (seq === editSeq.current) setTimesLoading(false);
+        });
+    }
+  }, [canEdit, grid, month, effectiveStore, toast]);
 
   const saveEdit = useCallback(async () => {
     if (!edit) return;
     setSaving(true);
     try {
-      // check_in / check_out are optional times (HH:MM); send full ISO so the
-      // backend's datetime parser accepts them. Omitted when blank.
+      // check_in / check_out are HH:MM; sent as full ISO only when CHANGED from
+      // what was recorded (R14): unchanged -> omitted (server keeps it),
+      // emptied -> null (deliberate clear, audited server-side).
       const toIso = (t: string) => (t ? `${edit.date}T${t}:00` : null);
       await hrApi.markAttendance({
         employee_id: edit.employeeId,
         date: edit.date,
         status: editStatus,
-        check_in: toIso(editCheckIn),
-        check_out: toIso(editCheckOut),
+        check_in: editCheckIn === origTimes.in ? undefined : toIso(editCheckIn),
+        check_out: editCheckOut === origTimes.out ? undefined : toIso(editCheckOut),
+        // R15: write to the store this grid is showing, not the login's store.
+        store_id: effectiveStore || undefined,
       });
       toast.success(`Attendance updated for ${edit.employeeName}`);
       setEdit(null);
       await load();
-    } catch {
-      toast.error('Could not update attendance. Please try again.');
+    } catch (e) {
+      toast.error(getErrorMessage(e, 'Could not update attendance. Please try again.'));
     } finally {
       setSaving(false);
     }
-  }, [edit, editStatus, editCheckIn, editCheckOut, load, toast]);
+  }, [edit, editStatus, editCheckIn, editCheckOut, origTimes, effectiveStore, load, toast]);
 
   const days = grid?.days ?? [];
   const employees = grid?.employees ?? [];
@@ -233,6 +296,15 @@ export function MonthlyAttendanceGrid({
         <div className="flex justify-center py-12">
           <Loader2 className="w-8 h-8 animate-spin text-bv-red-600" />
         </div>
+      ) : loadError ? (
+        <div className="card text-center py-12 text-red-700" role="alert">
+          <p className="flex items-center justify-center gap-2">
+            <AlertTriangle className="w-4 h-4" /> Attendance could not be loaded. Nothing is shown so a blank day is not mistaken for an absence.
+          </p>
+          <button type="button" onClick={() => void load()} className="btn-outline text-sm mt-3">
+            Retry
+          </button>
+        </div>
       ) : employees.length === 0 ? (
         <div className="card text-center py-12 text-gray-500">
           <p>No employees / attendance for this month</p>
@@ -288,6 +360,20 @@ export function MonthlyAttendanceGrid({
                     </span>
                   </td>
                   {days.map(day => {
+                    if (emp.no_shop_days?.includes(String(day))) {
+                      // D48: saved without a shop -- shown, never editable here.
+                      return (
+                        <td key={day} className="px-1 py-1.5 text-center">
+                          <span
+                            title="Shop not recorded"
+                            aria-label={`${emp.name} day ${day}: Shop not recorded`}
+                            className="inline-flex w-7 h-7 items-center justify-center rounded text-xs font-bold bg-gray-100 text-gray-500 border border-dashed border-gray-300"
+                          >
+                            ?
+                          </span>
+                        </td>
+                      );
+                    }
                     const code = (emp.days[String(day)] || '-') as AttendanceCode;
                     const color = ATTENDANCE_COLORS[code] || ATTENDANCE_COLORS['-'];
                     const { isWeekend } = weekdayInitial(month, day);
@@ -353,6 +439,13 @@ export function MonthlyAttendanceGrid({
               </tfoot>
             )}
           </table>
+        </div>
+      )}
+
+      {!isLoading && !loadError && lwpError && (
+        <div className="card text-sm text-red-700" role="alert">
+          LWP report could not be loaded.{' '}
+          <button type="button" onClick={() => void load()} className="underline">Retry</button>
         </div>
       )}
 
@@ -459,6 +552,7 @@ export function MonthlyAttendanceGrid({
                     id="att-in"
                     type="time"
                     value={editCheckIn}
+                    disabled={timesLoading}
                     onChange={(e) => setEditCheckIn(e.target.value)}
                     className="input-field w-full"
                   />
@@ -471,11 +565,14 @@ export function MonthlyAttendanceGrid({
                     id="att-out"
                     type="time"
                     value={editCheckOut}
+                    disabled={timesLoading}
                     onChange={(e) => setEditCheckOut(e.target.value)}
                     className="input-field w-full"
                   />
                 </div>
               </div>
+              {timesLoading && <p className="text-xs text-gray-500">Loading the recorded times...</p>}
+              {timesNote && <p className="text-xs text-amber-700">{timesNote}</p>}
             </div>
             <div className="flex justify-end gap-2 border-t border-gray-200 px-5 py-3">
               <button
@@ -489,7 +586,7 @@ export function MonthlyAttendanceGrid({
               <button
                 type="button"
                 onClick={saveEdit}
-                disabled={saving}
+                disabled={saving || timesLoading}
                 className="btn-primary text-sm disabled:opacity-50 flex items-center gap-2"
               >
                 {saving && <Loader2 className="w-4 h-4 animate-spin" />}
