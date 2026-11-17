@@ -76,6 +76,17 @@ Do these in any order, whenever you're ready for that feature. For each: make th
 
 ### D. GST e-invoicing (IRN + QR on tax invoices) — *legally required at B2B scale*
 **Why:** big-value B2B invoices legally need a government IRN + signed QR.
+
+> **STOP - do NOT do step 3 yet (decision D31, 2026-11-11).** E-invoicing stays OFF until Claude has fixed all six of these and told you so in writing; switching it on before then can send wrong invoices to the government portal:
+> 1. Two servers could send the same invoice at the same moment (no lock that lets only one through).
+> 2. A consumer (B2C) bill is accepted for an IRN; the CA said IRN is for B2B bills, credit/debit notes and MH-JH transfers only.
+> 3. Seller and buyer addresses go out as placeholders (address ".", PIN "000000").
+> 4. Settings holds only one e-invoice configuration, not one per GSTIN.
+> 5. No screen fetches a signed QR that the portal issued but IMS did not save.
+> 6. Never tested against the government sandbox (rounding tolerance, reply formats, including the "already cancelled" reply).
+>
+> Steps 1-2 are safe to prepare; step 3 is the switch.
+
 1. Pick a **GSP/ASP provider** (e.g. ClearTax, Masters India, Cygnet) and sign up for **e-invoicing API access** for each of your GSTINs. They give you a **username, password, and API URL** per GSTIN.
 2. In the app: **Settings → Integrations**, add an "e-invoice" entry per GSTIN with those values (or tell Claude the values and it'll guide where they go).
 3. On Railway set `IMS_EINVOICE_ENABLED`=`1`.

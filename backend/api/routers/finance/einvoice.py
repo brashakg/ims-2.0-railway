@@ -5,6 +5,8 @@ package split): no path, method, dependency, status code, response_model
 or default was changed.
 """
 
+import logging
+
 from fastapi import Depends, HTTPException
 from ..auth import get_current_user
 from ...dependencies import can_access_store_scoped, validate_store_access
@@ -32,7 +34,7 @@ async def trigger_einvoice(
     a 500. Finance roles only: ACCOUNTANT / ADMIN / SUPERADMIN.
     """
     from api.routers.auth import require_roles
-    from api.services.einvoice import generate_irn
+    from api.services.einvoice import _stored_order, generate_irn
 
     role = str(
         current_user.get("activeRole") or (current_user.get("roles") or [""])[0] or ""
@@ -44,26 +46,17 @@ async def trigger_einvoice(
 
     db = _get_db()
 
-    # Load the order / invoice doc for this id
-    order = None
-    for collection_name in ("orders", "invoices"):
-        try:
-            coll = db.get_collection(collection_name)
-            doc = coll.find_one(
-                {
-                    "$or": [
-                        {"id": order_id},
-                        {"order_id": order_id},
-                        {"invoice_id": order_id},
-                    ]
-                },
-                {"_id": 0},
-            )
-            if doc:
-                order = doc
-                break
-        except Exception:  # noqa: BLE001 -- db not available in test env
-            pass
+    # The order / invoice as stored, by the one id rule generation and
+    # cancellation use. A read that FAILS is 503, never "not found" (audit
+    # 1409 round 3: the failure was swallowed and answered 404).
+    try:
+        order = _stored_order(db, order_id)
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger(__name__).warning("[EINVOICE] order %s could not be read: %s", order_id, exc)
+        raise HTTPException(
+            status_code=503,
+            detail="The order could not be read just now, so nothing was sent. Please try again.",
+        )
 
     if order is None:
         raise HTTPException(
