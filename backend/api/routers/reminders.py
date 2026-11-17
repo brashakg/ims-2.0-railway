@@ -90,6 +90,21 @@ class TriggerSpec(BaseModel):
     cron: Optional[str] = None  # e.g. "DAILY 09:00"
     event_key: Optional[str] = None  # e.g. "churn.detected" (EVENT)
 
+    @field_validator("cron")
+    @classmethod
+    def _cron_is_a_known_cadence(cls, v: Optional[str]) -> Optional[str]:
+        """D56: MEGAPHONE fires a CRON rule once per IST day ('DAILY HH:MM') or
+        week ('WEEKLY HH:MM'). Any other text would never fire, so it is
+        refused here instead of being saved as a rule that silently does
+        nothing."""
+        if v is None or not v.strip():
+            return None
+        from api.services.reminder_rail import parse_cron
+
+        if parse_cron(v) is None:
+            raise ValueError("Schedule must be 'DAILY HH:MM' or 'WEEKLY HH:MM' (IST), e.g. DAILY 09:00")
+        return v.strip().upper()
+
 
 class VoucherTemplate(BaseModel):
     type: Literal["GIFT_CARD", "DISCOUNT"] = "DISCOUNT"

@@ -166,7 +166,7 @@ class _FakeDB:
 
 
 async def _noop_send(**kwargs):
-    return {"status": "queued", "notification_id": "NTF-TEST"}
+    return {"status": "PENDING", "notification_id": "NTF-TEST", "persisted": True}
 
 
 def _noop_rate(*_a, **_k):
@@ -318,6 +318,78 @@ def test_single_send_allows_consented_customer(monkeypatch):
     assert r.status_code == 200, r.text
 
 
+@pytest.mark.parametrize("sent_category", [None, "SERVICE", "TRANSACTIONAL", "REMINDER"])
+def test_single_send_cannot_stamp_a_promotional_template_as_service(monkeypatch, sent_category):
+    """Codex 1419 round 1: BIRTHDAY_WISH sent with the category omitted (the
+    schema default SERVICE) or a misleading one was stored as a transactional
+    row, so a later STOP never stopped it. The endpoint's own rule (everything
+    outside _TRANSACTIONAL_TEMPLATES is promotional) now decides the category."""
+    import api.routers.marketing as marketing_mod
+
+    seen = {}
+
+    async def _capture(**kw):
+        seen.update(kw)
+        return {"status": "PENDING", "notification_id": "N1", "persisted": True}
+
+    db = _FakeDB({"customers": _FakeColl([{"customer_id": "C1", "marketing_consent": True}])})
+    client = _mk_marketing_client(db, monkeypatch=monkeypatch)
+    monkeypatch.setattr(marketing_mod, "send_notification", _capture)
+    body = {"customer_id": "C1", "customer_phone": "9000000001", "customer_name": "T", "template_id": "BIRTHDAY_WISH"}
+    if sent_category:
+        body["category"] = sent_category
+    r = client.post(
+        "/api/v1/marketing/notifications/send",
+        json=body,
+        headers={"Authorization": f"Bearer {_tok(['STORE_MANAGER'])}"},
+    )
+    assert r.status_code == 200, r.text
+    assert seen["category"] == "MARKETING"
+
+
+def test_single_send_refuses_a_message_with_an_unfilled_placeholder(monkeypatch):
+    """D56: the queue writer refuses; the door says so (422), never 'queued'."""
+    import api.routers.marketing as marketing_mod
+
+    async def _refused(**kw):
+        return {"status": "REFUSED", "missing_variables": ["order_number"], "persisted": False}
+
+    db = _FakeDB({"customers": _FakeColl([{"customer_id": "C1", "marketing_consent": True}])})
+    client = _mk_marketing_client(db, monkeypatch=monkeypatch)
+    monkeypatch.setattr(marketing_mod, "send_notification", _refused)
+    r = client.post(
+        "/api/v1/marketing/notifications/send",
+        json={"customer_id": "C1", "customer_phone": "9000000001", "customer_name": "T", "template_id": "ORDER_DELIVERED"},
+        headers={"Authorization": f"Bearer {_tok(['STORE_MANAGER'])}"},
+    )
+    assert r.status_code == 422 and "order_number" in r.json()["detail"]
+
+
+def test_hand_sent_rx_reminder_is_queued_as_marketing(monkeypatch):
+    """D56: a manual REMINDER send is promotional (STOP wins at the drain)."""
+    import api.routers.marketing as marketing_mod
+
+    seen = {}
+
+    async def _capture(**kw):
+        seen.update(kw)
+        return {"status": "PENDING", "notification_id": "N1", "persisted": True}
+
+    db = _FakeDB(
+        {
+            "customers": _FakeColl([{"customer_id": "C1", "mobile": "9000000001", "marketing_consent": True}]),
+            "stores": _FakeColl([]),
+            "prescriptions": _FakeColl([]),
+            "notification_logs": _FakeColl([]),
+        }
+    )
+    client = _mk_marketing_client(db, monkeypatch=monkeypatch)
+    monkeypatch.setattr(marketing_mod, "send_notification", _capture)
+    r = client.post("/api/v1/marketing/rx-reminder/C1", headers={"Authorization": f"Bearer {_tok(['STORE_MANAGER'])}"})
+    assert r.status_code == 200, r.text
+    assert seen["category"] == "MARKETING"
+
+
 # ---------------------------------------------------------------------------
 # BUG-3 + BUG-4: /rx-reminder — consent + phone validation
 # ---------------------------------------------------------------------------
@@ -420,7 +492,7 @@ def test_rx_reminder_dedup_blocks_within_24h(monkeypatch):
         "customer_id": "C1",
         "template_id": "PRESCRIPTION_EXPIRY",
         "status": "SENT",
-        "created_at": (datetime.now() - timedelta(hours=2)).isoformat(),
+        "created_at": (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(),
     }
     db = _FakeDB(
         {
@@ -442,13 +514,53 @@ def test_rx_reminder_dedup_blocks_within_24h(monkeypatch):
     assert "24 hours" in r.json()["detail"].lower()
 
 
+def test_rx_reminder_24h_guard_holds_on_an_ist_host(monkeypatch):
+    """Rows are stamped utc_now_iso(). On a host whose clock is IST, a naive
+    datetime.now() cutoff compared as a string shortened the window to 18.5 h,
+    so a reminder queued 20 h ago did not block a second one."""
+    import api.routers.marketing as marketing_mod
+
+    ist = timezone(timedelta(hours=5, minutes=30))
+
+    class _IstHostDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            real = datetime.now(timezone.utc)
+            return real.astimezone(tz) if tz else real.astimezone(ist).replace(tzinfo=None)
+
+    monkeypatch.setattr(marketing_mod, "datetime", _IstHostDatetime)
+    recent_log = {
+        "customer_id": "C1",
+        "template_id": "PRESCRIPTION_EXPIRY",
+        "status": "PENDING",
+        "created_at": (datetime.now(timezone.utc) - timedelta(hours=20)).isoformat(),
+    }
+    db = _FakeDB(
+        {
+            "customers": _FakeColl(
+                [{"customer_id": "C1", "mobile": "9000000001", "marketing_consent": True}]
+            ),
+            "stores": _FakeColl([]),
+            "prescriptions": _FakeColl([]),
+            "notification_logs": _FakeColl([recent_log]),
+        }
+    )
+    client = _mk_marketing_client(db, monkeypatch=monkeypatch)
+    r = client.post(
+        "/api/v1/marketing/rx-reminder/C1",
+        headers={"Authorization": f"Bearer {_tok(['STORE_MANAGER'])}"},
+    )
+    assert r.status_code == 429, r.text
+
+
 def test_rx_reminder_dedup_allows_after_24h(monkeypatch):
     """An Rx reminder logged 25 hours ago does NOT block a new send."""
     old_log = {
         "customer_id": "C1",
         "template_id": "PRESCRIPTION_EXPIRY",
         "status": "SENT",
-        "created_at": (datetime.now() - timedelta(hours=25)).isoformat(),
+        # Stamped the way the real queue writer stamps it (utc_now_iso).
+        "created_at": (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat(),
     }
     db = _FakeDB(
         {
@@ -512,7 +624,7 @@ def test_rx_reminder_populates_expiry_date_from_prescription(monkeypatch):
 
     async def _capture_send(**kwargs):
         captured_vars.update(kwargs.get("variables", {}))
-        return {"status": "queued", "notification_id": "NTF-TEST"}
+        return {"status": "PENDING", "notification_id": "NTF-TEST", "persisted": True}
 
     db = _FakeDB(
         {
@@ -553,7 +665,7 @@ def test_rx_reminder_falls_back_to_soon_when_no_prescription(monkeypatch):
 
     async def _capture_send(**kwargs):
         captured_vars.update(kwargs.get("variables", {}))
-        return {"status": "queued"}
+        return {"status": "PENDING", "persisted": True}
 
     db = _FakeDB(
         {
@@ -660,7 +772,7 @@ def test_walkout_legacy_record_endpoint_retired_410(monkeypatch):
 
     async def _capture_send(**kwargs):
         notif_calls.append(kwargs)
-        return {"status": "queued"}
+        return {"status": "PENDING", "persisted": True}
 
     db = _FakeDB(
         {

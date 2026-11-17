@@ -16,6 +16,7 @@ import { Plus, X, Eye, Play, Pencil, Trash2, RefreshCw, AlertCircle } from 'luci
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { remindersApi, settingsApi } from '../../services/api';
+import { templatePickerOptions, type TemplatePickerOption } from '../../constants/notifications';
 import type {
   ReminderRule,
   ReminderRuleCreate,
@@ -86,7 +87,12 @@ export function RemindersSettings() {
   );
 
   const [rules, setRules] = useState<ReminderRule[]>([]);
-  const [templates, setTemplates] = useState<string[]>([]);
+  // The template picker's options come from the server's effective catalog
+  // (built-ins + saved), so a fresh database still offers the built-ins.
+  // `templatesFailed` is its own state: a failed read must say so instead of
+  // looking like "there are no templates".
+  const [templates, setTemplates] = useState<TemplatePickerOption[]>([]);
+  const [templatesFailed, setTemplatesFailed] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -116,18 +122,21 @@ export function RemindersSettings() {
     }
   }, []);
 
-  useEffect(() => {
-    load();
+  const loadTemplates = useCallback(() => {
+    setTemplatesFailed(false);
     settingsApi
       .getNotificationTemplates()
-      .then((res: { templates?: Array<{ template_id?: string }> }) => {
-        const ids = (res.templates || [])
-          .map((t) => t.template_id)
-          .filter((x): x is string => !!x);
-        setTemplates(ids);
-      })
-      .catch(() => setTemplates([]));
-  }, [load]);
+      .then((res: unknown) => setTemplates(templatePickerOptions(res)))
+      .catch(() => {
+        setTemplates([]);
+        setTemplatesFailed(true);
+      });
+  }, []);
+
+  useEffect(() => {
+    load();
+    loadTemplates();
+  }, [load, loadTemplates]);
 
   const openCreate = () => {
     setEditingId(null);
@@ -504,15 +513,29 @@ export function RemindersSettings() {
                   >
                     <option value="">Select…</option>
                     {templates.map((t) => (
-                      <option key={t} value={t}>
-                        {t}
+                      // A rule keeps the template it already has even if that
+                      // template can no longer be picked afresh.
+                      <option
+                        key={t.id}
+                        value={t.id}
+                        disabled={!t.selectable && t.id !== draft.template_id}
+                      >
+                        {t.label}
                       </option>
                     ))}
                     {/* allow keeping an existing template_id not in the list */}
-                    {draft.template_id && !templates.includes(draft.template_id) && (
+                    {draft.template_id && !templates.some((t) => t.id === draft.template_id) && (
                       <option value={draft.template_id}>{draft.template_id}</option>
                     )}
                   </select>
+                  {templatesFailed && (
+                    <p className="mt-1 text-xs text-red-600" role="alert">
+                      Could not load the template list.{' '}
+                      <button type="button" className="underline" onClick={loadTemplates}>
+                        Try again
+                      </button>
+                    </p>
+                  )}
                 </div>
               </div>
 

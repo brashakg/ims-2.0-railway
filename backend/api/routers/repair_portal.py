@@ -100,15 +100,19 @@ def _audit(action, *, entity_id, actor, store_id, detail):
         return
 
 
-def _ready_sms(job: Dict[str, Any]) -> None:
+async def _ready_sms(job: Dict[str, Any]) -> Dict[str, Any]:
     """DARK status SMS on READY. Rides notification_service (PENDING row;
-    DISPATCH_MODE-gated -- nothing leaves on a fresh deploy). Fail-soft."""
-    try:
-        import asyncio
+    DISPATCH_MODE-gated -- nothing leaves on a fresh deploy).
 
+    D91: returns the queue writer's verdict for the staff answer. Only a
+    stored message is {"sent": True}; a refused or unsaved one says it was
+    not sent and why. The READY transition itself is already committed, so
+    this never raises."""
+    why = "it could not be saved to the queue"
+    try:
         from ..services import notification_service as ns
 
-        coro = ns.send_notification(
+        res = await ns.send_notification(
             store_id=job.get("store_id") or "",
             customer_id=job.get("customer_id") or "",
             customer_phone=job.get("walkin_mobile") or "",
@@ -120,15 +124,19 @@ def _ready_sms(job: Dict[str, Any]) -> None:
             related_entity_type="repair_job",
             related_entity_id=job.get("job_id"),
         )
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            asyncio.run(coro)
-            return
-        # Inside a running loop (route handler) -- schedule fire-and-forget.
-        asyncio.ensure_future(coro)
     except Exception:  # noqa: BLE001
-        return
+        res = {}
+    res = res if isinstance(res, dict) else {}
+    if res.get("status") == "REFUSED":
+        why = "the message wording needs " + ", ".join(
+            res.get("missing_variables") or ["a value this job does not have"]
+        )
+    elif res.get("persisted"):
+        return {"sent": True, "notification_id": res.get("notification_id")}
+    return {
+        "sent": False,
+        "error": f"The ready message was not sent: {why}. Tell the customer another way.",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -260,16 +268,25 @@ async def transition_job(
         )
     except svc.RepairError as exc:
         _raise(exc)
+    ready_message = None
     if result["to"] == svc.STATUS_READY:
-        _ready_sms(result["job"])
+        ready_message = await _ready_sms(result["job"])
     _audit(
         "repair.transition",
         entity_id=job_id,
         actor=current_user,
         store_id=store_id,
-        detail={"from": result["from"], "to": result["to"]},
+        detail={
+            "from": result["from"],
+            "to": result["to"],
+            **({"ready_message_sent": ready_message["sent"]} if ready_message else {}),
+        },
     )
-    return result["job"]
+    if ready_message is None:
+        return result["job"]
+    # The status change is done; the answer also says whether the customer's
+    # ready message was stored (D91), never an implied "sent".
+    return {**result["job"], "ready_message": ready_message}
 
 
 @router.get("/jobs")

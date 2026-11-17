@@ -406,7 +406,7 @@ def test_t5_freqcap_gates_dark_outbound_and_task_always_created(
 
     async def _fake_send(**kw):
         sends.append(kw)
-        return {"notification_id": f"N-{len(sends)}", "status": "PENDING"}
+        return {"notification_id": f"N-{len(sends)}", "status": "PENDING", "persisted": True}
 
     import api.services.notification_service as ns
 
@@ -438,7 +438,7 @@ def test_t5b_under_cap_queues_dark_send_pending(
 
     async def _fake_send(**kw):
         sends.append(kw)
-        return {"notification_id": f"N-{len(sends)}", "status": "PENDING"}
+        return {"notification_id": f"N-{len(sends)}", "status": "PENDING", "persisted": True}
 
     import api.services.notification_service as ns
     import api.services.reminder_rail as rr

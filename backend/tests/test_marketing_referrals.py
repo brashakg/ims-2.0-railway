@@ -85,7 +85,8 @@ def test_bulk_send_skips_opted_out_customers(monkeypatch):
     monkeypatch.setattr(marketing_router, "_get_db", lambda: db)
 
     async def _fake_send(**kwargs):
-        return {"status": "queued"}
+        # The real writer's verdict: the row reached storage.
+        return {"status": "PENDING", "persisted": True}
 
     monkeypatch.setattr(marketing_router, "send_notification", _fake_send)
     # Defuse the per-user rate limiter so the fan-out isn't throttled.

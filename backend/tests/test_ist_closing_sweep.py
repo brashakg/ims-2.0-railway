@@ -255,7 +255,7 @@ def _send_rx_reminder(rx_created):
 
     async def _capture(**kwargs):
         sent.update(kwargs)
-        return {"status": "SIMULATED"}
+        return {"status": "PENDING", "persisted": True}
 
     db = _DB(
         customers=[{"customer_id": CID, "name": "ZZ Patient", "mobile": "9876543210"}],

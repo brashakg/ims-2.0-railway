@@ -433,6 +433,14 @@ def test_drain_passes_the_rows_store_id(monkeypatch):
 
     class _NotifColl:
         def __init__(self, rows):
+            # Real queue rows carry an _id and the consent_basis the queue
+            # writer stamps; the drain claims by _id (L1-F21) and re-checks
+            # consent for marketing rows (L1-F20). This test is about sender
+            # routing, so both rows ride the transactional basis.
+            for i, r in enumerate(rows):
+                r.setdefault("_id", i)
+                r.setdefault("consent_basis", "transactional")
+                r.setdefault("category", "SERVICE")
             self.rows = rows
             self.updates = []
 
@@ -448,6 +456,7 @@ def test_drain_passes_the_rows_store_id(monkeypatch):
 
         def update_one(self, flt, update):
             self.updates.append((flt, update))
+            return type("R", (), {"modified_count": 1})()
 
     rows = [
         {
@@ -466,7 +475,7 @@ def test_drain_passes_the_rows_store_id(monkeypatch):
             "channel": "WHATSAPP",
             "customer_phone": "919000000002",
             "message": "m2",
-            "template_id": "BIRTHDAY_WISH",
+            "template_id": "ORDER_READY",
             "store_id": "WO-PUN-01",
             "scheduled_for": None,
         },

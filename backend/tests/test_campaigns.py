@@ -27,7 +27,7 @@ import os
 import sys
 import copy
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -131,6 +131,11 @@ class _FakeColl:
     def insert_one(self, doc):
         self.docs.append(copy.deepcopy(doc))
 
+    def create_index(self, *_a, **_k):
+        # Uniqueness itself is proven on native Mongo in
+        # test_b03_campaign_queue_native.py; this fake only accepts the call.
+        return "ok"
+
     def _apply_update(self, doc, update):
         if "$set" in update:
             for k, v in update["$set"].items():
@@ -175,8 +180,8 @@ class _FakeDB:
 
 
 # A capturing fake send_notification: records calls + writes a notification_logs
-# row exactly like the real one (so the router's post-send campaign_id tag, and
-# analytics, can read it back). NEVER touches a provider.
+# row exactly like the real one (campaign_id lands at insert, so analytics can
+# read it back). NEVER touches a provider.
 class _SendRecorder:
     def __init__(self, db):
         self.db = db
@@ -195,9 +200,12 @@ class _SendRecorder:
             "status": "SIMULATED",  # DISPATCH_MODE off -> drain would SIMULATE
             "delivery_status": "QUEUED",
             "created_at": datetime.now().isoformat(),
+            # The real writer lands `extra` (campaign_id, dedupe_ref) in the
+            # same insert and reports the durable verdict.
+            **(kwargs.get("extra") or {}),
         }
         self.db.get_collection("notification_logs").insert_one(row)
-        return {"notification_id": nid, "dispatched": False, "status": "PENDING"}
+        return {"notification_id": nid, "dispatched": False, "status": "PENDING", "persisted": True}
 
 
 def _mk_client(db, *, monkeypatch, recorder=None):
@@ -378,7 +386,7 @@ def test_schedule_sets_scheduled(monkeypatch):
     cid = client.post("/api/v1/marketing/campaigns", json=_create_payload(), headers=_hdr()).json()["campaign"]["campaign_id"]
     r = client.post(
         f"/api/v1/marketing/campaigns/{cid}/schedule",
-        json={"kind": "ONE_TIME", "send_at": (datetime.now() + timedelta(days=1)).isoformat()},
+        json={"kind": "ONE_TIME", "send_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()},
         headers=_hdr(),
     )
     assert r.status_code == 200, r.text
@@ -397,11 +405,12 @@ def test_pause_resume_cycle(monkeypatch):
     db = _FakeDB({"campaigns": _FakeColl()})
     client = _mk_client(db, monkeypatch=monkeypatch)
     cid = client.post("/api/v1/marketing/campaigns", json=_create_payload(), headers=_hdr()).json()["campaign"]["campaign_id"]
-    client.post(
+    rs = client.post(
         f"/api/v1/marketing/campaigns/{cid}/schedule",
-        json={"kind": "RECURRING", "frequency": "WEEKLY"},
+        json={"kind": "ONE_TIME", "send_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()},
         headers=_hdr(),
     )
+    assert rs.status_code == 200, rs.text
     rp = client.post(f"/api/v1/marketing/campaigns/{cid}/pause", headers=_hdr())
     assert rp.status_code == 200, rp.text
     assert rp.json()["campaign"]["status"] == "PAUSED"
@@ -518,17 +527,84 @@ def test_send_recurring_stays_active(monkeypatch):
     db = _FakeDB({"campaigns": _FakeColl(), "customers": custs, "prescriptions": _FakeColl(), "orders": _FakeColl(), "notification_logs": _FakeColl()})
     recorder = _SendRecorder(db)
     client = _mk_client(db, monkeypatch=monkeypatch, recorder=recorder)
+    # A RECURRING schedule can no longer be saved (L1-F28), so this is a row
+    # stored before that rule: it is left alone and still sends by hand.
     cid = client.post(
         "/api/v1/marketing/campaigns",
         json=_create_payload(
             segment_key="by_store", type="custom", template_id="BIRTHDAY_WISH", store_id="BV-PUN-01",
-            schedule={"kind": "RECURRING", "frequency": "WEEKLY"},
         ),
         headers=_hdr(),
     ).json()["campaign"]["campaign_id"]
+    db.get_collection("campaigns").update_one(
+        {"campaign_id": cid},
+        {"$set": {"schedule": {"kind": "RECURRING", "frequency": "WEEKLY"}}},
+    )
     r = client.post(f"/api/v1/marketing/campaigns/{cid}/send", headers=_hdr())
     assert r.status_code == 200, r.text
-    assert r.json()["status"] == "ACTIVE"  # recurring -> stays active for next tick
+    assert r.json()["status"] == "ACTIVE"  # stays ACTIVE for another hand send
+
+
+# ===========================================================================
+# L1-F28: a schedule nothing executes cannot be saved or scheduled
+# ===========================================================================
+
+
+@pytest.mark.parametrize(
+    "schedule",
+    [
+        {"kind": "RECURRING", "frequency": "WEEKLY"},
+        {"kind": "RECURRING", "frequency": "DAILY", "time_of_day": "09:00"},
+        {"kind": "TRIGGERED", "trigger_event": "rx_expiry"},
+    ],
+)
+def test_recurring_and_triggered_schedules_are_refused_at_every_door(monkeypatch, schedule):
+    """The audit reproduction: a manager scheduled a recurring campaign and the
+    screen said "Scheduled", but no code ever runs a recurring or triggered
+    campaign. Schedule, create and edit all refuse, in plain words, and the
+    campaign is left exactly as it was."""
+    db = _FakeDB({"campaigns": _FakeColl()})
+    client = _mk_client(db, monkeypatch=monkeypatch)
+    cid = client.post("/api/v1/marketing/campaigns", json=_create_payload(), headers=_hdr()).json()["campaign"]["campaign_id"]
+
+    # 1. the schedule door
+    r = client.post(f"/api/v1/marketing/campaigns/{cid}/schedule", json=schedule, headers=_hdr())
+    assert r.status_code == 422, r.text
+    assert "cannot run yet" in r.json()["detail"]
+    stored = db.get_collection("campaigns").find_one({"campaign_id": cid})
+    assert stored["status"] == "DRAFT"
+    assert stored["schedule"] is None
+
+    # 2. the create door
+    r = client.post("/api/v1/marketing/campaigns", json=_create_payload(schedule=schedule), headers=_hdr())
+    assert r.status_code == 422, r.text
+    assert db.get_collection("campaigns").count_documents({}) == 1
+
+    # 3. the edit door
+    r = client.put(f"/api/v1/marketing/campaigns/{cid}", json={"schedule": schedule}, headers=_hdr())
+    assert r.status_code == 422, r.text
+    assert db.get_collection("campaigns").find_one({"campaign_id": cid})["schedule"] is None
+
+
+def test_one_time_schedule_still_works_at_every_door(monkeypatch):
+    """The supported kind is untouched: create with it, edit it, schedule it."""
+    db = _FakeDB({"campaigns": _FakeColl()})
+    client = _mk_client(db, monkeypatch=monkeypatch)
+    when = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+    one_time = {"kind": "ONE_TIME", "send_at": when}
+
+    r = client.post("/api/v1/marketing/campaigns", json=_create_payload(schedule=one_time), headers=_hdr())
+    assert r.status_code == 200, r.text
+    cid = r.json()["campaign"]["campaign_id"]
+    assert r.json()["campaign"]["status"] == "DRAFT"
+
+    r = client.put(f"/api/v1/marketing/campaigns/{cid}", json={"schedule": one_time}, headers=_hdr())
+    assert r.status_code == 200, r.text
+
+    r = client.post(f"/api/v1/marketing/campaigns/{cid}/schedule", json=one_time, headers=_hdr())
+    assert r.status_code == 200, r.text
+    assert r.json()["campaign"]["status"] == "SCHEDULED"
+    assert r.json()["campaign"]["schedule"]["kind"] == "ONE_TIME"
 
 
 # ===========================================================================
@@ -623,3 +699,24 @@ def test_store_manager_blocked_other_store(monkeypatch):
         headers=h,
     )
     assert r.status_code == 403, r.text
+
+
+def test_schedule_send_at_is_stored_in_utc_and_a_naive_time_is_refused(monkeypatch):
+    """A '+05:30' send_at is stored as the same instant in UTC (the tick
+    compares instants); a time with no zone is refused, never guessed."""
+    db = _FakeDB({"campaigns": _FakeColl()})
+    client = _mk_client(db, monkeypatch=monkeypatch)
+    cid = client.post("/api/v1/marketing/campaigns", json=_create_payload(), headers=_hdr()).json()["campaign"]["campaign_id"]
+    r = client.post(
+        f"/api/v1/marketing/campaigns/{cid}/schedule",
+        json={"kind": "ONE_TIME", "send_at": "2030-11-20T10:00:00+05:30"},
+        headers=_hdr(),
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["campaign"]["schedule"]["send_at"] == "2030-11-20T04:30:00+00:00"
+    r = client.post(
+        f"/api/v1/marketing/campaigns/{cid}/schedule",
+        json={"kind": "ONE_TIME", "send_at": "2030-11-20T10:00:00"},
+        headers=_hdr(),
+    )
+    assert r.status_code == 422, r.text

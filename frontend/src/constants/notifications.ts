@@ -294,6 +294,73 @@ export function shouldSendNotification(
   return true;
 }
 
+// ----------------------------------------------------------------------------
+// Template picker options (audit L1-F11)
+// ----------------------------------------------------------------------------
+// ONE answer to "which message templates can this screen offer?", built from
+// the server's effective catalog (GET /settings/notifications/templates ->
+// `catalog`: its built-in templates plus every saved one, each marked
+// sendable or not). The Reminders picker used to list only SAVED rows, so on
+// a fresh database it offered nothing and no reminder could be created until
+// a template was toggled on the Notifications screen.
+//
+// A template is SELECTABLE only when the server can build its message. The
+// rest stay listed, greyed out, with the reason: choosing one would queue the
+// literal text "[Template X not found]" to a customer.
+//
+// A BUILT-IN that is switched off on the Notifications screen stays
+// selectable, with a note: the server still sends its built-in wording (the
+// switch only stops the saved wording being used). The picker says what the
+// sender does; whether "off" should stop sends is not decided here.
+
+export interface TemplatePickerOption {
+  id: string;
+  label: string;
+  selectable: boolean;
+}
+
+interface CatalogRow {
+  template_id?: string;
+  is_enabled?: boolean;
+  sendable?: boolean;
+}
+
+export function templatePickerOptions(resp: unknown): TemplatePickerOption[] {
+  const body = (resp ?? {}) as { catalog?: CatalogRow[]; templates?: CatalogRow[] };
+  // An older server sends no `catalog`: fall back to its saved rows, which is
+  // what this picker offered before.
+  const rows: CatalogRow[] = Array.isArray(body.catalog)
+    ? body.catalog
+    : Array.isArray(body.templates)
+      ? body.templates.map((t) => ({ ...t, sendable: true }))
+      : [];
+  const nameOf = (id: string) => NOTIFICATION_TEMPLATES[id]?.name ?? id;
+  const seen = new Set<string>();
+  const out: TemplatePickerOption[] = [];
+  for (const r of rows) {
+    const id = r.template_id;
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const selectable = r.sendable !== false;
+    const off = r.is_enabled === false;
+    const note = selectable
+      ? off
+        ? ' (off in Notifications: built-in wording is used)'
+        : ''
+      : off
+        ? ' (turned off in Notifications)'
+        : ' (no message text saved yet)';
+    out.push({ id, label: nameOf(id) + note, selectable });
+  }
+  // Templates the Notifications screen lists but the server holds no wording
+  // for: shown so they do not silently vanish, not selectable until saved.
+  for (const t of Object.values(NOTIFICATION_TEMPLATES)) {
+    if (seen.has(t.id)) continue;
+    out.push({ id: t.id, label: `${t.name} (no message text saved yet)`, selectable: false });
+  }
+  return out;
+}
+
 // Get template by ID
 export function getTemplate(templateId: string): NotificationTemplate | null {
   return NOTIFICATION_TEMPLATES[templateId] || null;

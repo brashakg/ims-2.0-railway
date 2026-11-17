@@ -43,6 +43,9 @@ def _make_mock_db(collections=None):
             self._docs.append(dict(doc))
             self.inserted.append(dict(doc))
 
+        def create_index(self, *_a, **_k):
+            return "ok"
+
         def update_one(self, flt, upd, **kw):
             for d in self._docs:
                 if all(d.get(k) == v for k, v in flt.items()):
@@ -192,7 +195,8 @@ class TestNpsTrigger:
 
         async def _mock_send(**kwargs):
             sent_notifications.append(kwargs)
-            return {"notification_id": "N1"}
+            # The real writer's verdict: a stored row (D91 reads `persisted`).
+            return {"notification_id": "N1", "status": "PENDING", "persisted": True}
 
         # send_notification is imported inside the function body, so patch the
         # source module (notification_service) rather than the nps_trigger namespace.
@@ -312,7 +316,7 @@ class TestMegaphoneScheduledCampaigns:
 
         async def _fake_send(**kw):
             sent_calls.append(kw)
-            return {"notification_id": "N1"}
+            return {"notification_id": "N1", "persisted": True}
 
         with patch("api.services.campaign_segments.resolve_segment", return_value=[
             {"customer_id": "C1", "phone": "9876543210", "name": "Test"}

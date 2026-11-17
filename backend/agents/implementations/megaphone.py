@@ -54,6 +54,37 @@ logger = logging.getLogger(__name__)
 # we drain 120/hour = 2,880/day, well above typical Rx reminder volume).
 DRAIN_BATCH_SIZE = 60
 
+# L1-F21: a drain CLAIMS a row (PENDING -> DISPATCHING) before it calls the
+# provider. A claim older than this was abandoned by a worker that stopped
+# mid-send; whether the provider accepted the message is unknown, so the row is
+# parked as UNKNOWN (visible, never resent automatically). One provider call
+# takes seconds, so 15 minutes never expires a live claim.
+DISPATCH_LEASE_MINUTES = 15
+
+
+def _needs_marketing_consent(row: Dict[str, Any]) -> bool:
+    """True when this queued row is only allowed to go out on the customer's
+    marketing consent (L1-F20, D56). The STRICTER of the row's recorded
+    consent_basis and THE shared rule re-derived from the row itself
+    (notification_service.consent_basis_for: template, category, related
+    entity) decides, so a promotional template stamped SERVICE by a caller, or
+    an older row written before the rule, still meets the STOP check. OTP /
+    service / order-, Rx- or appointment-specific reminder rows keep their
+    exemption."""
+    from api.services.notification_service import consent_basis_for
+
+    if row.get("consent_basis") == "marketing_consent":
+        return True
+    derived = consent_basis_for(
+        row.get("category"),
+        row.get("template_id"),
+        row.get("related_entity_type"),
+        row.get("related_entity_id"),
+    )
+    if derived == "marketing_consent":
+        return True
+    return row.get("consent_basis") not in (None, "", "transactional")
+
 
 class MegaphoneAgent(JarvisAgent):
     """Marketing automation — Rx expiry, birthdays, follow-ups, NPS."""
@@ -612,6 +643,34 @@ class MegaphoneAgent(JarvisAgent):
             return stats
 
         for rule in rules:
+            # D56 cadence: 'DAILY 09:00' fires once per IST day at or after
+            # 09:00, whatever the 30-min tick. The period is CLAIMED on the rule
+            # atomically before anything is queued, so a later tick or a second
+            # worker in the same period queues nothing. A run that fails after
+            # its claim waits for the next period (a missed day, never a
+            # duplicate message).
+            period = reminder_rail.cron_period_due(
+                (rule.get("trigger") or {}).get("cron"), now
+            )
+            if period is None:
+                continue
+            try:
+                claimed = coll.update_one(
+                    {
+                        "rule_id": rule.get("rule_id"),
+                        "last_fired_period": {"$ne": period},
+                    },
+                    {"$set": {"last_fired_period": period}},
+                ).modified_count
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[MEGAPHONE] reminder rule %s claim failed: %s",
+                    rule.get("rule_id"),
+                    exc,
+                )
+                continue
+            if not claimed:
+                continue
             try:
                 res = await reminder_rail.evaluate_rule(self.db, rule, now=now)
             except Exception as exc:  # noqa: BLE001
@@ -705,9 +764,9 @@ class MegaphoneAgent(JarvisAgent):
         Returns the number of campaigns dispatched this tick.
 
         Design:
-          - Only ONE_TIME campaigns are dispatched here; RECURRING/TRIGGERED
-            campaigns remain ACTIVE and are re-triggered by their own event/cron
-            logic (a future enhancement).
+          - Only ONE_TIME campaigns are dispatched here. Nothing executes a
+            RECURRING or TRIGGERED campaign, so the campaigns router refuses
+            to save or schedule those kinds (L1-F28).
           - Each campaign is dispatched ONCE by atomically setting status ->
             ACTIVE before doing the send, so a second MEGAPHONE tick (or a
             concurrent worker) will not double-send.
@@ -722,19 +781,26 @@ class MegaphoneAgent(JarvisAgent):
         if coll is None:
             return 0
 
-        now_iso = datetime.now(timezone.utc).isoformat()
+        from api.services.campaign_dispatch import parse_send_at
 
-        # Find SCHEDULED, ONE_TIME campaigns whose send_at is in the past.
+        now = datetime.now(timezone.utc)
+
+        # Find SCHEDULED, ONE_TIME campaigns whose send_at is in the past. The
+        # instant is compared, not the text: a stored '+05:30' send_at compared
+        # as a string with a UTC now fired 5.5 h late. A send_at that cannot be
+        # read as a zoned time is never fired (logged, left SCHEDULED).
         try:
-            due = list(
-                coll.find(
-                    {
-                        "status": "SCHEDULED",
-                        "schedule.kind": "ONE_TIME",
-                        "schedule.send_at": {"$lte": now_iso},
-                    }
-                ).limit(20)
-            )  # cap per tick to avoid a burst
+            due = []
+            for c in coll.find({"status": "SCHEDULED", "schedule.kind": "ONE_TIME"}).limit(500):
+                when = parse_send_at((c.get("schedule") or {}).get("send_at"))
+                if when is None:
+                    logger.warning(
+                        "[MEGAPHONE] Campaign %s has no readable zoned send_at; not sent",
+                        c.get("campaign_id"),
+                    )
+                elif when <= now:
+                    due.append(c)
+            due = due[:20]  # cap per tick to avoid a burst
         except Exception as exc:
             logger.warning("[MEGAPHONE] scheduled-campaign scan failed: %s", exc)
             return 0
@@ -775,22 +841,23 @@ class MegaphoneAgent(JarvisAgent):
         return dispatched
 
     async def _execute_campaign_send(self, camp: Dict[str, Any], coll) -> None:
-        """Fan-out a single campaign to its resolved audience using the shared
-        notification_service path.  Mirrors campaigns.send_campaign but runs
-        agent-side (no HTTP, no rate-limit check -- MEGAPHONE is a trusted actor).
+        """Fan-out a single campaign to its resolved audience through THE one
+        shared loop (api.services.campaign_dispatch.fan_out_campaign), the same
+        one the manual /campaigns/{id}/send door runs. Consent (flag + STOP
+        ledger), the 30-day frequency cap and its comms_ledger row are therefore
+        identical for a scheduled and a hand-sent campaign (L1-F27).
+
+        Deliberately different from the manual door: no per-user rate limit
+        (MEGAPHONE is a trusted actor) and quiet hours DEFER the campaign to the
+        next tick instead of refusing it.
         """
-        try:
-            from api.services import campaign_segments as seg
-            from api.services.notification_service import send_notification
-        except ImportError:
-            from ...api.services import campaign_segments as seg  # type: ignore[no-redef]
-            from ...api.services.notification_service import send_notification  # type: ignore[no-redef]
+        # Imported at call time: api.services imports agents.* lazily too, and
+        # the campaign tests patch send_notification on its module.
+        from api.services.campaign_dispatch import fan_out_campaign
+        from api.services.notification_service import send_notification
 
         campaign_id = camp.get("campaign_id", "")
         template_id = camp.get("template_id", "")
-        store_id = camp.get("store_id") or ""
-        channels = camp.get("channels") or ["WHATSAPP"]
-        primary_channel = channels[0]
 
         # Promo quiet-hours gate: if we're in DND, defer this campaign.
         if template_id and self._in_dnd_window():
@@ -802,82 +869,49 @@ class MegaphoneAgent(JarvisAgent):
             )
             return
 
-        db = self.db
-        audience = seg.resolve_segment(
-            db,
-            camp.get("segment_key", ""),
-            store_id=store_id or None,
-            params=camp.get("segment_params") or {},
+        out = await fan_out_campaign(
+            self.db,
+            camp,
+            send_store_id=camp.get("store_id") or "",
+            triggered_by="MEGAPHONE",
+            send_notification=send_notification,
         )
-
-        cust_coll = self.get_collection("customers")
-        sent = skipped = failed = 0
-
-        for r in audience:
-            cid = r.get("customer_id")
-            # Consent gate: respect marketing_consent == False.
-            if cid and cust_coll is not None:
-                cust = cust_coll.find_one({"customer_id": cid}) or {}
-                if cust.get("marketing_consent") is False:
-                    skipped += 1
-                    continue
-            phone = r.get("phone") or ""
-            if not phone:
-                skipped += 1
-                continue
-            try:
-                res = await send_notification(
-                    store_id=store_id,
-                    customer_id=cid or "",
-                    customer_phone=phone,
-                    customer_name=r.get("name", "Customer"),
-                    template_id=template_id,
-                    channel=primary_channel,
-                    variables={
-                        **(r.get("variables") or {}),
-                        "campaign_id": campaign_id,
-                    },
-                    category="MARKETING",
-                    triggered_by="MEGAPHONE",
-                    related_entity_type="campaign",
-                    related_entity_id=campaign_id,
-                )
-                # Tag the notification row with campaign_id for analytics.
-                nid = res.get("notification_id")
-                if nid:
-                    notif_coll = self.get_collection("notification_logs")
-                    if notif_coll is not None:
-                        try:
-                            notif_coll.update_one(
-                                {"notification_id": nid},
-                                {"$set": {"campaign_id": campaign_id}},
-                            )
-                        except Exception:
-                            pass
-                sent += 1
-            except Exception as exc:
-                failed += 1
-                logger.debug(
-                    "[MEGAPHONE] Campaign %s recipient failed: %s", campaign_id, exc
-                )
+        sent, skipped, failed = out["sent"], out["skipped"], out["failed"]
+        # A recipient whose row did not reach storage is retried on the next
+        # tick (back to SCHEDULED); recipients already queued are never queued
+        # again (dedupe_ref + unique index in the shared loop).
+        final_status = "SCHEDULED" if out.get("retryable") else "COMPLETED"
 
         # ONE_TIME -> COMPLETED after send; update counters.
-        coll.update_one(
-            {"campaign_id": campaign_id},
-            {
-                "$set": {
-                    "status": "COMPLETED",
-                    "audience_count": len(audience),
-                    "last_sent_at": datetime.now(timezone.utc).isoformat(),
-                    "updated_at": datetime.now(timezone.utc).isoformat(),
+        try:
+            coll.update_one(
+                {"campaign_id": campaign_id},
+                {
+                    "$set": {
+                        "status": final_status,
+                        "audience_count": out["audience"],
+                        "last_sent_at": datetime.now(timezone.utc).isoformat(),
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                    "$inc": {
+                        "sent_count": sent,
+                        "skipped_count": skipped,
+                        "failed_count": failed,
+                    },
                 },
-                "$inc": {
-                    "sent_count": sent,
-                    "skipped_count": skipped,
-                    "failed_count": failed,
-                },
-            },
-        )
+            )
+        except Exception as exc:  # noqa: BLE001
+            # The audience is ALREADY queued. Do not raise: the caller would put
+            # the campaign back to SCHEDULED and the next tick would queue every
+            # recipient a second time. It stays ACTIVE (claimed, visible).
+            logger.error(
+                "[MEGAPHONE] Campaign %s queued %d but its COMPLETED write "
+                "failed (%s); left ACTIVE, not re-sent",
+                campaign_id,
+                sent,
+                exc,
+            )
+            return
         logger.info(
             "[MEGAPHONE] Campaign %s completed: sent=%d skipped=%d failed=%d",
             campaign_id,
@@ -958,18 +992,45 @@ class MegaphoneAgent(JarvisAgent):
         Select up to DRAIN_BATCH_SIZE PENDING messages and dispatch them.
         Respects DND: rows whose scheduled_for is in the future stay PENDING.
 
-        Contract: every selected row transitions to SENT / SIMULATED / FAILED.
-        No row stays stuck on PENDING after a dispatch attempt — the status
-        column is the source of truth for monitoring.
+        Contract: every row this drain CLAIMS ends on SENT / SIMULATED /
+        FAILED / CANCELLED, or goes back to PENDING with a hold_reason. The
+        status column is the source of truth for monitoring.
+
+        Two guards sit at this last boundary before the provider:
+
+          * One owner per message (L1-F21). Each row is claimed with an atomic
+            PENDING -> DISPATCHING update immediately before its send; a second
+            drain (another worker, a second scheduler leader, a manual "run
+            now") loses the claim and skips the row. A claim abandoned by a
+            dead worker is parked as UNKNOWN after DISPATCH_LEASE_MINUTES and
+            is never resent automatically: the provider may have accepted it.
+
+          * Current consent (L1-F20). A marketing row is checked against the
+            customer's consent AS IT IS NOW, not as it was when queued, and
+            against the STOP record of the number it is addressed to. Opted
+            out -> CANCELLED, no provider call. Consent unreadable -> the row
+            is held (PENDING + hold_reason) and retried next tick. OTP /
+            service / transactional rows are exempt, as at queue time.
         """
-        stats = {"attempted": 0, "sent": 0, "simulated": 0, "failed": 0, "skipped": 0}
+        stats = {
+            "attempted": 0,
+            "sent": 0,
+            "simulated": 0,
+            "failed": 0,
+            "skipped": 0,
+            "cancelled": 0,
+            "held": 0,
+        }
 
         # If MEGAPHONE is inside the DND window and the row wasn't
         # explicitly scheduled for later, we'd still not want to send.
         # Rx expiry / birthday rows already set scheduled_for to the DND
         # end-of-window when queued; we only send rows whose scheduled_for
         # is null OR <= now.
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc)
+        now_iso = now.isoformat()
+
+        self._park_abandoned_claims(notif_coll, now)
 
         try:
             candidates = list(
@@ -988,11 +1049,53 @@ class MegaphoneAgent(JarvisAgent):
             return stats
 
         for row in candidates:
+            # L1-F21: claim first. Whoever loses the claim never reaches the
+            # provider, so two drains cannot send the same message.
+            if not self._claim_row(notif_coll, row):
+                stats["skipped"] += 1
+                continue
+
             stats["attempted"] += 1
             channel = (row.get("channel") or "whatsapp").lower()
             phone = row.get("customer_phone") or row.get("phone") or ""
             message = row.get("message") or row.get("body") or ""
             template_id = row.get("template_id")
+
+            # L1-F20: re-read consent NOW for a marketing row: the customer's
+            # flag and consent ledger, and the STOP record of the NUMBER the
+            # message is going to (a customer's own STOP reply is kept per
+            # phone, so it also covers a shared number and a row with no
+            # customer_id).
+            if _needs_marketing_consent(row):
+                try:
+                    from api.routers.marketing import is_opted_out
+
+                    opted_out = is_opted_out(
+                        row.get("customer_id") or "",
+                        getattr(self, "db", None),
+                        strict=True,
+                        phone=phone,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    # Fail closed: consent could not be read, so do not send.
+                    self._release_claim(
+                        notif_coll, row, f"consent could not be verified: {e}"
+                    )
+                    stats["held"] += 1
+                    continue
+                if opted_out:
+                    self._update_status(
+                        notif_coll,
+                        row,
+                        status="CANCELLED",
+                        error=(
+                            "no marketing consent at dispatch time: the "
+                            "customer opted out, or this number sent STOP, "
+                            "after the message was queued"
+                        ),
+                    )
+                    stats["cancelled"] += 1
+                    continue
 
             # EMAIL rows need an address + message (no phone); the phone
             # channels need a phone + message. MEGAPHONE only drains
@@ -1075,6 +1178,71 @@ class MegaphoneAgent(JarvisAgent):
 
         return stats
 
+    def _claim_row(self, coll, row: Dict[str, Any]) -> bool:
+        """Atomically take ownership of one PENDING row (PENDING ->
+        DISPATCHING). True only for the single caller whose update matched.
+        Any error is a lost claim: never send a row we could not claim."""
+        try:
+            res = coll.update_one(
+                {"_id": row["_id"], "status": "PENDING"},
+                {
+                    "$set": {
+                        "status": "DISPATCHING",
+                        "claimed_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                },
+            )
+            return getattr(res, "modified_count", 0) == 1
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[MEGAPHONE] Claim failed, row skipped: {e}")
+            return False
+
+    def _release_claim(self, coll, row: Dict[str, Any], reason: str) -> None:
+        """Give a claimed row back to the queue untouched by any provider
+        (DISPATCHING -> PENDING) with the reason it was held."""
+        try:
+            coll.update_one(
+                {"_id": row["_id"], "status": "DISPATCHING"},
+                {
+                    "$set": {
+                        "status": "PENDING",
+                        "hold_reason": reason,
+                        "held_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                },
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[MEGAPHONE] Claim release failed: {e}")
+
+    def _park_abandoned_claims(self, coll, now: datetime) -> None:
+        """Rows a worker claimed and never finished (it stopped mid-send) are
+        parked as UNKNOWN: the provider may or may not have accepted the
+        message, so resending could deliver it twice. Fail-soft."""
+        cutoff = (now - timedelta(minutes=DISPATCH_LEASE_MINUTES)).isoformat()
+        try:
+            res = coll.update_many(
+                {"status": "DISPATCHING", "claimed_at": {"$lt": cutoff}},
+                {
+                    "$set": {
+                        "status": "UNKNOWN",
+                        "delivery_status": "UNKNOWN",
+                        "failure_reason": (
+                            "dispatch outcome unknown: the worker stopped after "
+                            "claiming this message. Not resent automatically "
+                            "because the customer may already have received it."
+                        ),
+                    }
+                },
+            )
+            parked = getattr(res, "modified_count", 0) or 0
+            if parked:
+                logger.warning(
+                    "[MEGAPHONE] %d abandoned dispatch claim(s) parked as UNKNOWN",
+                    parked,
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[MEGAPHONE] Abandoned-claim sweep failed: {e}")
+
     def _update_status(
         self,
         coll,
@@ -1085,10 +1253,14 @@ class MegaphoneAgent(JarvisAgent):
         error: str = None,
     ):
         """Persist a status transition on a notification_logs row."""
-        updates = {
-            "status": status,
-            "dispatched_at": datetime.now(timezone.utc).isoformat(),
-        }
+        now_iso = datetime.now(timezone.utc).isoformat()
+        updates = {"status": status}
+        if status == "CANCELLED":
+            # Never reached a provider: no dispatched_at.
+            updates["cancelled_at"] = now_iso
+            updates["delivery_status"] = "CANCELLED"
+        else:
+            updates["dispatched_at"] = now_iso
         if provider_id:
             updates["provider_id"] = provider_id
             # Keep the DLT audit field in lock-step so the MSG91 delivery-report
@@ -1097,7 +1269,7 @@ class MegaphoneAgent(JarvisAgent):
         if error:
             updates["failure_reason"] = error
         if status == "SENT":
-            updates["sent_at"] = updates["dispatched_at"]
+            updates["sent_at"] = now_iso
             # Advance the DLR ladder QUEUED -> SENT; the webhook moves it on to
             # DELIVERED/READ/FAILED when MSG91 reports back.
             updates["delivery_status"] = "SENT"
