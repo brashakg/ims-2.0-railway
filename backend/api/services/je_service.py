@@ -189,7 +189,9 @@ def upsert_account(db, *, account_code: str, account_name: str, account_type: st
     return {"ok": True, "account": doc}
 
 
-def _account(db, account_code: str) -> Optional[Dict[str, Any]]:
+def _account(db, account_code: str, *, strict: bool = False) -> Optional[Dict[str, Any]]:
+    """``strict``: a chart-of-accounts read that fails raises instead of
+    answering from the built-in chart (pnl_adjustments, decision D116)."""
     coll = _coa_coll(db)
     if coll is not None:
         try:
@@ -197,7 +199,8 @@ def _account(db, account_code: str) -> Optional[Dict[str, Any]]:
             if row:
                 return row
         except Exception:  # noqa: BLE001
-            pass
+            if strict:
+                raise
     return _COA_BY_CODE.get(str(account_code))
 
 
@@ -860,11 +863,15 @@ def reverse_je(db, *, je_id: str, actor_id: str, actor_name: Optional[str] = Non
 def pnl_adjustments(db, *, store_id: Optional[str], from_dt, to_dt) -> Dict[str, float]:
     """Net P&L effect of POSTED manual JEs in the date range, keyed by account
     type. REVENUE: credit increases revenue; EXPENSE: debit increases cost.
-    Returns rupee floats. Fail-soft -> zeros."""
+    Returns rupee floats.
+
+    A read that fails RAISES (decision D116): the journals, or the chart of
+    accounts a pre-snapshot line is classed by. Answered as zeros it gave the
+    P&L a 200 with posted journals left out; the caller answers 503."""
     out = {"je_revenue_adjustment": 0.0, "je_expense_adjustment": 0.0}
     coll = _je_coll(db)
     if coll is None:
-        return out
+        raise RuntimeError("journal store unavailable")
     # POSTED entries hit the ledger. A REVERSED entry was genuinely posted (it
     # affected the period's books) and must STAY counted -- closed-period
     # integrity: a reversal posts a fresh offsetting JE in the reversal period
@@ -880,10 +887,7 @@ def pnl_adjustments(db, *, store_id: Optional[str], from_dt, to_dt) -> Dict[str,
         date_q["$lte"] = to_dt
     if date_q:
         match["entry_date"] = date_q
-    try:
-        rows = list(coll.find(match, {"_id": 0, "lines": 1}))
-    except Exception:  # noqa: BLE001
-        return out
+    rows = list(coll.find(match, {"_id": 0, "lines": 1}))
     rev_net = 0
     exp_net = 0
     for je in rows:
@@ -893,7 +897,7 @@ def pnl_adjustments(db, *, store_id: Optional[str], from_dt, to_dt) -> Dict[str,
             # Legacy lines (pre-snapshot) fall back to the live COA.
             atype = ln.get("account_type")
             if not atype:
-                acct = _account(db, ln.get("account_code"))
+                acct = _account(db, ln.get("account_code"), strict=True)
                 if not acct:
                     continue
                 atype = acct.get("account_type")

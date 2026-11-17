@@ -1337,6 +1337,110 @@ def test_r4a_company_filter_over_an_unreadable_shop_list_answers_503_on_every_re
 
 
 # ---------------------------------------------------------------------------
+# D116 -- the P&L reads posted manual journals strictly
+# ---------------------------------------------------------------------------
+# Reproduced on native Mongo with real logins before the fix
+# (C:/ims-wt/evidence-1410-r9/je-before.json): with the journal read failing,
+# GET /finance/pnl answered 200 with je_expense_adjustment 0 for the admin,
+# the accountant and the store manager although journals posting Rs 6,200 of
+# expense and Rs 700 of income were stored; with the chart of accounts
+# unreadable it answered 200 with the pre-snapshot journal's Rs 1,200 left out.
+
+JE_CUSTOM_CODE = "B09-REPAIRS"
+
+
+def _posted_journals(rig):
+    """Two POSTED manual journals of the shop in the P&L month (paise). The
+    first is as journals post today (each line carries its account_type);
+    the second is from before that snapshot, on an account the accountant
+    added to the chart of accounts, so its class is read from there."""
+    day = datetime(YEAR, MONTH, 15)
+
+    def journal(je_id, lines):
+        return {"je_id": je_id, "store_id": STORE, "entry_date": day, "status": "POSTED", "lines": lines}
+
+    rig.db.get_collection("chart_of_accounts").insert_one(
+        {"account_code": JE_CUSTOM_CODE, "account_name": "Shop repairs", "account_type": "EXPENSE",
+         "allow_manual_je": True, "is_active": True})
+    rig.db.get_collection("journal_entries").insert_many([
+        journal("JE-B09-SNAP", [
+            {"account_code": "5004", "account_type": "EXPENSE", "debit": 500000, "credit": 0},
+            {"account_code": "4001", "account_type": "REVENUE", "debit": 0, "credit": 70000},
+            {"account_code": "2001", "account_type": "LIABILITY", "debit": 0, "credit": 430000}]),
+        journal("JE-B09-LEGACY", [
+            {"account_code": JE_CUSTOM_CODE, "debit": 120000, "credit": 0},
+            {"account_code": "2001", "debit": 0, "credit": 120000}]),
+    ])
+
+
+def _stored_journals(rig):
+    return sorted(
+        (
+            {k: v for k, v in row.items() if k != "_id"}
+            for row in rig.db.get_collection("journal_entries").find({})
+        ),
+        key=lambda row: row["je_id"],
+    )
+
+
+@pytest.mark.parametrize("user", [ADMIN, ACCOUNTANT, MANAGER], ids=["admin", "accountant", "store-manager"])
+@pytest.mark.parametrize("how", ["call", "cursor"])
+@pytest.mark.parametrize("collection", ["journal_entries", "chart_of_accounts"])
+def test_d116_unreadable_journals_answer_503_never_a_pnl_without_them(
+    rig, monkeypatch, user, how, collection
+):
+    from api.services import je_service
+
+    _finance_on(rig, monkeypatch)
+    _posted_journals(rig)
+    stored = _stored_journals(rig)
+    c = rig.client(user)
+    paths = (PNL, PNL_ALL) if user is ADMIN else (PNL,)
+    window = {"store_id": STORE, "from_dt": datetime(YEAR, MONTH, 1), "to_dt": datetime(YEAR, MONTH, 28)}
+
+    def healthy():
+        for path in paths:
+            reply = c.get(path)
+            assert reply.status_code == 200, reply.text
+            body = reply.json()
+            assert (body["je_expense_adjustment"], body["je_revenue_adjustment"]) == (6200.0, 700.0)
+            assert body["total_expenses"] == 6200.0
+            if user is ADMIN:  # the only reader shown the bottom line
+                assert body["net_profit"] == -5500.0
+
+    healthy()
+    with _Unreadable(monkeypatch, rig, collection, how) as failing:
+        for path in paths:
+            reply = c.get(path)
+            # Never a P&L with the journals (or one of them) left out.
+            assert reply.status_code == 503, (path, reply.status_code, reply.text)
+            assert reply.json() == {"detail": finance_shared.RECORDS_UNREACHABLE}
+        # The shared reader itself refuses; it no longer answers zeros.
+        with pytest.raises(pymongo.errors.AutoReconnect):
+            je_service.pnl_adjustments(rig.db, **window)
+        assert failing.reads >= len(paths) + 1
+    assert _stored_journals(rig) == stored  # nothing stored moved
+    healthy()  # the identical request once the read works again
+
+
+def test_d116_a_month_with_no_journal_is_still_a_plain_zero(rig, monkeypatch):
+    """The other side of the distinction: no posted journal in the range is
+    200 with the adjustment at 0, as before."""
+    from api.services import je_service
+
+    _finance_on(rig, monkeypatch)
+    _posted_journals(rig)
+    other_month = f"from_date={YEAR}-{MONTH + 1:02d}-01&to_date={YEAR}-{MONTH + 1:02d}-28"
+    reply = rig.client().get(f"/api/v1/finance/pnl?store_id={STORE}&{other_month}")
+    assert reply.status_code == 200, reply.text
+    assert (reply.json()["je_expense_adjustment"], reply.json()["je_revenue_adjustment"]) == (0.0, 0.0)
+    # No journal store at all is not "no journals" (the route answers 503 for
+    # a missing handle before it gets here: test_r4a_no_database_handle...).
+    with pytest.raises(RuntimeError):
+        je_service.pnl_adjustments(None, store_id=None, from_dt=None, to_dt=None)
+
+
+# ---------------------------------------------------------------------------
 # D106 -- a Tally door never decides a sale's GST head (IGST, or CGST + SGST)
 # from records it could not read
 # ---------------------------------------------------------------------------

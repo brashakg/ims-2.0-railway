@@ -28,6 +28,7 @@ from ._shared import (
     _get_db,
     _je_cal_day,
     _payroll_cost,
+    _read_or_503,
     _report_db,
     _ORDER_REVENUE_PROJECTION,
     compute_cogs_with_flag,
@@ -303,8 +304,11 @@ async def get_pnl(
     # the window isn't mis-bucketed (the two frames must agree).
     je_from_dt = _je_cal_day(from_date)
     je_to_dt = _je_cal_day(to_date, end=True)
-    je_adj = je_service.pnl_adjustments(
-        db, store_id=store_id, from_dt=je_from_dt, to_dt=je_to_dt
+    # Read strictly (decision D116): journals that cannot be read answer 503,
+    # never this P&L with their adjustment at zero -- for every reader, since
+    # total_expenses carries the journal expenses whoever asks.
+    je_adj = _read_or_503(
+        je_service.pnl_adjustments, db, store_id=store_id, from_dt=je_from_dt, to_dt=je_to_dt
     )
     je_rev = je_adj.get("je_revenue_adjustment", 0.0)
     je_exp = je_adj.get("je_expense_adjustment", 0.0)
