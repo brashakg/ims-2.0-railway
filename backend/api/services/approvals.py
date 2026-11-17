@@ -638,6 +638,7 @@ class ApprovalEngine:
         now = _now()
         expires_at = now + timedelta(minutes=_validity_minutes())
         is_mc = action_type in MAKER_CHECKER_ACTIONS
+        log_id = _new_log_id()
 
         doc: Dict[str, Any] = {
             "request_id": f"REQ-{uuid.uuid4().hex[:12]}",
@@ -666,7 +667,8 @@ class ApprovalEngine:
             "consumed": False,
             "consumed_at": None,
             "consumed_by": None,
-            "audit_log_id": None,
+            "audit_log_id": log_id,
+            "audit_rows": {"approval_requested": log_id},   # the row owed (_record_trail)
         }
         if dedupe_key:
             doc["dedupe_key"] = dedupe_key
@@ -677,8 +679,7 @@ class ApprovalEngine:
             logger.warning("[APPROVALS] request insert failed (%s): %s", action_type, e)
             return {"ok": False, "error": "write_failed"}
 
-        audit_id = self._write_audit("approval_requested", doc, actor=requested_by)
-        self._set(doc["request_id"], {"audit_log_id": audit_id})
+        self._write_audit("approval_requested", doc, actor=requested_by, log_id=log_id)
         self._notify_approvers(doc)
         logger.info(
             "[APPROVALS] %s REQUESTED (%s, tier=%s) by %s",
@@ -845,6 +846,7 @@ class ApprovalEngine:
         # the token in the SAME op.
         now = _now()
         token = f"APT-{uuid.uuid4().hex}"
+        log_id = _new_log_id()
         updated = coll.find_one_and_update(
             {
                 "request_id": request_id,
@@ -868,6 +870,8 @@ class ApprovalEngine:
                     # post at end-of-day" dead-ended. The token is now valid for a
                     # full validity window from the moment it was approved.
                     "expires_at": now + timedelta(minutes=_validity_minutes()),
+                    "audit_rows.approved": log_id,      # the row owed (_record_trail)
+                    "audit_log_id": log_id,
                 }
             },
             return_document=ReturnDocument.AFTER,
@@ -878,8 +882,7 @@ class ApprovalEngine:
             return self._approve_failure(request_id)
 
         updated.pop("_id", None)
-        audit_id = self._write_audit("approved", updated, actor=approver_user_id)
-        self._set(request_id, {"audit_log_id": audit_id})
+        self._write_audit("approved", updated, actor=approver_user_id, log_id=log_id)
         logger.info("[APPROVALS] %s APPROVED by %s", request_id, approver_user_id)
         return {
             "ok": True,
@@ -895,6 +898,7 @@ class ApprovalEngine:
         doc = self._raw(request_id)
         if not doc:
             return {"ok": False, "http": 404, "error": "not_found"}
+        self._record_trail([doc])
         status = doc.get("status")
         now = _now()
         if status == ApprovalStatus.REQUESTED.value and _as_aware(doc.get("expires_at")) <= now:
@@ -955,6 +959,7 @@ class ApprovalEngine:
             return out
 
         now = _now()
+        log_id = _new_log_id()
         updated = coll.find_one_and_update(
             {
                 "request_id": request_id,
@@ -969,6 +974,8 @@ class ApprovalEngine:
                     "reviewed_by_roles": sorted(roles),
                     "reviewed_at": now,
                     "reject_reason": reason or "",
+                    "audit_rows.rejected": log_id,
+                    "audit_log_id": log_id,
                 }
             },
             return_document=ReturnDocument.AFTER,
@@ -976,8 +983,7 @@ class ApprovalEngine:
         if updated is None:
             return self._approve_failure(request_id)
         updated.pop("_id", None)
-        audit_id = self._write_audit("rejected", updated, actor=approver_user_id, reason=reason)
-        self._set(request_id, {"audit_log_id": audit_id})
+        self._write_audit("rejected", updated, actor=approver_user_id, reason=reason, log_id=log_id)
         logger.info("[APPROVALS] %s REJECTED by %s", request_id, approver_user_id)
         return {"ok": True, "status": updated.get("status"), "request_id": request_id}
 
@@ -1042,10 +1048,13 @@ class ApprovalEngine:
             try:
                 target = coll.find_one(ident, {"_id": 0, "action_type": 1})
             except Exception:  # noqa: BLE001
+                if self._strict:
+                    raise
                 target = None
             if _hidden_from(target, consumer_roles):
                 return {"ok": False, "error": "not_found"}
 
+        log_id = _new_log_id()
         updated = coll.find_one_and_update(
             {
                 **ident,
@@ -1060,6 +1069,8 @@ class ApprovalEngine:
                     "consumed_at": now,
                     "consumed_by": consumed_by,
                     "consumed_for": consumed_for,
+                    "audit_rows.consumed": log_id,
+                    "audit_log_id": log_id,
                 }
             },
             return_document=ReturnDocument.AFTER,
@@ -1111,28 +1122,39 @@ class ApprovalEngine:
             self._unconsume(updated.get("request_id"), consumed_by)
             return {"ok": False, "error": mismatch}
 
-        audit_id = self._write_audit("consumed", updated, actor=consumed_by)
-        self._set(updated.get("request_id"), {"audit_log_id": audit_id})
+        self._write_audit("consumed", updated, actor=consumed_by, log_id=log_id)
         logger.info("[APPROVALS] %s CONSUMED by %s", updated.get("request_id"), consumed_by)
         return {"ok": True, "request": _jsonable(updated)}
 
-    def _unconsume(self, request_id: Optional[str], consumed_by: str) -> bool:
+    def _unconsume(self, request_id: Optional[str], consumed_by: str, *,
+                   released: Optional[str] = None) -> bool:
         """Put a spent approval back to APPROVED -- only the spender's own
-        spend (atomic, guarded on consumed_by). True when it was given back."""
+        spend (atomic, guarded on consumed_by). True when it was given back.
+
+        ``released`` (release_consumption) is the log id of the release's own
+        audit row, named on the request in this same write (_record_trail);
+        the spend it gives back stood, so its 'consumed' row stays owed.
+        Without it the spend is one this very call is rolling back (it did
+        not match what was asked for): that spend owes no row."""
         coll = self._coll()
         if coll is None or not request_id:
             return False
+        fields: Dict[str, Any] = {
+            "status": ApprovalStatus.APPROVED.value,
+            "consumed": False,
+            "consumed_at": None,
+            "consumed_by": None,
+            "consumed_for": None,
+        }
+        if released:
+            fields.update({"audit_rows.consume_released": released, "released_by": consumed_by})
+        else:
+            fields["audit_rows.consumed"] = None
         try:
             back = coll.find_one_and_update(
                 {"request_id": request_id, "consumed": True,
                  "consumed_by": consumed_by},
-                {"$set": {
-                    "status": ApprovalStatus.APPROVED.value,
-                    "consumed": False,
-                    "consumed_at": None,
-                    "consumed_by": None,
-                    "consumed_for": None,
-                }},
+                {"$set": fields},
             )
         except Exception:  # noqa: BLE001
             return False
@@ -1141,12 +1163,13 @@ class ApprovalEngine:
     def release_consumption(self, request_id: str, *, consumed_by: str) -> bool:
         """Give back an approval whose action then failed to save (the order
         that spent it was never written), so it is not burned for nothing.
-        Audited as ``consume_released``."""
-        if not self._unconsume(request_id, consumed_by):
+        Audited as ``consume_released`` (a row the request names, so a
+        release whose reply was lost still gets it: _record_trail)."""
+        if not self._unconsume(request_id, consumed_by, released=_new_log_id()):
             return False
         doc = self._raw(request_id)
         if doc:
-            self._write_audit("consume_released", doc, actor=consumed_by)
+            self._record_trail([doc])
         return True
 
     def _consume_failure(self, ident: Dict[str, Any]) -> Dict[str, Any]:
@@ -1161,6 +1184,7 @@ class ApprovalEngine:
                 doc = None
         if not doc:
             return {"ok": False, "error": "not_found"}
+        self._record_trail([doc])
         status = doc.get("status")
         if doc.get("consumed") or status == ApprovalStatus.CONSUMED.value:
             return {"ok": False, "error": "already_consumed"}
@@ -1190,11 +1214,21 @@ class ApprovalEngine:
                 raise
             return None
 
+    def _unread(self, exc: Exception) -> List[Dict[str, Any]]:
+        """A list of requests that could not be read: a strict engine raises
+        (the routes answer 503 -- an empty inbox would say nothing waits); a
+        lenient one answers no rows, as before."""
+        if self._strict:
+            raise exc
+        return []
+
     def get(self, request_id: str) -> Optional[Dict[str, Any]]:
-        """Single fetch; lazy-flips an overdue REQUESTED row to EXPIRED."""
+        """Single fetch; lazy-flips an overdue REQUESTED row to EXPIRED, and
+        writes any audit row the request's decisions still owe (_record_trail)."""
         doc = self._raw(request_id)
         if doc is None:
             return None
+        self._record_trail([doc])
         if (
             doc.get("status") == ApprovalStatus.REQUESTED.value
             and _as_aware(doc.get("expires_at")) <= _now()
@@ -1213,10 +1247,12 @@ class ApprovalEngine:
         """Pending/history inbox for an approver. HQ roles (ADMIN/SUPERADMIN) see
         every store; STORE/AREA managers are scoped to ``store_ids``. A
         supplier-money request ('rtv', R1) is listed only for a role that may
-        approve one -- a manager's inbox never holds one."""
+        approve one -- a manager's inbox never holds one. A strict engine
+        raises when the list could not be read (_unread); a lenient one
+        answers no rows."""
         coll = self._coll()
         if coll is None:
-            return []
+            return self._unread(RuntimeError("approval store unavailable"))
         q: Dict[str, Any] = {}
         if status and status.upper() != "ALL":
             q["status"] = status.upper()
@@ -1233,22 +1269,24 @@ class ApprovalEngine:
             q["store_id"] = {"$in": scoped + [None]}
         try:
             rows = list(coll.find(q, {"_id": 0}).sort("created_at", -1).limit(int(limit)))
-        except Exception:  # noqa: BLE001
-            return []
+        except Exception as e:  # noqa: BLE001
+            return self._unread(e)
+        self._record_trail(rows)
         return [_jsonable(r) for r in rows]
 
     def list_mine(self, requested_by: str, limit: int = 100) -> List[Dict[str, Any]]:
         coll = self._coll()
         if coll is None:
-            return []
+            return self._unread(RuntimeError("approval store unavailable"))
         try:
             rows = list(
                 coll.find({"requested_by": requested_by}, {"_id": 0})
                 .sort("created_at", -1)
                 .limit(int(limit))
             )
-        except Exception:  # noqa: BLE001
-            return []
+        except Exception as e:  # noqa: BLE001
+            return self._unread(e)
+        self._record_trail(rows)
         return [_jsonable(r) for r in rows]
 
     def pending_count(self, approver_roles: List[str], store_ids: Optional[List[str]] = None) -> int:
@@ -1276,35 +1314,35 @@ class ApprovalEngine:
             return 0
         count = 0
         for doc in stale:
-            try:
-                res = coll.update_one(
-                    {"request_id": doc.get("request_id"), "status": ApprovalStatus.REQUESTED.value},
-                    {"$set": {"status": ApprovalStatus.EXPIRED.value}},
-                )
-            except Exception:  # noqa: BLE001
-                continue
-            if getattr(res, "modified_count", 0):
+            if self._expire(doc):
                 count += 1
-                expired_doc = dict(doc, status=ApprovalStatus.EXPIRED.value)
-                self._write_audit("expired", expired_doc, actor="SYSTEM")
         if count:
             logger.info("[APPROVALS] expire_stale flipped %d stale request(s)", count)
         return count
 
-    def _lazy_expire(self, doc: Dict[str, Any]) -> None:
+    def _expire(self, doc: Dict[str, Any]) -> bool:
+        """Flip one overdue REQUESTED request to EXPIRED, with its audit row
+        (named on the request in the same write, as each decision names its
+        own: _record_trail). True when this call made the flip. Fail-soft."""
         coll = self._coll()
         if coll is None:
-            return
+            return False
+        log_id = _new_log_id()
         try:
             res = coll.update_one(
                 {"request_id": doc.get("request_id"), "status": ApprovalStatus.REQUESTED.value},
-                {"$set": {"status": ApprovalStatus.EXPIRED.value}},
+                {"$set": {"status": ApprovalStatus.EXPIRED.value, "audit_rows.expired": log_id}},
             )
         except Exception:  # noqa: BLE001
-            return
-        if getattr(res, "modified_count", 0):
-            self._write_audit("expired", dict(doc, status=ApprovalStatus.EXPIRED.value),
-                              actor="SYSTEM")
+            return False
+        if not getattr(res, "modified_count", 0):
+            return False
+        self._write_audit("expired", dict(doc, status=ApprovalStatus.EXPIRED.value),
+                          actor="SYSTEM", log_id=log_id)
+        return True
+
+    def _lazy_expire(self, doc: Dict[str, Any]) -> None:
+        self._expire(doc)
 
     # --- internals ---------------------------------------------------------
 
@@ -1514,6 +1552,51 @@ class ApprovalEngine:
             logger.debug("[APPROVALS] get_audit_repository unavailable: %s", e)
             return None
 
+    def _record_trail(self, docs: List[Dict[str, Any]]) -> None:
+        """Write, once, every audit row the decisions on the requests of
+        ``docs`` still owe (D84).
+
+        request / approve / reject / consume_approval / release_consumption
+        and the expiry name their audit row's log id on the request
+        (``audit_rows.<action>``) in the SAME single-document write that makes
+        the change, then write the row. When that write lands and its reply
+        is lost the caller is told to try again (503) and the row was never
+        written; when only the audit insert fails the change stands without
+        it. Every engine read of a request -- get, the inbox and "mine" lists,
+        and the already-decided / already-spent answers a retry gets -- runs
+        this: a row named on the request and missing from the trail is
+        written under that id (the unique _id lets it land once), naming who
+        decided or spent, never the reader.
+
+        A request decided by a previous version carries no note and has its
+        row already, so nothing of its is written here. Fail-soft: a check
+        that fails writes nothing (the next read repairs)."""
+        owed = {log_id: (doc, action)
+                for doc in docs
+                for action, log_id in ((doc or {}).get("audit_rows") or {}).items() if log_id}
+        if not owed:
+            return
+        try:
+            written = {r.get("_id") for r in self._audit_coll().find(
+                {"_id": {"$in": list(owed)}}, {"_id": 1})}
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[APPROVALS] could not check the audit rows of %s: %s",
+                           sorted({d.get("request_id") for d, _ in owed.values()}), e)
+            return
+        for log_id in owed.keys() - written:
+            doc, action = owed[log_id]
+            if action not in _TRAIL:
+                continue
+            status, who = _TRAIL[action]
+            self._write_audit(
+                action,
+                # as the request stood when the action was made
+                dict(doc, status=status, consumed=action == "consumed"),
+                actor=next((doc[f] for f in who if doc.get(f)), "SYSTEM"),
+                reason=(doc.get("reject_reason") or "") if action == "rejected" else "",
+                log_id=log_id,
+            )
+
     def _write_audit(
         self,
         action: str,
@@ -1521,6 +1604,7 @@ class ApprovalEngine:
         *,
         actor: str,
         reason: str = "",
+        log_id: Optional[str] = None,
     ) -> Optional[str]:
         """Append a hash-chained ``approval_request`` row via
         AuditRepository.create. NEVER includes the PIN value or any bcrypt hash.
@@ -1528,7 +1612,7 @@ class ApprovalEngine:
         repo = self._audit_repo()
         if repo is None:
             return None
-        log_id = f"AUD-{uuid.uuid4().hex[:12]}"
+        log_id = log_id or _new_log_id()
         # before/after snapshots are PIN-free by construction: request_doc is an
         # approval_requests row (no pin fields). Snapshot only auditable fields.
         snapshot = {
@@ -1594,6 +1678,24 @@ class ApprovalEngine:
 # ============================================================================
 # Module helpers
 # ============================================================================
+
+
+def _new_log_id() -> str:
+    return f"AUD-{uuid.uuid4().hex[:12]}"
+
+
+# Each audited action a request names the row of (_record_trail): the status
+# the request had when it was made, and the fields naming who made it (none:
+# the system). A spend given back has no consumed_by any more; whoever
+# released it is who spent it (_unconsume is guarded on that).
+_TRAIL = {
+    "approval_requested": (ApprovalStatus.REQUESTED.value, ("requested_by",)),
+    "approved": (ApprovalStatus.APPROVED.value, ("reviewed_by",)),
+    "rejected": (ApprovalStatus.REJECTED.value, ("reviewed_by",)),
+    "consumed": (ApprovalStatus.CONSUMED.value, ("consumed_by", "released_by")),
+    "consume_released": (ApprovalStatus.APPROVED.value, ("released_by",)),
+    "expired": (ApprovalStatus.EXPIRED.value, ()),
+}
 
 
 def _as_aware(dt: Any) -> datetime:
