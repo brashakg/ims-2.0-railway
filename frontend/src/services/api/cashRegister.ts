@@ -52,6 +52,9 @@ export interface CashRegisterSession {
     | 'SEVERAL_DRAWERS'
     // The close could not read the day's drawers: no verdict is claimed.
     | 'COMPARISON_UNAVAILABLE'
+    // D111: opened on a drawer already counted and closed with no count of
+    // its own. The till's count is shown; nothing is compared with it.
+    | 'COUNTED_EARLIER'
     | null;
   tolerance?: number | null;
   closing_note?: string | null;
@@ -66,6 +69,11 @@ export interface CashRegisterSession {
   till_count_differs?: boolean;
   counted_from_shared_record?: boolean;
   till_opening_float_not_recorded?: boolean;
+  // D111: this session opened on a drawer that was already counted. Its
+  // expected cash starts from that count (`till_standing_count`), not from the
+  // float typed at opening, and covers the cash moved since that count.
+  till_counted_earlier?: boolean;
+  till_standing_count?: number | null;
   // Cash drawers on this shop-day. Above 1, `counted` is the latest drawer's
   // count only, not the day's total (D40).
   till_drawers_on_day?: number | null;

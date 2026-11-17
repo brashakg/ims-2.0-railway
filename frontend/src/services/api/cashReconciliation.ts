@@ -24,7 +24,10 @@ export type ReconStatus =
   | 'SEVERAL_DRAWERS'
   // No comparison could be trusted: the close could not read the day's
   // drawers, or an earlier drawer was recorded by an older version (D76).
-  | 'COMPARISON_UNAVAILABLE';
+  | 'COMPARISON_UNAVAILABLE'
+  // D111: a Cash Register session with no count of its own on a drawer that
+  // was counted earlier that day. The till's count is shown, not compared.
+  | 'COUNTED_EARLIER';
 export type ReconSource = 'CASH_REGISTER' | 'BLIND_EOD';
 
 export interface ReconByModeRow {

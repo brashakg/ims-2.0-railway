@@ -178,6 +178,11 @@ export default function CashRegisterPage() {
         toast.warning(
           `Closed. This day had ${closed.till_drawers_on_day} cash drawers, so no single variance is shown; each drawer's own count and variance is recorded.`,
         );
+      } else if (closed.variance_status === 'COUNTED_EARLIER') {
+        // D111: opened on a drawer already counted, closed with no count.
+        toast.warning(
+          `Closed without a count. This drawer was counted earlier today on the till (${inr(closed.counted)}); that count stands and no variance is shown.`,
+        );
       } else if (closed.counted_from_shared_record) {
         // The drawer was already counted at POS Day-End. That count stands --
         // say so, because the figure now on this screen is not the one that was
@@ -338,7 +343,19 @@ export default function CashRegisterPage() {
                       <td className="px-4 py-2 text-gray-500">{s.shift || '—'}</td>
                       <td className="px-4 py-2 text-gray-500">{fmtDateTime(s.opened_at)}</td>
                       <td className="px-4 py-2 text-gray-500">{fmtDateTime(s.closed_at)}</td>
-                      <td className="px-4 py-2 text-right">{inr(s.opening_float)}</td>
+                      <td className="px-4 py-2 text-right">
+                        {inr(s.opening_float)}
+                        {s.till_standing_count != null &&
+                          s.till_standing_count !== s.opening_float && (
+                            <span
+                              data-testid="standing-count"
+                              title="This drawer was already counted when the session opened. Expected cash starts from that count, not from this float."
+                              className="ml-1 text-[10px] font-medium text-amber-700"
+                            >
+                              Till count {inr(s.till_standing_count)}
+                            </span>
+                          )}
+                      </td>
                       <td className="px-4 py-2 text-right">
                         {s.status !== 'CLOSED' ? (
                           '—'
@@ -347,7 +364,7 @@ export default function CashRegisterPage() {
                         ) : (
                           inr(s.counted)
                         )}
-                        {s.counted_from_shared_record && (
+                        {s.counted_from_shared_record && s.variance_status !== 'COUNTED_EARLIER' && (
                           <span
                             data-testid="counted-at-day-end"
                             title="Counted at POS Day-End. One drawer, one count."
@@ -654,6 +671,17 @@ function VarianceChip({ session }: { session: CashRegisterSession }) {
         </span>
         <TillDrawerList drawers={session.till_drawers} testId="cash-register-drawer-list" />
       </div>
+    );
+  }
+  if (status === 'COUNTED_EARLIER') {
+    return (
+      <span
+        data-testid="counted-earlier-verdict"
+        title="This session opened on a drawer that was already counted and closed without a count of its own. The till's count stands; nothing is compared with it."
+        className="inline-block rounded px-2 py-0.5 text-xs font-medium bg-gray-100 text-gray-600"
+      >
+        Counted earlier today on the till
+      </span>
     );
   }
   // A drawer nobody counted has no variance to show. Showing "−₹2,000" here

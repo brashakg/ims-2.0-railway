@@ -97,6 +97,7 @@ const STATUS_CHIP: Record<ReconStatus, string> = {
   NOT_COUNTED: 'bg-gray-100 text-gray-600',
   SEVERAL_DRAWERS: 'bg-gray-100 text-gray-600',
   COMPARISON_UNAVAILABLE: 'bg-gray-100 text-gray-600',
+  COUNTED_EARLIER: 'bg-gray-100 text-gray-600',
 };
 const STATUS_ROW: Record<ReconStatus, string> = {
   BALANCED: '',
@@ -106,6 +107,7 @@ const STATUS_ROW: Record<ReconStatus, string> = {
   NOT_COUNTED: '',
   SEVERAL_DRAWERS: '',
   COMPARISON_UNAVAILABLE: '',
+  COUNTED_EARLIER: '',
 };
 
 const HQ_ROLES = ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'ACCOUNTANT'];
@@ -733,6 +735,16 @@ function VarianceChip({ status, variance }: { status: ReconStatus; variance: num
         className={`inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs font-medium ${STATUS_CHIP.COMPARISON_UNAVAILABLE}`}
       >
         Comparison not available
+      </span>
+    );
+  }
+  if (status === 'COUNTED_EARLIER') {
+    return (
+      <span
+        title="This register session opened on a drawer that was already counted and closed without a count of its own. The till's count stands; nothing is compared with it. Cash sales on this row are the cash taken after that count."
+        className={`inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs font-medium ${STATUS_CHIP.COUNTED_EARLIER}`}
+      >
+        Counted earlier today on the till
       </span>
     );
   }
