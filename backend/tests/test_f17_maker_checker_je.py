@@ -740,8 +740,10 @@ def test_account_type_snapshot_survives_coa_edit(db):
 
 def test_reverse_je_claims_first_no_orphan_mirror(db):
     """P3 regression: reverse_je must CLAIM the original (POSTED->REVERSED)
-    BEFORE inserting the mirror. If the mirror insert fails, the claim is
-    compensated (original back to POSTED) and NO orphan mirror exists."""
+    BEFORE inserting the mirror. If the mirror insert fails, NO orphan mirror
+    exists and the claim STAYS, naming the mirror still to be written (PR
+    #1411 round 4: un-flipping it let an insert whose reply was lost be
+    followed by a second reversal); Reverse again writes that mirror."""
     je_id = _post_revenue_je(db, amount=500.0)
     coll = db.get_collection("journal_entries")
     real_insert = coll.insert_one
@@ -755,12 +757,14 @@ def test_reverse_je_claims_first_no_orphan_mirror(db):
     finally:
         coll.insert_one = real_insert
     assert res["ok"] is False and res["error"] == "write_failed"
-    # Original restored to POSTED; no orphan mirror anywhere.
-    assert je_service.get_je(db, je_id)["status"] == "POSTED"
+    # The claim stands on the original; no orphan mirror anywhere.
+    claimed = je_service.get_je(db, je_id)
+    assert claimed["status"] == "REVERSED" and claimed["reversed_by"]
     assert not [d for d in coll.docs if d.get("reversal_of") == je_id]
-    # And a normal reversal afterwards still works (state not corrupted).
+    # And Reverse afterwards finishes it: the one mirror the claim names.
     res2 = je_service.reverse_je(db, je_id=je_id, actor_id="user_B")
-    assert res2["ok"] is True
+    assert res2["ok"] is True and res2["reversal_je_id"] == claimed["reversed_by"]
+    assert len([d for d in coll.docs if d.get("reversal_of") == je_id]) == 1
 
 
 def test_approve_rearms_validity_window(db):

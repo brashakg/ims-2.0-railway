@@ -17,7 +17,11 @@ hard-enforces approver != maker. This module only:
     (+ REJECTED / REVERSED) where each hop is ONE single-document write,
   * gates the POST behind ``consume_approval`` so a JE posts EXACTLY ONCE,
   * writes a hash-chained ``audit_logs`` row per transition via
-    ``AuditRepository.create``.
+    ``AuditRepository.create``, under a log id fixed per journal and
+    transition. The transition is noted on the journal in the same write
+    that makes it (``events``), so a row that was not written -- the write's
+    reply lost, the process dead before the audit insert, the insert refused
+    -- is written by the next door or read that meets the journal (D84).
 
 Atomicity (CORRECTIONS P0-1): standalone Mongo -> NO multi-document
 transactions. The E4 approval doc and the JE doc are each updated by their own
@@ -491,6 +495,40 @@ def _audit(db, action: str, je: Dict[str, Any], *, actor: str, reason: str = "",
         logger.warning("[JE] audit write failed for %s: %s", je.get("je_id"), e)
 
 
+# One transition of one journal: (key, audit action, actor, reason). The key
+# names it on the journal (``events.<key>``) and in its audit row's log id:
+# the transition, plus the request it concerns where a journal can make it
+# more than once ("reapproved:<request id>").
+Event = Tuple[str, str, str, str]
+
+
+def _event_id(je_id: str, key: str) -> str:
+    """The log id of the audit row of one transition of one journal. Fixed,
+    so the unique _id/log_id index lets that row be written exactly once
+    however many doors and reads try (D68/D84)."""
+    if key == "posted":
+        return _posted_event_id(je_id)
+    name, _, ref = key.partition(":")
+    return f"AUD-JE-{name.upper()}-{je_id}" + (f"-{ref}" if ref else "")
+
+
+def _stamp(event: Event, status: str) -> Dict[str, Any]:
+    """What a transition's own journal write notes about it under
+    ``events.<key>``, in that same single-document write: the audit row it
+    owes. The journal's new state and the note land together or not at all,
+    so whatever happens after that write -- its reply lost, the process dead
+    before the audit insert, the insert refused -- the journal itself says
+    which row is missing, and repair_events writes it (D84)."""
+    _key, action, actor, reason = event
+    return {"action": action, "actor": actor, "status": status, "reason": reason or None}
+
+
+def _log(db, je: Dict[str, Any], event: Event) -> None:
+    """A transition's audit row, under its fixed id."""
+    key, action, actor, reason = event
+    _audit(db, action, je, actor=actor, reason=reason, log_id=_event_id(je["je_id"], key))
+
+
 # ============================================================================
 # Lifecycle
 # ============================================================================
@@ -552,6 +590,7 @@ def create_je(
         return {"ok": False, "http": 422, "error": err}
 
     now = _now()
+    event: Event = ("created", "je_created", maker_id, "")
     je = {
         "je_id": f"JE-{uuid.uuid4().hex[:12]}",
         "je_number": _next_je_number(db, entity_id, entry_date),
@@ -577,14 +616,19 @@ def create_je(
         "checked_at": None,
         "posted_at": None,
         "updated_at": now,
+        "events": {"created": _stamp(event, STATUS_DRAFT)},
     }
     try:
         coll.insert_one(je)
     except Exception as e:  # noqa: BLE001
         logger.warning("[JE] create insert failed: %s", e)
-        return {"ok": False, "http": 503, "error": "write_failed"}
+        # The insert may have landed with its reply lost: only a draft that is
+        # not there was not created (answering "failed" for one that is there
+        # had the next press draft it twice).
+        if get_je(db, je["je_id"]) is None:
+            return {"ok": False, "http": 503, "error": "write_failed"}
 
-    _audit(db, "je_created", je, actor=maker_id)
+    _log(db, je, event)
     je.pop("_id", None)
     logger.info("[JE] %s created (%s) by %s", je["je_id"], je["je_number"], maker_id)
     return {"ok": True, "je": _jsonable(je)}
@@ -614,6 +658,42 @@ def _set(db, je_id: str, fields: Dict[str, Any], *, expect_status: Optional[str]
     except Exception as e:  # noqa: BLE001
         logger.warning("[JE] _set %s failed: %s", je_id, e)
         return None
+
+
+def _load(db, je_id: str, *, poster_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """A door's read of its journal: the journal as stored (None when there
+    is none), after writing every audit row its transitions are still owed
+    (repair_events). So the press that follows a lost reply, or a process
+    that died mid-door, writes the missing row once (D84)."""
+    je = get_je(db, je_id)
+    if je is not None:
+        repair_events(db, [je], poster_id=poster_id, reason="recorded_on_retry")
+    return je
+
+
+def _move(db, je_id: str, fields: Dict[str, Any], event: Event, *, expect_status: str,
+          expect_request_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """One guarded transition and its audit row: the journal as written, or
+    None when this transition is not on it.
+
+    The write notes the transition on the journal (_stamp). When it comes
+    back empty -- refused, lost to a racing writer, or landed with its reply
+    lost, which all look the same from here -- the journal is read again
+    (_load, which writes any audit row it is owed). A journal carrying
+    exactly this transition has made it: the door answers as written instead
+    of "someone else moved it"."""
+    key = event[0]
+    stamp = _stamp(event, fields.get("status") or expect_status)
+    updated = _set(db, je_id, {**fields, f"events.{key}": stamp},
+                   expect_status=expect_status, expect_request_id=expect_request_id)
+    if updated is not None:
+        updated.pop("_id", None)
+        _log(db, updated, event)
+        return updated
+    cur = _load(db, je_id)
+    if cur is not None and (cur.get("events") or {}).get(key) == stamp:
+        return cur
+    return None
 
 
 def _request_spec(je: Dict[str, Any]) -> Dict[str, Any]:
@@ -675,7 +755,7 @@ def submit_je(db, *, je_id: str, maker_id: str, maker_roles: List[str],
     """DRAFT -> SUBMITTED. Opens an E4 maker-checker approval request
     (action_type=journal_entry) and links it on the JE. Only the maker may
     submit their own DRAFT."""
-    je = get_je(db, je_id)
+    je = _load(db, je_id)
     if je is None:
         return {"ok": False, "http": 404, "error": "not_found"}
     if je.get("status") != STATUS_DRAFT:
@@ -689,10 +769,11 @@ def submit_je(db, *, je_id: str, maker_id: str, maker_roles: List[str],
     if not request_id:
         return {"ok": False, "http": 503, "error": "approval_request_failed"}
 
-    updated = _set(
+    updated = _move(
         db, je_id,
         {"status": STATUS_SUBMITTED, "submitted_at": _now(),
          "approval_request_id": request_id},
+        ("submitted", "je_submitted", maker_id, ""),
         expect_status=STATUS_DRAFT,
     )
     if updated is None:
@@ -700,28 +781,28 @@ def submit_je(db, *, je_id: str, maker_id: str, maker_roles: List[str],
         cur = get_je(db, je_id)
         return {"ok": False, "http": 409, "error": "not_draft",
                 "status": (cur or {}).get("status")}
-    updated.pop("_id", None)
-    _audit(db, "je_submitted", updated, actor=maker_id)
-    return {"ok": True, "je": _jsonable(updated), "request_id": request_id}
+    return {"ok": True, "je": _jsonable(updated), "request_id": updated.get("approval_request_id")}
 
 
 def _record_decision(db, je: Dict[str, Any], *, status: str, checker_id: str,
-                     note: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    """The ONE writer of SUBMITTED -> APPROVED / REJECTED: a guarded
-    single-document update (two racing writers -> one wins) plus its audit
-    row. Returns the updated journal, or None when it was no longer SUBMITTED."""
+                     request_id: str, note: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """The ONE writer of a checker's decision on a journal, made on request
+    ``request_id``: SUBMITTED -> APPROVED / REJECTED, and an APPROVED journal
+    approved again (D54: it stays APPROVED, now on the approval just made,
+    under the checker who made it). A guarded single-document update (two
+    racing writers -> one wins) plus its audit row (_move). Returns the
+    journal carrying the decision, or None when it could not take it."""
     fields: Dict[str, Any] = {"status": status, "checker_id": checker_id, "checked_at": _now()}
     if status == STATUS_REJECTED:
         fields["checker_note"] = (note or "")[:500] or None
-    updated = _set(db, je["je_id"], fields, expect_status=STATUS_SUBMITTED)
-    if updated is None:
-        return None
-    updated.pop("_id", None)
-    if status == STATUS_REJECTED:
-        _audit(db, "je_rejected", updated, actor=checker_id, reason=note or "")
+        event: Event = ("rejected", "je_rejected", checker_id, note or "")
+    elif je.get("status") == STATUS_APPROVED:
+        event = (f"reapproved:{request_id}", "je_reapproved", checker_id,
+                 f"approved again on request {request_id}")
     else:
-        _audit(db, "je_approved", updated, actor=checker_id)
-    return updated
+        event = ("approved", "je_approved", checker_id, "")
+    return _move(db, je["je_id"], fields, event, expect_status=je.get("status"),
+                 expect_request_id=request_id)
 
 
 def _note_ok(note: Optional[str]) -> bool:
@@ -730,18 +811,32 @@ def _note_ok(note: Optional[str]) -> bool:
     return len((note or "").strip()) >= 10
 
 
+def _reapproval_due(je: Dict[str, Any]) -> bool:
+    """An APPROVED journal whose request was raised again (D54) and whose
+    approval on that request is not yet recorded on the journal."""
+    events, rid = je.get("events") or {}, je.get("approval_request_id")
+    return f"raised_again:{rid}" in events and f"reapproved:{rid}" not in events
+
+
 def _take_request_decision(db, je: Dict[str, Any]) -> Dict[str, Any]:
-    """A SUBMITTED journal takes the decision already recorded on its approval
-    request; the journal as it now stands is returned.
+    """A journal takes the decision already recorded on its approval request;
+    the journal as it now stands is returned.
 
     The request and the journal are two documents and this database has no
-    transactions, so the request can be decided while the journal still says
-    SUBMITTED: the decision was made in the approvals inbox (L3-25), or the
-    journal write that follows a journal-screen decision was lost. Post then
-    refused not_approved and Approve refused already_reviewed -- a dead end.
-    Every journal door runs this first, and the inbox runs it right after its
-    own approve / reject (sync_with_request), so the journal catches up from
-    its request. Safe to repeat and to race (_record_decision is guarded).
+    transactions, so the request can be decided while the journal does not
+    say so yet: the decision was made in the approvals inbox (L3-25), the
+    journal write that follows a journal-screen decision was lost, or the
+    engine's decision landed and its reply was lost. Post then refused
+    not_approved and Approve refused already_reviewed -- a dead end -- and an
+    approval made again (D54) was never recorded on the journal. Every
+    journal door runs this first, and the inbox runs it right after its own
+    approve / reject (sync_with_request), so the journal catches up from its
+    request. Safe to repeat and to race (_record_decision is guarded).
+
+    Two journals catch up: a SUBMITTED one (its decision), and an APPROVED
+    one whose request was raised again and has since been approved
+    (_reapproval_due: the approval made again, with its checker and its
+    je_reapproved row).
 
     Taken only when every one of these holds -- the rules the journal screen
     itself applies:
@@ -754,36 +849,44 @@ def _take_request_decision(db, je: Dict[str, Any]) -> Dict[str, Any]:
       * an APPROVAL was not made by the journal's maker (a maker may reject,
         that is withdraw, their own journal -- as on the journal screen);
       * a REJECTION carries the checker note (_note_ok)."""
-    if je.get("status") != STATUS_SUBMITTED or not je.get("approval_request_id"):
+    status, rid = je.get("status"), je.get("approval_request_id")
+    again = status == STATUS_APPROVED and _reapproval_due(je)
+    if not rid or not (status == STATUS_SUBMITTED or again):
         return je
     from .approvals import ApprovalStatus
 
-    req = _request(db, je["approval_request_id"], expire=True) or {}
+    req = _request(db, rid, expire=True) or {}
     checker = req.get("reviewed_by")
     if (not checker or not _is_own_request(je, req)
             or not set(req.get("reviewed_by_roles") or []) & JE_CHECKER_ROLES):
         return je
     decided = req.get("status")
     note = (req.get("reject_reason") or "").strip()
-    if decided == ApprovalStatus.APPROVED.value and checker != je.get("maker_id"):
-        updated = _record_decision(db, je, status=STATUS_APPROVED, checker_id=checker)
-    elif decided == ApprovalStatus.REJECTED.value and _note_ok(note):
-        updated = _record_decision(db, je, status=STATUS_REJECTED, checker_id=checker, note=note)
+    # An approval made again may already have been spent by this journal's Post.
+    approved = {ApprovalStatus.APPROVED.value} | ({ApprovalStatus.CONSUMED.value} if again else set())
+    if decided in approved and checker != je.get("maker_id"):
+        updated = _record_decision(db, je, status=STATUS_APPROVED, checker_id=checker,
+                                   request_id=rid)
+    elif decided == ApprovalStatus.REJECTED.value and not again and _note_ok(note):
+        updated = _record_decision(db, je, status=STATUS_REJECTED, checker_id=checker,
+                                   request_id=rid, note=note)
     else:
         return je
     return updated or get_je(db, je["je_id"]) or je
 
 
-def _journal_awaiting(db, req: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """The SUBMITTED journal whose own approval request ``req`` is, for the
-    approvals inbox; None for any other request. None too while manual
-    journals are switched off: the journal screen's approve / reject / post
-    are frozen then, and the inbox does not move a journal behind the switch
-    (the journal catches up at its own doors once it is on again)."""
+def _journal_awaiting(db, req: Optional[Dict[str, Any]], *,
+                      statuses=(STATUS_SUBMITTED,)) -> Optional[Dict[str, Any]]:
+    """The journal (SUBMITTED, unless ``statuses`` says otherwise) whose own
+    approval request ``req`` is, for the approvals inbox; None for any other
+    request. None too while manual journals are switched off: the journal
+    screen's approve / reject / post are frozen then, and the inbox does not
+    move a journal behind the switch (the journal catches up at its own doors
+    once it is on again)."""
     if not is_je_enabled() or (req or {}).get("action_type") != JE_ACTION_TYPE:
         return None
     je = get_je(db, (req.get("context") or {}).get("je_id") or "")
-    if (je and je.get("status") == STATUS_SUBMITTED
+    if (je and je.get("status") in statuses
             and je.get("approval_request_id") == req.get("request_id")
             and _is_own_request(je, req)):
         return je
@@ -804,8 +907,9 @@ def inbox_reject_refusal(db, req: Optional[Dict[str, Any]], decider_roles: List[
 def sync_with_request(db, req: Optional[Dict[str, Any]]) -> None:
     """The approvals inbox decided ``req``: when it is a journal's own request
     the journal moves with it now (_take_request_decision, which reads the
-    decision back from the request itself)."""
-    je = _journal_awaiting(db, req)
+    decision back from the request itself) -- an APPROVED journal too, when
+    ``req`` is the request raised again for it (D54)."""
+    je = _journal_awaiting(db, req, statuses=(STATUS_SUBMITTED, STATUS_APPROVED))
     if je is not None:
         _take_request_decision(db, je)
 
@@ -851,11 +955,22 @@ def needs_reapproval(db, je: Dict[str, Any]) -> bool:
         "pending", "unspendable")
 
 
-def with_reapproval_flags(db, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """``needs_reapproval`` on every APPROVED journal of ``rows`` (in place)."""
+def with_flags(db, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """What the screen must offer next, on the journals of ``rows`` (in
+    place): ``needs_reapproval`` on every APPROVED one, and
+    ``reversal_unfinished`` on every REVERSED one -- true when the reversal
+    voucher it names was never written (reverse_je), so Reverse is offered
+    again and finishes it."""
     for row in rows:
         if row.get("status") == STATUS_APPROVED:
             row["needs_reapproval"] = needs_reapproval(db, row)
+    reversed_rows = [r for r in rows if r.get("status") == STATUS_REVERSED and r.get("reversed_by")]
+    if reversed_rows:
+        ids = [r["reversed_by"] for r in reversed_rows]
+        written = {m.get("je_id") for m in _ask("reversal voucher read", lambda: list(
+            _store(db).find({"je_id": {"$in": ids}}, {"_id": 0, "je_id": 1})))}
+        for row in reversed_rows:
+            row["reversal_unfinished"] = row["reversed_by"] not in written
     return rows
 
 
@@ -902,8 +1017,12 @@ def _open_request(db, je: Dict[str, Any], *, actor_id: str,
     new_id = _raise_own_request(db, je, old.get("requested_by_roles"))
     if not new_id:
         return None, {"ok": False, "http": 503, "error": "approval_request_failed"}
-    linked = _set(db, je["je_id"], {"approval_request_id": new_id},
-                  expect_status=status, expect_request_id=old_id)
+    linked = _move(
+        db, je["je_id"], {"approval_request_id": new_id},
+        (f"raised_again:{new_id}", "je_request_raised_again", actor_id,
+         f"request {old_id} can no longer decide the journal "
+         f"({old.get('status') or 'missing'}); request {new_id} raised in its place"),
+        expect_status=status, expect_request_id=old_id)
     if linked is None:
         # Another checker moved the journal first: decide whatever request it
         # is linked to now, or say it is no longer waiting.
@@ -912,10 +1031,6 @@ def _open_request(db, je: Dict[str, Any], *, actor_id: str,
             return cur["approval_request_id"], None
         return None, {"ok": False, "http": 409, "error": "not_submitted",
                       "status": cur.get("status")}
-    linked.pop("_id", None)
-    _audit(db, "je_request_raised_again", linked, actor=actor_id,
-           reason=(f"request {old_id} can no longer decide the journal "
-                   f"({old.get('status') or 'missing'}); request {new_id} raised in its place"))
     return new_id, None
 
 
@@ -924,7 +1039,7 @@ def approve_je(db, *, je_id: str, approver_id: str, approver_roles: List[str],
     """SUBMITTED -> APPROVED. Delegates the PIN + maker-checker (approver !=
     maker) + atomic single-use approve to the E4 ApprovalEngine. Does NOT post
     to the ledger (that is a separate /post step that consumes the approval)."""
-    je = get_je(db, je_id)
+    je = _load(db, je_id)
     if je is None:
         return {"ok": False, "http": 404, "error": "not_found"}
     je = _take_request_decision(db, je)
@@ -958,16 +1073,10 @@ def approve_je(db, *, je_id: str, approver_id: str, approver_roles: List[str],
                 out[k] = res[k]
         return out
 
-    if je.get("status") == STATUS_APPROVED:
-        # Approved again (D54): the journal stays APPROVED, now on the
-        # approval just made; Post spends that one.
-        updated = _set(db, je_id, {"checker_id": approver_id, "checked_at": _now()},
-                       expect_status=STATUS_APPROVED, expect_request_id=request_id)
-        if updated is not None:
-            updated.pop("_id", None)
-            _audit(db, "je_reapproved", updated, actor=approver_id)
-    else:
-        updated = _record_decision(db, je, status=STATUS_APPROVED, checker_id=approver_id)
+    # An APPROVED journal is approved again (D54): it stays APPROVED, now on
+    # the approval just made; Post spends that one.
+    updated = _record_decision(db, je, status=STATUS_APPROVED, checker_id=approver_id,
+                               request_id=request_id)
     if updated is None:
         cur = get_je(db, je_id)
         return {"ok": False, "http": 409, "error": "not_submitted",
@@ -982,7 +1091,7 @@ def reject_je(db, *, je_id: str, approver_id: str, approver_roles: List[str],
     note = (note or "").strip()
     if not _note_ok(note):
         return {"ok": False, "http": 400, "error": "note_required"}
-    je = get_je(db, je_id)
+    je = _load(db, je_id)
     if je is None:
         return {"ok": False, "http": 404, "error": "not_found"}
     je = _take_request_decision(db, je)
@@ -1011,7 +1120,8 @@ def reject_je(db, *, je_id: str, approver_id: str, approver_roles: List[str],
                 out[k] = res[k]
         return out
 
-    updated = _record_decision(db, je, status=STATUS_REJECTED, checker_id=approver_id, note=note)
+    updated = _record_decision(db, je, status=STATUS_REJECTED, checker_id=approver_id,
+                               request_id=request_id, note=note)
     if updated is None:
         cur = get_je(db, je_id)
         return {"ok": False, "http": 409, "error": "not_submitted",
@@ -1032,28 +1142,35 @@ def _posted_event_id(je_id: str) -> str:
 _READ_REPAIR_GRACE = timedelta(minutes=2)
 
 
-def repair_posted_events(db, rows: List[Dict[str, Any]], *, poster_id: Optional[str] = None,
-                         reason: str = "recorded_on_read") -> List[Dict[str, Any]]:
-    """Write the je_posted event, once, for every POSTED journal of ``rows``
-    that has none (D68/D84): Post answered but its audit insert failed, the
-    process died between the POSTED write and the audit, or the POSTED write's
-    reply was lost. Run by a Post that finds the journal POSTED and by every
-    read of journals (list, detail, Tally export) -- the screen hides Post
-    once a journal is POSTED, so reading it is what repairs it.
+def repair_events(db, rows: List[Dict[str, Any]], *, poster_id: Optional[str] = None,
+                  reason: str = "recorded_on_read") -> List[Dict[str, Any]]:
+    """Write, once, every audit row the journals of ``rows`` are owed and do
+    not have (D68/D84): the door answered but its audit insert failed, the
+    process died between the journal write and the audit, or the journal
+    write's reply was lost. Run by every door on the journal it reads (_load)
+    and by every read of journals (list, detail, Tally export) -- the screen
+    hides a door once its transition is made, so reading is what repairs it.
 
-    The event's log id is fixed per journal (_posted_event_id), so racing
-    repairs write it once. A journal posted before D68 has its event under a
-    random log id, which the fixed id cannot refuse: only the existence check
-    guards it, so a check that fails writes nothing (the next read repairs).
-    The event names the journal's poster (posted_by); a journal posted before
-    posted_by was recorded names ``poster_id`` (a Post retry) or nobody.
+    je_posted, for every POSTED journal that has none. Its log id is fixed
+    per journal (_posted_event_id), so racing repairs write it once. A
+    journal posted before D68 has its event under a random log id, which the
+    fixed id cannot refuse: only the existence check guards it, so a check
+    that fails writes nothing (the next read repairs). The event names the
+    journal's poster (posted_by); a journal posted before posted_by was
+    recorded names ``poster_id`` (a Post retry) or nobody. A REVERSED journal
+    was POSTED first, so it is repaired too (its event records the posting).
+    A journal with no posted_by posted within _READ_REPAIR_GRACE is left
+    alone on every path (read or Post retry): a previous-version worker may
+    still be writing its random-id event. This version's Post and reversal
+    stamp posted_by and write the fixed id, so their journals are repaired at
+    once.
 
-    A REVERSED journal was POSTED first, so it is repaired too (its event
-    records the posting). A journal with no posted_by posted within
-    _READ_REPAIR_GRACE is left alone on every path (read or Post retry): a
-    previous-version worker may still be writing its random-id event. This
-    version's Post and reversal stamp posted_by and write the fixed id, so
-    their journals are repaired at once."""
+    Every other transition (created, submitted, approved, rejected, request
+    raised again, approved again, reversed), for every journal that carries
+    its note (``events``, _stamp): written under its fixed id (_event_id)
+    with the actor, status and reason noted when it was made -- never the
+    reader. A previous-version worker writes no note and its own random-id
+    row, so nothing of its is repaired here and nothing is doubled."""
     fresh_after = _now() - _READ_REPAIR_GRACE
 
     def _fresh(r):
@@ -1063,28 +1180,38 @@ def repair_posted_events(db, rows: List[Dict[str, Any]], *, poster_id: Optional[
     posted = {r.get("je_id"): r for r in rows
               if r.get("status") in (STATUS_POSTED, STATUS_REVERSED) and r.get("je_id")
               and not _fresh(r)}
-    if not posted:
+    owed = {_event_id(r["je_id"], key): (r, note)
+            for r in rows if r.get("je_id")
+            for key, note in (r.get("events") or {}).items() if key != "posted"}
+    if not posted and not owed:
         return rows
     try:
-        have = {r.get("entity_id") for r in db.get_collection("audit_logs").find(
-            {"entity_id": {"$in": list(posted)}, "action": "je_posted"}, {"entity_id": 1})}
+        audit = db.get_collection("audit_logs")
+        have = {r.get("entity_id") for r in audit.find(
+            {"entity_id": {"$in": list(posted)}, "action": "je_posted"}, {"entity_id": 1})} if posted else set()
+        written = {r.get("_id") for r in audit.find({"_id": {"$in": list(owed)}}, {"_id": 1})} if owed else set()
     except Exception as e:  # noqa: BLE001
-        logger.warning("[JE] could not check the posted events of %s: %s", list(posted), e)
+        logger.warning("[JE] could not check the audit rows of %s: %s",
+                       sorted({r.get("je_id") for r in rows}), e)
         return rows
     for je_id in posted.keys() - have:
-        snapshot = {k: v for k, v in posted[je_id].items() if k != "_id"}
-        snapshot["status"] = STATUS_POSTED                       # the event records the posting
-        _audit(db, "je_posted", snapshot,
-               actor=snapshot.get("posted_by") or poster_id or "unrecorded",
-               reason=reason, log_id=_posted_event_id(je_id))
+        row = posted[je_id]
+        note = (row.get("events") or {}).get("posted") or {}
+        _audit(db, "je_posted", dict(row, status=STATUS_POSTED),     # the event records the posting
+               actor=row.get("posted_by") or poster_id or "unrecorded",
+               reason=note.get("reason") or reason, log_id=_posted_event_id(je_id))
+    for log_id in owed.keys() - written:
+        row, note = owed[log_id]
+        _audit(db, note.get("action"), dict(row, status=note.get("status")),
+               actor=note.get("actor"), reason=note.get("reason") or reason, log_id=log_id)
     return rows
 
 
 def _already_posted(db, je: Dict[str, Any], poster_id: str) -> Dict[str, Any]:
     """A Post that finds the journal POSTED (a retry, a racing poster, or this
     Post's own write whose reply was lost) first writes its missing je_posted
-    event (repair_posted_events), then answers already_posted."""
-    repair_posted_events(db, [je], poster_id=poster_id, reason="recorded_on_retry")
+    event (repair_events), then answers already_posted."""
+    repair_events(db, [je], poster_id=poster_id, reason="recorded_on_retry")
     return {"ok": False, "http": 409, "error": "already_posted"}
 
 
@@ -1093,7 +1220,7 @@ def post_je(db, *, je_id: str, poster_id: str) -> Dict[str, Any]:
     guard), then atomically flips the JE to POSTED. The status==APPROVED filter
     on the JE update makes the post itself idempotent under a race. The caller
     (router) must re-check the period lock on entry_date (double gate)."""
-    je = get_je(db, je_id)
+    je = _load(db, je_id, poster_id=poster_id)
     if je is None:
         return {"ok": False, "http": 404, "error": "not_found"}
     je = _take_request_decision(db, je)
@@ -1133,7 +1260,8 @@ def post_je(db, *, je_id: str, poster_id: str) -> Dict[str, Any]:
 
     updated = _set(
         db, je_id,
-        {"status": STATUS_POSTED, "posted_at": _now(), "posted_by": poster_id},
+        {"status": STATUS_POSTED, "posted_at": _now(), "posted_by": poster_id,
+         "events.posted": _stamp(("posted", "je_posted", poster_id, ""), STATUS_POSTED)},
         expect_status=STATUS_APPROVED,
     )
     if updated is None:
@@ -1154,19 +1282,65 @@ def post_je(db, *, je_id: str, poster_id: str) -> Dict[str, Any]:
 def reverse_je(db, *, je_id: str, actor_id: str, actor_name: Optional[str] = None) -> Dict[str, Any]:
     """Reverse a POSTED JE: mints a mirror JE (debits/credits swapped) dated
     today (IST), posts it immediately, links both. The original moves to
-    REVERSED. The caller must check today's period is open."""
+    REVERSED. The caller must check today's period is open.
+
+    Two writes and no transaction: the CLAIM (the original POSTED -> REVERSED,
+    naming the mirror's id in reversed_by) and the MIRROR's insert under that
+    id. The claim is the decision; the mirror is written exactly once, under
+    the id the claim names:
+      * a claim that landed with its reply lost is recognised on the
+        read-back (reversed_by is this call's own id) and the mirror is
+        written -- it used to answer already_reversed with no mirror, for good;
+      * a mirror insert that raises is read back by its id. There: the
+        reversal is done. Not there, or unreadable: 503 and the claim STAYS;
+      * an original left REVERSED naming a mirror that does not exist (either
+        503 above, or a process that died between the two writes) is finished
+        by Reverse again, which inserts the mirror under that same id. The
+        journal list and detail mark it (reversal_unfinished) so the screen
+        offers the press.
+    The claim is never un-flipped: an insert whose reply was lost can still
+    land after the un-flip, and the fresh reversal that followed it posted
+    the reversal twice."""
     coll = _je_coll(db)
     if coll is None:
         return {"ok": False, "http": 503, "error": "no_db"}
-    je = get_je(db, je_id)
+    je = _load(db, je_id)
     if je is None:
         return {"ok": False, "http": 404, "error": "not_found"}
-    # An already-reversed entry (REVERSED status or a reversed_by link) gets the
-    # specific 'already_reversed' before the generic 'not_posted'.
-    if je.get("status") == STATUS_REVERSED or je.get("reversed_by"):
-        return {"ok": False, "http": 409, "error": "already_reversed"}
-    if je.get("status") != STATUS_POSTED:
+    rev_id = je.get("reversed_by")
+    owes_reversed_row = True
+    if je.get("status") == STATUS_REVERSED or rev_id:
+        # An already-reversed entry (REVERSED status or a reversed_by link) gets
+        # the specific 'already_reversed' before the generic 'not_posted' --
+        # unless it is REVERSED and its mirror was never written.
+        mirror = get_je(db, rev_id) if rev_id else None
+        if mirror is not None:
+            repair_events(db, [mirror], reason="recorded_on_retry")
+        if mirror is not None or not rev_id or je.get("status") != STATUS_REVERSED:
+            return {"ok": False, "http": 409, "error": "already_reversed"}
+        claimed = je
+        owes_reversed_row = "reversed" not in (je.get("events") or {})   # else _load wrote it
+    elif je.get("status") != STATUS_POSTED:
         return {"ok": False, "http": 409, "error": "not_posted", "status": je.get("status")}
+    else:
+        # CLAIM-FIRST (adversarial P3): atomically flip the original POSTED ->
+        # REVERSED BEFORE inserting the mirror. Two racing reversals -> exactly
+        # one wins the claim (the loser gets 409 with NO mirror of its own).
+        rev_id = f"JE-{uuid.uuid4().hex[:12]}"
+        claimed = _set(
+            db, je_id,
+            {"status": STATUS_REVERSED, "reversed_by": rev_id,
+             "events.reversed": _stamp(("reversed", "je_reversed", actor_id, f"reversed_by={rev_id}"),
+                                       STATUS_REVERSED)},
+            expect_status=STATUS_POSTED,
+        )
+        if claimed is None:
+            # Refused, lost to another reverser, or this very claim landed with
+            # its reply lost: the journal says which.
+            claimed = get_je(db, je_id)
+            if (claimed or {}).get("reversed_by") != rev_id:
+                return {"ok": False, "http": 409, "error": "already_reversed",
+                        "status": (claimed or {}).get("status")}
 
     today = _now()
     swapped: List[Dict[str, Any]] = []
@@ -1183,10 +1357,10 @@ def reverse_je(db, *, je_id: str, actor_id: str, actor_name: Optional[str] = Non
             "narration": ("Reversal: " + (ln.get("narration") or ""))[:200],
         })
     rev = {
-        "je_id": f"JE-{uuid.uuid4().hex[:12]}",
-        # je_number is minted AFTER the claim succeeds (below) -- minting it here
-        # would burn a consecutive serial when the claim loses the race.
-        "je_number": None,
+        "je_id": rev_id,
+        # The consecutive serial is minted only now, with the claim held (no
+        # burned numbers on a lost race).
+        "je_number": _next_je_number(db, je.get("entity_id"), today),
         "store_id": je.get("store_id"),
         "entity_id": je.get("entity_id"),
         "entry_date": today,
@@ -1210,58 +1384,32 @@ def reverse_je(db, *, je_id: str, actor_id: str, actor_name: Optional[str] = Non
         "posted_at": today,
         "posted_by": actor_id,
         "updated_at": today,
+        "events": {"posted": _stamp(("posted", "je_posted", actor_id, f"reversal_of={je_id}"),
+                                    STATUS_POSTED)},
     }
-    # CLAIM-FIRST (adversarial P3): atomically flip the original POSTED -> REVERSED
-    # BEFORE inserting the mirror. Two racing reversals -> exactly one wins the
-    # claim (the loser gets 409 with NO orphan mirror ever inserted). The old
-    # order (insert mirror, then flip, silent best-effort delete on lost race)
-    # left an orphan-POSTED-reversal window.
-    updated = _set(
-        db, je_id,
-        {"status": STATUS_REVERSED, "reversed_by": rev["je_id"]},
-        expect_status=STATUS_POSTED,
-    )
-    if updated is None:
-        cur = get_je(db, je_id)
-        return {"ok": False, "http": 409, "error": "already_reversed",
-                "status": (cur or {}).get("status")}
-
-    # Claim won -- now mint the consecutive serial (no burned numbers on a lost
-    # race) and insert the mirror.
-    rev["je_number"] = _next_je_number(db, je.get("entity_id"), today)
     try:
         coll.insert_one(rev)
     except Exception as e:  # noqa: BLE001
-        # The claim stands but the mirror failed -- compensate by un-flipping OUR
-        # claim (guarded on our own reversed_by link), and log LOUDLY either way:
-        # if the un-flip also fails the books need manual repair NOW.
-        logger.error("[JE] reversal mirror insert FAILED for %s (mirror %s): %s",
-                     je_id, rev["je_id"], e)
-        try:
-            restored = coll.find_one_and_update(
-                {"je_id": je_id, "status": STATUS_REVERSED, "reversed_by": rev["je_id"]},
-                {"$set": {"status": STATUS_POSTED, "reversed_by": None,
-                          "updated_at": _now()}},
-            )
-            if restored is None:
-                logger.error("[JE] compensating un-flip MISSED for %s -- original "
-                             "left REVERSED with no mirror; manual repair required",
-                             je_id)
-        except Exception as e2:  # noqa: BLE001
-            logger.error("[JE] compensating un-flip FAILED for %s: %s -- original "
-                         "left REVERSED with no mirror; manual repair required",
-                         je_id, e2)
-        return {"ok": False, "http": 503, "error": "write_failed"}
+        logger.error("[JE] reversal mirror insert FAILED for %s (mirror %s): %s", je_id, rev_id, e)
+        # It may have landed with its reply lost: read it back by its id (a
+        # read that fails is 503). Not there: 503, the claim stands and
+        # Reverse again writes this same mirror.
+        rev = get_je(db, rev_id)
+        if rev is None:
+            return {"ok": False, "http": 503, "error": "write_failed"}
 
     rev.pop("_id", None)
-    updated.pop("_id", None)
-    _audit(db, "je_reversed", updated, actor=actor_id, reason=f"reversed_by={rev['je_id']}")
+    claimed.pop("_id", None)
+    if owes_reversed_row:
+        note = (claimed.get("events") or {}).get("reversed") or {}
+        _audit(db, "je_reversed", claimed, actor=note.get("actor") or actor_id,
+               reason=f"reversed_by={rev_id}", log_id=_event_id(je_id, "reversed"))
     # The fixed id, as post_je: a read repairing the mirror between its insert
     # and this write must not leave it two je_posted events (D84).
-    _audit(db, "je_posted", rev, actor=actor_id, reason=f"reversal_of={je_id}",
-           log_id=_posted_event_id(rev["je_id"]))
-    return {"ok": True, "reversal_je_id": rev["je_id"], "je": _jsonable(rev),
-            "original": _jsonable(updated)}
+    _audit(db, "je_posted", rev, actor=rev.get("posted_by") or actor_id,
+           reason=f"reversal_of={je_id}", log_id=_posted_event_id(rev_id))
+    return {"ok": True, "reversal_je_id": rev_id, "je": _jsonable(rev),
+            "original": _jsonable(claimed)}
 
 
 # ============================================================================

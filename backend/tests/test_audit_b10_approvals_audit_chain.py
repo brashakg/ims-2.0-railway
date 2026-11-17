@@ -1109,7 +1109,7 @@ def test_d68_racing_posts_and_repairs_write_one_event(mongo_db):
     db.get_collection("audit_logs").delete_many({"action": "je_posted"})
     _aged(db, j["je_id"])
     turn = iter(range(6))
-    got = _together(6, lambda: (je_service.repair_posted_events(db, [_je(db, j["je_id"])])
+    got = _together(6, lambda: (je_service.repair_events(db, [_je(db, j["je_id"])])
                                 if next(turn) >= 2 else _post(db, j["je_id"])))
     assert len(got) == 6
     assert len(_posted_rows(db, j["je_id"])) == 1
@@ -1356,7 +1356,9 @@ def _previous_version_post(db, monkeypatch, je_id: str, inside):
     real_set, real_audit, fired = je_service._set, je_service._audit, []
 
     def _old_set(d, jid, fields, **k):
-        return real_set(d, jid, {f: v for f, v in fields.items() if f != "posted_by"}, **k)
+        # the previous version stamps neither posted_by nor the events note
+        return real_set(d, jid, {f: v for f, v in fields.items()
+                                 if f != "posted_by" and not f.startswith("events.")}, **k)
 
     def _audit(d, act, je, **k):
         if act == "je_posted" and not fired:
@@ -1452,8 +1454,10 @@ def test_d84_a_reversed_journal_missing_its_posted_event_is_repaired(db, monkeyp
     real_audit = je_service._audit
     monkeypatch.setattr(je_service, "_audit", lambda *a, **k: None)
     assert _post(db, j["je_id"]).get("ok") is True
-    monkeypatch.setattr(je_service, "_audit", real_audit)
+    # Audit writes stay lost through the reversal: since round 4 Reverse
+    # itself writes a missing je_posted when it can (the door repairs too).
     assert je_service.reverse_je(db, je_id=j["je_id"], actor_id="reverser").get("ok") is True
+    monkeypatch.setattr(je_service, "_audit", real_audit)
     assert _je(db, j["je_id"])["status"] == "REVERSED"
     assert _posted_rows(db, j["je_id"]) == []
     _aged(db, j["je_id"])
@@ -2589,3 +2593,384 @@ def test_r20_a_slower_writer_never_moves_the_head_back(db):
     assert (_head(db)["last_seq"], _head(db)["last_hash"]) == (3, rows[2]["entry_hash"])
     assert _head(db)["seq"] == 3                               # the claim counter never moves back
     assert verify_chain(coll)["intact"] is True
+
+
+# ===========================================================================
+# Round 4 (internal review of 1cd0e900) -- a journal write whose reply was
+# lost, or whose process died before the next write, on every journal door:
+# Reverse never loses or doubles its reversal voucher, and every transition's
+# audit row is written once (D84), not only je_posted
+# ===========================================================================
+
+
+def _rows(db, je_id: str, action: str):
+    return [r for r in db.get_collection("audit_logs").find({"action": action})
+            if r.get("entity_id") == je_id]
+
+
+def _mirrors(db, je_id: str):
+    return list(db.get_collection("journal_entries").find({"reversal_of": je_id}))
+
+
+def _posted_journal(db) -> str:
+    j = _submitted_journal(db, "maker")
+    assert _journal_approve(db, j["je_id"]).get("ok") is True
+    assert _post(db, j["je_id"]).get("ok") is True
+    return j["je_id"]
+
+
+def _expense_net(db) -> float:
+    """The journals' net effect on expenses (the test journal debits 5001, an
+    expense): Rs 100 while posted, 0 once reversed exactly once."""
+    return je_service.pnl_adjustments(db, store_id="S1", from_dt=datetime(2026, 1, 1),
+                                      to_dt=datetime(2099, 1, 1))["je_expense_adjustment"]
+
+
+def _is_mirror(_n, doc, *_a, **_k):
+    return bool(doc.get("reversal_of"))
+
+
+def _reversed_once(db, je_id: str) -> str:
+    """The stored rows of one finished reversal; the mirror's id."""
+    original = _je(db, je_id)
+    mirrors = _mirrors(db, je_id)
+    assert len(mirrors) == 1, [m["je_id"] for m in mirrors]
+    assert (original["status"], original["reversed_by"]) == ("REVERSED", mirrors[0]["je_id"])
+    assert mirrors[0]["status"] == "POSTED"
+    assert (mirrors[0]["total_debit"], mirrors[0]["total_credit"]) == (10000, 10000)
+    assert _expense_net(db) == 0.0
+    assert len(_rows(db, je_id, "je_reversed")) == 1
+    assert len(_posted_rows(db, mirrors[0]["je_id"])) == 1
+    assert len(_posted_rows(db, je_id)) == 1
+    assert verify_chain(db.get_collection("audit_logs"))["intact"] is True
+    return mirrors[0]["je_id"]
+
+
+def test_r4_a_reverse_whose_claim_reply_was_lost_still_posts_its_reversal(db, monkeypatch):
+    """The POSTED -> REVERSED claim landed and its reply was lost. Reverse
+    read the journal back, saw REVERSED and answered 409 already_reversed as
+    if someone else had reversed it: no reversal voucher was ever written, and
+    every retry answered the same 409 -- the screen said reversed, the books
+    still carried the journal in full. The read-back now recognises its own
+    claim (reversed_by) and carries on."""
+    checker = _user(db, "checker", ["ADMIN"])
+    je_id = _posted_journal(db)
+    assert _expense_net(db) == 100.0
+    undo = _db_faults(monkeypatch, db, "journal_entries",
+                      find_one_and_update=(_sets_status("REVERSED"), "landed"))
+    code, body = _door(db, monkeypatch, "reverse", je_id, checker)
+    undo()
+    assert code == 200, body                                    # was 409 already_reversed, no voucher
+    assert body["reversal_je_id"] == _reversed_once(db, je_id)
+    code, body = _door(db, monkeypatch, "reverse", je_id, checker)
+    assert (code, body["error"]) == (409, "already_reversed")
+    _reversed_once(db, je_id)
+
+
+@pytest.mark.parametrize("read_back", ["readable", "unreadable"])
+def test_r4_a_reverse_whose_voucher_reply_was_lost_is_never_posted_twice(db, monkeypatch, read_back):
+    """The reversal voucher's insert landed and its reply was lost. Reverse
+    treated it as not written, flipped the original back to POSTED and
+    answered 503; pressing Reverse again wrote a SECOND voucher -- the books
+    carried the reversal twice. The voucher is now read back by its id before
+    anything else: there -> the reversal is done (200); the read-back failing
+    too -> 503 with the claim kept, and the next press finds the voucher."""
+    checker = _user(db, "checker", ["ADMIN"])
+    je_id = _posted_journal(db)
+    faults = {"insert_one": (_is_mirror, "landed")}
+    if read_back == "unreadable":
+        # reads of the journal collection in this press: the door's, then the
+        # voucher's read-back
+        faults["find_one"] = lambda n, *a, **k: n == 2
+    undo = _db_faults(monkeypatch, db, "journal_entries", **faults)
+    code, body = _door(db, monkeypatch, "reverse", je_id, checker)
+    undo()
+    assert code == (200 if read_back == "readable" else 503), body      # was 503, original back to POSTED
+    assert len(_mirrors(db, je_id)) == 1
+    code, body = _door(db, monkeypatch, "reverse", je_id, checker)
+    assert (code, body["error"]) == (409, "already_reversed")           # was 200 and a second voucher
+    _reversed_once(db, je_id)
+
+
+class _Died(BaseException):
+    """The process died here (nothing below this point ran)."""
+
+
+@pytest.mark.parametrize("how", ["died_after_the_claim", "voucher_insert_refused"])
+def test_r4_a_reversal_left_without_its_voucher_is_finished_by_reverse(db, monkeypatch, how):
+    """A journal left REVERSED naming a voucher that was never written (the
+    process died between the two writes, or the voucher's insert was refused)
+    answered 409 already_reversed for good. The journal list and detail now
+    say so (reversal_unfinished), the screen offers Reverse again, and that
+    press writes the voucher under the id the claim already names -- once."""
+    checker = _user(db, "checker", ["ADMIN"])
+    reader = _user(db, "accounts", ["ACCOUNTANT"])
+    je_id = _posted_journal(db)
+    if how == "died_after_the_claim":
+        real_number = je_service._next_je_number
+
+        def _die(*_a, **_k):
+            raise _Died()
+        monkeypatch.setattr(je_service, "_next_je_number", _die)
+        with pytest.raises(_Died):
+            je_service.reverse_je(db, je_id=je_id, actor_id="checker")
+        monkeypatch.setattr(je_service, "_next_je_number", real_number)
+    else:
+        undo = _db_faults(monkeypatch, db, "journal_entries", insert_one=_is_mirror)
+        code, body = _door(db, monkeypatch, "reverse", je_id, checker)
+        undo()
+        assert (code, body["error"]) == (503, "write_failed")
+    claimed = _je(db, je_id)
+    assert claimed["status"] == "REVERSED" and claimed["reversed_by"]
+    assert _mirrors(db, je_id) == []
+
+    monkeypatch.setattr(je_router, "_get_db", lambda: db)
+    code, body = _call(je_router.list_journal_entries(
+        store_id=None, status=None, maker_id=None, current_user=reader))
+    assert code == 200, body
+    row = next(r for r in body["journal_entries"] if r["je_id"] == je_id)
+    assert row.get("reversal_unfinished") is True
+    code, one = _call(je_router.get_journal_entry(je_id, current_user=reader))
+    assert code == 200 and one.get("reversal_unfinished") is True
+
+    code, body = _door(db, monkeypatch, "reverse", je_id, checker)
+    assert code == 200, body                                    # was 409 already_reversed, for good
+    assert body["reversal_je_id"] == claimed["reversed_by"]     # the voucher the claim names
+    assert _reversed_once(db, je_id) == claimed["reversed_by"]
+    code, one = _call(je_router.get_journal_entry(je_id, current_user=reader))
+    assert code == 200 and one.get("reversal_unfinished") is False
+    code, body = _door(db, monkeypatch, "reverse", je_id, checker)
+    assert (code, body["error"]) == (409, "already_reversed")
+    _reversed_once(db, je_id)
+
+
+def _lapsed_approved_journal(db) -> Dict[str, str]:
+    """An APPROVED journal whose approval lapsed before Post (D54)."""
+    j = _submitted_journal(db, "maker")
+    assert _journal_approve(db, j["je_id"]).get("ok") is True
+    db.get_collection("approval_requests").update_one(
+        {"request_id": j["request_id"]}, {"$set": {"expires_at": appr._now() - timedelta(minutes=5)}})
+    return j
+
+
+def _relinks(_n, flt, upd, *_a, **_k):
+    return "approval_request_id" in flt and "approval_request_id" in (upd.get("$set") or {})
+
+
+def _records_again(_n, flt, upd, *_a, **_k):
+    return flt.get("status") == "APPROVED" and "checker_id" in (upd.get("$set") or {})
+
+
+_NOTE = "Wrong account, not wanted"
+
+# door -> (the journal write that door makes, the audit rows it owes as
+# (action, actor), the status the journal ends in)
+_TRANSITIONS = {
+    "submit": (_sets_status("SUBMITTED"), [("je_submitted", "maker")], "SUBMITTED"),
+    "approve": (_sets_status("APPROVED"), [("je_approved", "checker")], "APPROVED"),
+    "reject": (_sets_status("REJECTED"), [("je_rejected", "checker")], "REJECTED"),
+    "inbox_approve": (_sets_status("APPROVED"), [("je_approved", "checker")], "APPROVED"),
+    "inbox_reject": (_sets_status("REJECTED"), [("je_rejected", "checker")], "REJECTED"),
+    "raise_again": (_relinks, [("je_request_raised_again", "boss"), ("je_reapproved", "boss")], "APPROVED"),
+    "approve_again": (_records_again, [("je_request_raised_again", "boss"), ("je_reapproved", "boss")],
+                      "APPROVED"),
+}
+
+
+def _transition(db, monkeypatch, door: str):
+    """Set a journal up for ``door``; returns (je_id, press) where press()
+    makes that door's request and returns (status code, body)."""
+    checker = _user(db, "checker", ["ADMIN"])
+    boss = _user(db, "boss", ["SUPERADMIN"])
+    if door == "submit":
+        je_id = _draft_journal(db, "maker", amount=100.0)
+        return je_id, lambda: _door(db, monkeypatch, "submit", je_id, _MAKER)
+    if door in ("raise_again", "approve_again"):
+        je_id = _lapsed_approved_journal(db)["je_id"]
+        return je_id, lambda: _door(db, monkeypatch, "approve", je_id, boss)
+    j = _submitted_journal(db, "maker")
+    if door == "inbox_approve":
+        return j["je_id"], lambda: _inbox_approve(db, monkeypatch, j["request_id"], checker)
+    if door == "inbox_reject":
+        return j["je_id"], lambda: _inbox_reject(db, monkeypatch, j["request_id"], checker, _NOTE)
+    return j["je_id"], lambda: _door(db, monkeypatch, door, j["je_id"], checker)
+
+
+def _owed_rows(db, je_id: str, door: str):
+    """Each audit row ``door`` owes, exactly once, naming who did it."""
+    for action, actor in _TRANSITIONS[door][1]:
+        rows = _rows(db, je_id, action)
+        assert [r["user_id"] for r in rows] == [actor], (action, rows)
+    if "reject" in door:
+        assert _rows(db, je_id, "je_rejected")[0]["reason"] == _NOTE
+    assert verify_chain(db.get_collection("audit_logs"))["intact"] is True
+
+
+@pytest.mark.parametrize("door", sorted(_TRANSITIONS))
+def test_r4_a_transition_whose_journal_reply_was_lost_keeps_its_audit_row(db, monkeypatch, door):
+    """The class Codex raised for POSTED in round 2, on every other journal
+    door: the journal's own write landed and its reply was lost. The door
+    read that as 'someone else moved it', answered 409 (the inbox: 200) and
+    skipped the audit row, and no retry ever wrote it -- je_submitted,
+    je_approved, je_rejected, je_reapproved, je_request_raised_again lost for
+    good. Each transition is now recorded on the journal in the write that
+    makes it, the door recognises its own write and answers 200, and the row
+    is written once."""
+    write, _owed, status = _TRANSITIONS[door]
+    je_id, press = _transition(db, monkeypatch, door)
+    undo = _db_faults(monkeypatch, db, "journal_entries", find_one_and_update=(write, "landed"))
+    code, body = press()
+    undo()
+    assert code == 200, body                                    # journal doors: was 409
+    assert _je(db, je_id)["status"] == status
+    _owed_rows(db, je_id, door)                                 # was no row
+    press()                                                     # the same press again: nothing more
+    _owed_rows(db, je_id, door)
+
+
+@pytest.mark.parametrize("route", ["list", "detail"])
+@pytest.mark.parametrize("door", sorted(_TRANSITIONS) + ["reverse", "create"])
+def test_r4_a_transition_whose_audit_insert_failed_is_recorded_by_the_next_read(db, monkeypatch, door, route):
+    """D84 for every transition, not only je_posted: the door answered 200
+    and its audit insert was refused. Nothing ever wrote the row. The next
+    read of the journal (list or detail) now writes it once, naming whoever
+    made the transition -- not the reader."""
+    reader = _user(db, "accounts", ["ACCOUNTANT"])
+    real_get = db.get_collection
+
+    def lossy(n):
+        return _AuditInsertsFail(real_get(n)) if n == "audit_logs" else real_get(n)
+
+    if door == "reverse":
+        _user(db, "checker", ["ADMIN"])
+        je_id = _posted_journal(db)
+        monkeypatch.setattr(db, "get_collection", lossy)
+        res = je_service.reverse_je(db, je_id=je_id, actor_id="checker")
+        monkeypatch.setattr(db, "get_collection", real_get)
+        assert res.get("ok") is True, res
+        owed = [(je_id, "je_reversed", "checker"), (res["reversal_je_id"], "je_posted", "checker")]
+    elif door == "create":
+        je_service.seed_chart_of_accounts(db)
+        monkeypatch.setattr(db, "get_collection", lossy)
+        je_id = _draft_journal(db, "maker", amount=100.0)
+        monkeypatch.setattr(db, "get_collection", real_get)
+        owed = [(je_id, "je_created", "maker")]
+    else:
+        je_id, press = _transition(db, monkeypatch, door)
+        monkeypatch.setattr(db, "get_collection", lossy)
+        code, body = press()
+        monkeypatch.setattr(db, "get_collection", real_get)
+        assert code == 200, body
+        owed = [(je_id, action, actor) for action, actor in _TRANSITIONS[door][1]]
+    for jid, action, _actor in owed:
+        assert _rows(db, jid, action) == []
+
+    for _ in range(2):
+        for jid in {o[0] for o in owed}:
+            assert _read_journal(db, monkeypatch, route, jid, reader) == 200
+    for jid, action, actor in owed:
+        rows = _rows(db, jid, action)
+        assert [r["user_id"] for r in rows] == [actor], (action, rows)    # was no row, for good
+    assert verify_chain(db.get_collection("audit_logs"))["intact"] is True
+
+
+@pytest.mark.parametrize("then", ["approve_again_press", "post", "inbox"])
+def test_r4_an_approval_made_again_is_recorded_whichever_door_meets_it_next(db, monkeypatch, then):
+    """Approve again (D54) decides the request raised in place of the lapsed
+    one. When that decision landed in the approval engine and its reply was
+    lost (503), or was made in the approvals inbox, the journal kept its
+    earlier checker and never got je_reapproved: the retry answered 409 and
+    Post posted on it unrecorded. Every journal door, and the inbox, now
+    record an approval made again from the request, once."""
+    checker = _user(db, "checker", ["ADMIN"])
+    boss = _user(db, "boss", ["SUPERADMIN"])
+    j = _lapsed_approved_journal(db)
+    if then == "inbox":
+        res = je_service.approve_je(db, je_id=j["je_id"], approver_id="boss",
+                                    approver_roles=["SUPERADMIN"], pin="0000")
+        assert (res["http"], res["error"]) == (403, "wrong_pin")       # raised again, undecided
+        new_id = _je(db, j["je_id"])["approval_request_id"]
+        assert _inbox_approve(db, monkeypatch, new_id, boss)[0] == 200
+    else:
+        undo = _db_faults(monkeypatch, db, "approval_requests",
+                          find_one_and_update=(_sets_status("APPROVED"), "landed"))
+        code, body = _door(db, monkeypatch, "approve", j["je_id"], boss)
+        undo()
+        assert code == 503, body
+        if then == "approve_again_press":
+            code, body = _door(db, monkeypatch, "approve", j["je_id"], boss)
+            assert (code, body["error"]) == (409, "not_submitted")     # the approval already stands
+    if then != "approve_again_press":
+        assert _door(db, monkeypatch, "post", j["je_id"], checker)[0] == 200
+    je = _je(db, j["je_id"])
+    assert je["checker_id"] == "boss"                           # was the lapsed approval's checker
+    assert [r["user_id"] for r in _rows(db, j["je_id"], "je_reapproved")] == ["boss"]   # was no row
+    assert len(_rows(db, j["je_id"], "je_request_raised_again")) == 1
+    assert _door(db, monkeypatch, "post", j["je_id"], checker)[0] in (200, 409)
+    assert _je(db, j["je_id"])["status"] == "POSTED"
+    assert len(_rows(db, j["je_id"], "je_reapproved")) == 1
+    assert len(_posted_rows(db, j["je_id"])) == 1
+
+
+def test_r4_a_draft_whose_insert_reply_was_lost_is_created_once(db, monkeypatch):
+    """Create: the DRAFT's insert landed and its reply was lost. Create
+    answered 503 write_failed with the draft stored, so pressing Save again
+    drafted the journal twice. The draft is read back by its id first."""
+    je_service.seed_chart_of_accounts(db)
+    undo = _db_faults(monkeypatch, db, "journal_entries",
+                      insert_one=(lambda n, doc, *a, **k: not doc.get("reversal_of"), "landed"))
+    res = je_service.create_je(
+        db, store_id="S1", entity_id=None, entry_date=datetime(2026, 5, 15),
+        description="Depreciation for May 2026",
+        lines=[{"account_code": "5001", "debit": 100.0, "credit": 0},
+               {"account_code": "2001", "debit": 0, "credit": 100.0}],
+        maker_id="maker", maker_name="maker")
+    undo()
+    assert res.get("ok") is True, res                           # was 503 write_failed
+    stored = list(db.get_collection("journal_entries").find({}))
+    assert [d["je_id"] for d in stored] == [res["je"]["je_id"]]
+    assert len(_rows(db, res["je"]["je_id"], "je_created")) == 1
+
+
+def _petty_cash_request(db) -> str:
+    res = _engine(db).request(action_type="petty_cash", requested_by="cashier", store_id="S1",
+                              amount=250.0, reason="Courier charges")
+    assert res.get("ok") is True, res
+    return res["request_id"]
+
+
+@pytest.mark.parametrize("read", ["route_read", "engine_read"])
+@pytest.mark.parametrize("decision", ["approve", "reject"])
+@pytest.mark.parametrize("kind", ["journal", "petty_cash"])
+def test_r4_an_inbox_decision_on_a_request_that_cannot_be_read_is_503_not_404(
+        db, monkeypatch, kind, decision, read):
+    """The R3-A class on the approvals inbox, the other door that decides a
+    journal: POST /approvals/requests/{id}/approve (or /reject) while the
+    request could not be read answered 404 'Request not found' for a request
+    that was there. Both of its reads (the route's, the engine's) are 503 now,
+    for every request type (the request's type cannot be known without reading
+    it); nothing is decided and the same press then works."""
+    checker = _user(db, "checker", ["ADMIN"])
+    if kind == "journal":
+        j = _submitted_journal(db, "maker")
+        request_id, je_id = j["request_id"], j["je_id"]
+    else:
+        request_id, je_id = _petty_cash_request(db), None
+
+    def press():
+        if decision == "approve":
+            return _inbox_approve(db, monkeypatch, request_id, checker)
+        return _inbox_reject(db, monkeypatch, request_id, checker, _NOTE)
+
+    nth = 1 if read == "route_read" else 2
+    undo = _db_faults(monkeypatch, db, "approval_requests", find_one=lambda n, *a, **k: n == nth)
+    code, body = press()
+    undo()
+    assert code == 503, body                                    # was 404 not_found
+    assert _request(db, request_id)["status"] == "REQUESTED"    # nothing decided
+    code, body = press()
+    assert code == 200, body
+    decided = "APPROVED" if decision == "approve" else "REJECTED"
+    assert _request(db, request_id)["status"] == decided
+    if je_id:
+        assert _je(db, je_id)["status"] == decided

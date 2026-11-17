@@ -191,8 +191,8 @@ async def list_journal_entries(
     db = _get_db()
     store_id = resolve_store_scope(store_id, current_user)
     rows = je_service.list_jes(db, store_id=store_id, status=status, maker_id=maker_id, limit=200)
-    je_service.repair_posted_events(db, rows)
-    rows = je_service.with_reapproval_flags(db, rows)
+    je_service.repair_events(db, rows)
+    rows = je_service.with_flags(db, rows)
     return {"journal_entries": rows, "total": len(rows)}
 
 
@@ -209,8 +209,8 @@ async def get_journal_entry(
     # so a guessed id never confirms a voucher exists (audit 2026-10-18).
     je = in_reach_or_404(je_service.get_je(db, je_id), current_user, "Journal entry not found")
     je.pop("_id", None)
-    je_service.repair_posted_events(db, [je])
-    return je_service._jsonable(je_service.with_reapproval_flags(db, [je])[0])
+    je_service.repair_events(db, [je])
+    return je_service._jsonable(je_service.with_flags(db, [je])[0])
 
 
 @router.post("/journal-entries/{je_id}/submit")
@@ -321,7 +321,9 @@ async def reverse_journal_entry(
     current_user: dict = Depends(get_current_user),
 ):
     """Reverse a POSTED JE (ADMIN/SUPERADMIN). Mints a mirror voucher dated
-    today (today's period must be open); both vouchers are linked."""
+    today (today's period must be open); both vouchers are linked. Pressed
+    again on an entry left REVERSED without its mirror voucher
+    (reversal_unfinished), it writes that voucher, once."""
     _je_require_enabled()
     _require_roles_for(
         current_user,
@@ -397,7 +399,7 @@ async def get_tally_journal_jv(
     from_dt = _je_cal_day(from_date)
     to_dt = _je_cal_day(to_date, end=True)
     rows = je_service.list_jes(db, store_id=store_id, status=je_service.STATUS_POSTED, limit=1000)
-    je_service.repair_posted_events(db, rows)
+    je_service.repair_events(db, rows)
     # Date-filter in Python (entry_date is a datetime); keeps the service query simple.
     filtered = []
     for je in rows:
