@@ -47,6 +47,7 @@ from pymongo.errors import AutoReconnect, DuplicateKeyError  # noqa: E402
 
 from api.routers import customers as cust_router  # noqa: E402
 from api.services import store_credit_ledger as scl  # noqa: E402
+from database.repositories.audit_repository import AuditRepository  # noqa: E402
 from database.repositories.product_repository import StockRepository  # noqa: E402
 from database.repositories.task_repository import TaskRepository  # noqa: E402
 from tests.test_pos_money_doors import STORE, _advance_client, _hdr, _order, _user, _wire, returns_router  # noqa: E402
@@ -91,6 +92,9 @@ def native(monkeypatch):
     monkeypatch.setattr(returns_router, "get_stock_repository", lambda: StockRepository(db["stock_units"]))
     monkeypatch.setattr(returns_router, "get_product_repository", lambda: None)
     monkeypatch.setattr("api.dependencies.get_task_repository", lambda: TaskRepository(db["tasks"]), raising=False)
+    # The real audit trail (hash-chained, append-only): its rows are asserted (D84).
+    monkeypatch.setattr("api.dependencies.get_audit_repository", lambda: AuditRepository(db["audit_logs"]),
+                        raising=False)
     line = {"item_id": "li1", "product_id": "P1", "product_name": "Frame", "sku": "F1", "quantity": 2,
             "unit_price": 1525.42, "gst_rate": 18.0, "taxable_value": 3050.85, "tax_amount": 549.15}
     db["orders"].insert_one(_order(
@@ -171,7 +175,39 @@ def _books(db):
         "owed_tasks": db["tasks"].count_documents({"source_ref": {"$regex": "^return_cash_owed:"}}),
         "ledger": sorted((r["entry_id"], r.get("type")) for r in db["credit_note_ledger"].find({})),
         "balance": db["customers"].find_one({"customer_id": "CUST-1"}).get("store_credit"),
+        # D84: the audit rows of the return itself, by who wrote its record.
+        "audits": sorted(a["action"] for a in db["audit_logs"].find(
+            {"action": {"$in": ["RETURN_CREATED", "RETURN_RECORD_COMPLETED"]}})),
     }
+
+
+def _insert_fails_once(monkeypatch, state):
+    """The press's record insert raises and nothing lands (it may still land)."""
+    def insert(self, doc, *a, **k):
+        if _press_doc(self, doc) and "failed" not in state:
+            state["failed"] = doc["return_id"]
+            raise AutoReconnect("insert failed, nothing landed")
+        return REAL_INSERT(self, doc, *a, **k)
+
+    monkeypatch.setattr(Collection, "insert_one", insert)
+
+
+def _two_at_once(monkeypatch, payload, key):
+    """Two identical re-presses that reach the record insert together."""
+    gate, real_own, answers = threading.Barrier(2), returns_router._own_record_or_refuse, []
+
+    async def together(*a, **k):
+        try:
+            gate.wait(20)
+        except threading.BrokenBarrierError:
+            pass
+        return await real_own(*a, **k)
+
+    monkeypatch.setattr(returns_router, "_own_record_or_refuse", together)
+    threads = [threading.Thread(target=lambda: answers.append(_press(payload, key))) for _ in range(2)]
+    [t.start() for t in threads]
+    [t.join(120) for t in threads]
+    return answers
 
 
 def _press_doc(coll, doc):
@@ -189,6 +225,8 @@ def test_a_plain_press_writes_one_record_and_puts_one_unit_back(native):
     b = _books(db)
     assert b["records"] == [(f"ret:{rid}", "COMPLETED", False)] and b["units"] == ["AVAILABLE", "SOLD"]
     assert b["unit_rows"] == 2 and b["cash_netted"] == 1800.0 and b["returned_qty"] == 1 and b["restock_tasks"] == []
+    assert b["audits"] == ["RETURN_CREATED"]
+    assert db["audit_logs"].find_one({"action": "RETURN_CREATED"})["_id"] == f"return_created:{rid}"
     rec = db["returns"].find_one({"_id": f"ret:{rid}"})
     assert rec["stock_pending"] is False and rec["restock_in_progress"] is False and rec["loyalty_reversal_failed"] is False
     assert _restock(rid)["message"] == "Already restocked" and _books(db)["units"] == ["AVAILABLE", "SOLD"]
@@ -299,13 +337,43 @@ def test_a_lost_acknowledgement_that_cannot_be_read_is_settled_by_the_identical_
     assert b["records"] == [(f"ret:{rid}", "COMPLETED", False)] and b["units"] == ["SOLD", "SOLD"]
     changed = {**_payload(), "refund_tenders": [{"method": "UPI", "amount": 1800.0}], "refund_method": "UPI"}
     assert _press(changed, "K-LOST").status_code == 409  # other content under the same key
+    assert b["audits"] == []  # the 503 said press again: the row is the re-press's (D84)
     again = _press(_payload(), "K-LOST")
     assert again.status_code == 201 and again.json()["return_id"] == rid, again.text
     assert "Update stock" in again.json()["stock_note"]
+    # The re-press IS the "pay" answer: it says what the record says, so the
+    # till shows "recorded in Day-End", never "enter it as cash paid out" for
+    # cash Day-End already nets (read as not netted, it was deducted twice).
+    rec, answer = db["returns"].find_one({"_id": f"ret:{rid}"}), again.json()
+    assert rec["drawer_auto_netted"] is True and answer["drawer_auto_netted"] is True
+    assert answer["refund_tenders"] == rec["refund_tenders"]
+    assert [(t["method"], t["amount"]) for t in answer["refund_tenders"]] == [("CASH", 1800.0)]
+    for field in ("credit_note_number", "credit_entry", "collect_method", "round_off", "refund_amount",
+                  "net_refund", "points_paid_share"):
+        assert field in answer and answer[field] == rec.get(field), field
+    assert answer["points_waived"] is False and answer["credit_note_number"]
     assert _restock(rid)["restock_applied"] is True and _restock(rid)["message"] == "Already restocked"
     b = _books(db)
     assert b["records"] == [(f"ret:{rid}", "COMPLETED", False)] and b["units"] == ["AVAILABLE", "SOLD"]
     assert b["unit_rows"] == 2 and b["cash_netted"] == 1800.0 and b["returned_qty"] == 1
+
+
+def test_the_re_press_of_a_landed_record_writes_its_audit_row_once(native, monkeypatch):
+    """D84: the 503 press stopped before its RETURN_CREATED row. The identical
+    re-press (the replay) writes it, under the return's fixed id, once --
+    before, a completed and paid cash return had no such row at all."""
+    db, state = native["db"], {}
+    _lands_but_unacknowledged(monkeypatch, state, read_back_fails=True)
+    assert _press(_payload(), "K-AUD").status_code == 503
+    state["healed"] = True
+    assert _books(db)["audits"] == []
+    for _ in range(2):
+        assert _press(_payload(), "K-AUD").status_code == 201
+    rows = list(db["audit_logs"].find({"action": "RETURN_CREATED"}))
+    assert [r["_id"] for r in rows] == [f"return_created:{state['landed']}"], rows
+    rec = db["returns"].find_one({"return_id": state["landed"]})
+    assert rows[0]["entity_id"] == state["landed"] and rows[0]["user_id"] == rec["created_by"]
+    assert rows[0]["details"]["net_refund"] == 1800.0 and rows[0]["seq"] >= 1  # chained like every audit row
 
 
 def test_an_insert_that_never_landed_is_settled_by_the_identical_re_press(native, monkeypatch):
@@ -314,42 +382,60 @@ def test_an_insert_that_never_landed_is_settled_by_the_identical_re_press(native
     on the hold -- two of them at once still leave ONE record and ONE unit
     back, and nothing is claimed or priced a second time."""
     db, state = native["db"], {}
-
-    def insert(self, doc, *a, **k):
-        if _press_doc(self, doc) and "failed" not in state:
-            state["failed"] = doc["return_id"]
-            raise AutoReconnect("insert failed, nothing landed")
-        return REAL_INSERT(self, doc, *a, **k)
-
-    monkeypatch.setattr(Collection, "insert_one", insert)
+    _insert_fails_once(monkeypatch, state)
     r = _press(_payload(), "K-FAIL")
     assert r.status_code == 503 and r.json()["detail"] == returns_router.RECORD_NOT_CONFIRMED_MESSAGE, r.text
     rid = state["failed"]
     b = _books(db)
-    assert b["records"] == [] and b["units"] == ["SOLD", "SOLD"] and b["returned_qty"] == 1
+    assert b["records"] == [] and b["units"] == ["SOLD", "SOLD"] and b["returned_qty"] == 1 and b["audits"] == []
     hold = db["orders"].find_one({"order_id": "ORD-1"})["refund_holds"][rid]
     assert hold["kept"] is True and hold["doc"]["return_id"] == rid
-    gate = threading.Barrier(2)
-    real_own = returns_router._own_record_or_refuse
-
-    async def together(*a, **k):
-        try:
-            gate.wait(20)
-        except threading.BrokenBarrierError:
-            pass
-        return await real_own(*a, **k)
-
-    monkeypatch.setattr(returns_router, "_own_record_or_refuse", together)
-    answers = []
-    threads = [threading.Thread(target=lambda: answers.append(_press(_payload(), "K-FAIL"))) for _ in range(2)]
-    [t.start() for t in threads]
-    [t.join(120) for t in threads]
+    answers = _two_at_once(monkeypatch, _payload(), "K-FAIL")
     assert sorted(a.status_code for a in answers) == [201, 201], [a.text for a in answers]
     assert {a.json()["return_id"] for a in answers} == {rid}
+    assert all(a.json()["drawer_auto_netted"] is True for a in answers)
     b = _books(db)
     assert b["records"] == [(f"ret:{rid}", "COMPLETED", False)] and b["units"] == ["AVAILABLE", "SOLD"]
     assert b["unit_rows"] == 2 and b["cash_netted"] == 1800.0 and b["returned_qty"] == 1
+    assert b["audits"] == ["RETURN_CREATED"]  # one return, one row -- both re-presses finished it
     assert _restock(rid)["message"] == "Already restocked"
+
+
+def test_two_finishers_at_once_set_one_damaged_unit_aside(native, monkeypatch):
+    """D92(2) + D95(2): the bill line is 2 units, ONE comes back DAMAGED. Two
+    identical re-presses finish the return together and each reads "which
+    units has this return set aside" before the other's flip lands. Counting
+    and then flipping set BOTH units aside -- the piece still with the
+    customer became QUARANTINED stock. The units are named ONCE on the
+    return's record (one compare-and-set) and only those are flipped."""
+    db, state = native["db"], {}
+    _insert_fails_once(monkeypatch, state)
+    r = _press(_payload(condition="DAMAGED"), "K-DMG")
+    assert r.status_code == 503, r.text
+    rid = state["failed"]
+    assert _books(db)["units"] == ["SOLD", "SOLD"]
+    gate, real_find = threading.Barrier(2), returns_router._find_stock
+
+    def find(stock_repo, query):
+        rows = real_find(stock_repo, query)
+        if "quarantine_notes" in query:  # both have read; neither has flipped
+            try:
+                gate.wait(5)
+            except threading.BrokenBarrierError:
+                pass
+        return rows
+
+    monkeypatch.setattr(returns_router, "_find_stock", find)
+    answers = _two_at_once(monkeypatch, _payload(condition="DAMAGED"), "K-DMG")
+    assert sorted(a.status_code for a in answers) == [201, 201], [a.text for a in answers]
+    b = _books(db)
+    assert b["units"] == ["QUARANTINED", "SOLD"] and b["unit_rows"] == 2 and b["returned_qty"] == 1
+    rec = db["returns"].find_one({"_id": f"ret:{rid}"})
+    assert len(rec["quarantined_stock_ids"]) == 1 and rec["damaged_unit_ids"] == rec["quarantined_stock_ids"]
+    kept = db["stock_units"].find_one({"status": "SOLD"})
+    assert kept["order_id"] == "ORD-1"  # the customer's other piece keeps its sale
+    _restock(rid)
+    assert _books(db)["units"] == ["QUARANTINED", "SOLD"]
 
 
 # --- D95(6): press vs "Cash paid", both orders ---------------------------------------------------
@@ -381,6 +467,7 @@ def test_cash_paid_first_the_press_owns_nothing(native, monkeypatch, cash_leg_pa
     b = _books(db)
     assert b["records"] == [(f"ret:{rid}", "COMPLETED", True)] and b["units"] == ["SOLD", "SOLD"]
     assert b["restock_tasks"] == ["OPEN"] and b["returned_qty"] == 1
+    assert b["audits"] == ["RETURN_RECORD_COMPLETED"]  # the press that paid nothing created nothing
     rec = db["returns"].find_one({"_id": f"ret:{rid}"})
     if cash_leg_paid:
         assert b["cash_netted"] == 1800.0 and b["owed_tasks"] == 0 and not rec.get("owed_amount")
@@ -392,7 +479,7 @@ def test_cash_paid_first_the_press_owns_nothing(native, monkeypatch, cash_leg_pa
     assert _restock(rid)["restock_applied"] is True and _restock(rid)["message"] == "Already restocked"
     b = _books(db)
     assert b["units"] == ["AVAILABLE", "SOLD"] and b["unit_rows"] == 2 and b["restock_tasks"] == ["COMPLETED"]
-    assert len(b["records"]) == 1
+    assert len(b["records"]) == 1 and b["audits"] == ["RETURN_RECORD_COMPLETED"]
 
 
 def test_the_press_first_cash_paid_writes_nothing(native, monkeypatch):
