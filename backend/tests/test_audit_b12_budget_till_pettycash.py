@@ -4710,33 +4710,33 @@ class TestR17D111CloseThroughFaults:
         assert stored[0]["manager_followup"]["tasks"][0]["session_id"] == "CR-R17-2"
 
     def test_a_failed_read_of_the_cash_since_the_count_refuses_the_close(self, db, monkeypatch):
-        """The second window read (cash since the standing count) fails: 503,
+        """The read of the cash moved since the standing count fails: 503,
         nothing is written anywhere, and the same close then goes through.
         A zero there would have stored Rs 500 OVER."""
         sid, _first = _one_drawer_counted_by_a_register(db, monkeypatch)
         _cash_sale(db, 500, f"{DATE}T12:45:00")
         before = dict(_till(db, sid))
-        real = finance_router.cash_drawer._cash_sales_for_window
+        real = till.compute_expected
         calls = []
 
-        def _second_read_fails(*a, **k):
-            calls.append(a[2])
-            if len(calls) == 2:
+        def _day_read_fails(*a, **k):
+            calls.append(a[4])
+            if len(calls) == 1:
                 raise AutoReconnect("orders read fault")
             return real(*a, **k)
 
-        monkeypatch.setattr(finance_router.cash_drawer, "_cash_sales_for_window", _second_read_fails)
+        monkeypatch.setattr(till, "compute_expected", _day_read_fails)
         with pytest.raises(HTTPException) as exc:
             _register(db, monkeypatch, "CR-R17-2", opened="12:30:00", closed="13:00:00",
                       opening=3000.0, pieces=7)
         assert exc.value.status_code == 503
-        # The second read is the one from the count's instant.
-        assert calls == [f"{DATE}T12:30:00", f"{DATE}T12:00:00"]
         cr = db.get_collection("cash_register_sessions").find_one({"session_id": "CR-R17-2"})
         assert cr["status"] == "OPEN" and _till(db, sid) == before
         out = _register(db, monkeypatch, "CR-R17-2", opened="12:30:00", closed="13:00:00",
                         pieces=7, insert=False)
         assert (out["counted"], out["expected"], out["variance_status"]) == (3500.0, 3500.0, "BALANCED")
+        # The day read starts from the standing count, both times.
+        assert calls == [300000, 300000]
 
 
 def test_r17_first_counted_close_adds_and_d111_on_real_mongo(monkeypatch):
@@ -4815,6 +4815,285 @@ def test_r17_first_counted_close_adds_and_d111_on_real_mongo(monkeypatch):
         t = res["totals"]
         assert (t["counted_cash"], t["shortage"], t["also_counted_on_till"]) == (3000.0, 0, 1)
         assert _recon_row(res, "CR-R17-3")["variance_status"] == "SHORTAGE"
+    finally:
+        client.drop_database(name)
+        client.close()
+
+
+# ===========================================================================
+# Round 18 (review of head 9d3241b0): D111 was not closed
+# ===========================================================================
+# MUST-FIX: the D111 expected cash re-read "cash since the count's instant".
+# Payouts are booked by DAY, so the day's payouts already out of the standing
+# count were taken off again (a false excess, a note demanded, the manager
+# alerted); orders are read by created_at, so a balance paid after the count
+# on an order opened before it was in no figure. It is now the till's own D60
+# rule: the day so far minus what the day's counted drawers were charged with.
+# Also: D88(1) a close whose count did not reach the till, beside a later close
+# that holds the drawer's count; D110 the three readers left out.
+
+
+def _payout(db, rupees):
+    db.get_collection("expenses").insert_one({
+        "store_id": STORE, "expense_date": DATE, "payment_mode": "CASH",
+        "status": "APPROVED", "amount": float(rupees), "category": "TEA",
+    })
+
+
+def _judged(out):
+    return {k: out[k] for k in ("counted", "expected", "variance", "variance_status")}
+
+
+def _balanced(rupees):
+    return {"counted": rupees, "expected": rupees, "variance": 0.0, "variance_status": "BALANCED"}
+
+
+def _count_misses_the_till(db, monkeypatch, sid):
+    """A Cash Register close whose count does not reach the till (the guarded
+    count write fails after the day's drawers were read)."""
+    with monkeypatch.context() as m:
+        m.setattr(till, "blind_submit", lambda *a, **k: {"ok": False, "error": "submit_failed"})
+        return _register(db, m, sid, opened="04:00:00", closed="09:00:00", pieces=6)
+
+
+class TestR18D111CashSinceTheCountIsTheDaySoFarMinusTheCountedDrawers:
+    def test_a_payout_of_the_day_paid_before_the_standing_count_is_not_charged_again(self, db, monkeypatch):
+        """The reviewers' sequence: Rs 3,000 taken, Rs 500 paid out, Rs 2,500
+        counted at the first close (balanced). Rs 500 more taken: Rs 3,000 in
+        hand read Rs 500 OVER, the close was refused for a note and the
+        manager alerted."""
+        alerts = _alerts(monkeypatch)
+        _payout(db, 500)
+        sid, first = _one_drawer_counted_by_a_register(db, monkeypatch, pieces=5)
+        assert (first["expected"], first["cash_expenses"], first["variance_status"]) == (
+            2500.0, 500.0, "BALANCED")
+        assert _till(db, sid)["cash_payouts_paisa"] == 50000
+        _cash_sale(db, 500, f"{DATE}T12:45:00")
+        second = _register(db, monkeypatch, "CR-R17-2", opened="12:30:00", closed="13:00:00",
+                           opening=2500.0, pieces=6)
+        assert _judged(second) == _balanced(3000.0)
+        assert (second["cash_sales"], second["cash_expenses"], second["till_standing_count"]) == (
+            500.0, 0.0, 2500.0)
+        assert alerts == [] and second["manager_followup"]["tasks"] == []
+        # The row ties out on the console: opening + cash - payouts = expected.
+        row = _recon_row(_recon_summary(db, monkeypatch), "CR-R17-2")
+        assert (row["opening_float"], row["cash_sales"], row["cash_expenses"], row["expected_cash"],
+                row["variance_status"]) == (2500.0, 500.0, 0.0, 3000.0, "BALANCED")
+
+    def test_a_payout_booked_after_the_count_is_charged_once_to_the_later_session(self, db, monkeypatch):
+        """One payout before the count, one after: the second session carries
+        the later one only. A third session carries it too (the drawer's
+        count is never replaced), still once; it is really Rs 500 short."""
+        alerts = _alerts(monkeypatch)
+        _payout(db, 500)
+        sid, _first = _one_drawer_counted_by_a_register(db, monkeypatch, pieces=5)
+        _cash_sale(db, 1000, f"{DATE}T12:45:00")
+        _payout(db, 500)
+        second = _register(db, monkeypatch, "CR-R17-2", opened="12:30:00", closed="13:00:00",
+                           opening=2500.0, pieces=6)
+        assert _judged(second) == _balanced(3000.0)
+        assert (second["cash_sales"], second["cash_expenses"]) == (1000.0, 500.0)
+        _cash_sale(db, 1000, f"{DATE}T13:30:00")
+        third = _register(db, monkeypatch, "CR-R17-3", opened="13:10:00", closed="14:00:00",
+                          opening=3000.0, pieces=7, note="Rs 500 short")
+        assert _judged(third) == {
+            "counted": 3500.0, "expected": 4000.0, "variance": -500.0, "variance_status": "SHORT"}
+        assert (third["cash_sales"], third["cash_expenses"], third["till_standing_count"]) == (
+            2000.0, 500.0, 2500.0)
+        assert _till(db, sid)["blind_count_paisa"] == 250000
+        assert [a["session_id"] for a in alerts] == ["CR-R17-3"]
+
+    def test_a_balance_paid_after_the_count_on_an_order_opened_before_it(self, db, monkeypatch):
+        """The reviewers' sequence 2: Rs 500 advance before the count, the
+        Rs 2,000 balance in cash after it. The order's created_at is before
+        the count, so the balance was in no figure: Rs 2,000 OVER."""
+        alerts = _alerts(monkeypatch)
+        held = _cash_sale(db, 500, f"{DATE}T05:00:00")
+        sid = _open(db)
+        first = _register(db, monkeypatch, "CR-R17-1", opened="04:00:00", closed="12:00:00", pieces=1)
+        assert first["variance_status"] == "BALANCED"
+        _counted_at(db, sid, "12:00:00")
+        db.get_collection("orders").update_one(
+            {"_id": held}, {"$push": {"payments": {"method": "CASH", "amount": 2000.0}}})
+        second = _register(db, monkeypatch, "CR-R17-2", opened="12:30:00", closed="13:00:00",
+                           opening=500.0, pieces=5)
+        assert _judged(second) == _balanced(2500.0)
+        assert second["cash_sales"] == 2000.0 and alerts == []
+
+    def test_another_drawers_day_booked_payout_is_not_charged_to_the_session(self, db, monkeypatch):
+        """Several drawers: drawer A was charged with the day's Rs 200 payout
+        at its count. A D111 session on drawer B used to take it off again."""
+        alerts = _alerts(monkeypatch)
+        _payout(db, 200)
+        a, b = _drawer_a_then_b(db, a_sales=[1200], b_sales=[3000])
+        assert _till(db, a)["cash_payouts_paisa"] == 20000
+        _cr_close_b(db, monkeypatch, 6)
+        _counted_at(db, b, "12:00:00")
+        second = _second_register_close(db, monkeypatch, 7)
+        assert _judged(second) == _balanced(3500.0)
+        assert (second["cash_sales"], second["cash_expenses"]) == (500.0, 0.0)
+        assert alerts == []
+
+    def test_an_older_code_snapshot_beside_another_drawer_gives_no_comparison(self, db, monkeypatch):
+        """D76: a counted drawer of the day holds whole-day cash from older
+        code, so the cash since the count is not known. Nothing is compared,
+        no note is asked, and the sheet goes to the manager to check by hand."""
+        raised = _raised(monkeypatch)
+        _cash_sale(db, 1000, f"{DATE}T03:00:00")
+        TestR8D76OlderCodeDrawers._old_drawer(db, "OLD-A", 100000, 100000, f"{DATE}T02:00:00")
+        TestR8D76OlderCodeDrawers._old_drawer(db, "OLD-B", 400000, 300000, f"{DATE}T05:00:00")
+        db.get_collection("till_sessions").update_one(
+            {"_id": "OLD-B"}, {"$set": {"blind_submitted_at": datetime.fromisoformat(f"{DATE}T06:00:00")}})
+        out = _register(db, monkeypatch, "CR-R18-1", opened="06:30:00", closed="08:00:00",
+                        opening=3000.0, pieces=7)
+        assert (out["till_session_id"], out["till_counted_earlier"]) == ("OLD-B", True)
+        assert (out["counted"], out["variance"], out["variance_status"]) == (
+            3500.0, None, "COMPARISON_UNAVAILABLE")
+        assert raised == [("raise_count_not_compared_task", till.followup_task_id("uncompared", "CR-R18-1"))]
+        row = _recon_row(_recon_summary(db, monkeypatch), "CR-R18-1")
+        assert (row["cash_sales"], row["expected_cash"], row["variance"], row["counted_cash"]) == (
+            None, None, None, 3500.0)
+
+    def test_control_one_older_code_drawer_alone_is_its_own_share(self, db, monkeypatch):
+        """A single counted drawer written by older code holds its own cash
+        (the whole day at its count), so the session is still judged."""
+        _cash_sale(db, 1000, f"{DATE}T03:00:00")
+        TestR8D76OlderCodeDrawers._old_drawer(db, "OLD-A", 100000, 100000, f"{DATE}T02:00:00")
+        db.get_collection("till_sessions").update_one(
+            {"_id": "OLD-A"}, {"$set": {"blind_submitted_at": datetime.fromisoformat(f"{DATE}T06:00:00")}})
+        _cash_sale(db, 500, f"{DATE}T07:00:00")
+        out = _register(db, monkeypatch, "CR-R18-1", opened="06:30:00", closed="08:00:00",
+                        opening=1000.0, pieces=3)
+        assert _judged(out) == _balanced(1500.0)
+
+
+class TestR18ACountOffTheTillBesideOneOnItIsNotAddedTwice:
+    def test_failed_link_close_then_blind_count_then_a_second_register_close(self, db, monkeypatch):
+        """D88(1). Close 1 counts Rs 3,000 but its count does not reach the
+        till; the drawer is counted on the Blind EOD Tally (not locked); a
+        second register session takes Rs 500 and counts Rs 3,500. Both closes
+        added: Rs 6,500 for a drawer holding Rs 3,500, until the Z-Read locked."""
+        _follow_ups(monkeypatch)
+        sid = _open(db)
+        _cash_sale(db, 3000)
+        first = _count_misses_the_till(db, monkeypatch, "CR-R18-1")
+        assert (first["till_link_ok"], first["counted"], first["till_drawers_on_day"]) == (False, 3000.0, 1)
+        assert till.blind_submit(
+            db, sid, blind_denominations=[{"face": 500, "kind": "note", "pieces": 6}], actor=CASHIER)["ok"]
+        _counted_at(db, sid, "10:00:00")
+        _cash_sale(db, 500, f"{DATE}T12:45:00")
+        second = _register(db, monkeypatch, "CR-R18-2", opened="12:30:00", closed="13:00:00",
+                           opening=3000.0, pieces=7)
+        assert (second["till_link_ok"], second["till_counted_earlier"]) == (True, True)
+        assert _judged(second) == _balanced(3500.0)
+
+        res = _recon_summary(db, monkeypatch)
+        t = res["totals"]
+        assert (t["counted_cash"], t["expected_cash"], t["sessions"], t["also_counted_on_till"]) == (
+            3500.0, 3500.0, 1, 1)
+        assert _recon_row(res, "CR-R18-1")["also_counted_on_till"] is True
+        assert _recon_row(res, "CR-R18-1")["counted_cash"] == 3000.0  # the row still shows
+        assert _recon_row(res, "CR-R18-2")["also_counted_on_till"] is False
+
+        assert till.lock_session(db, sid, actor=MANAGER)["ok"]
+        t = _recon_summary(db, monkeypatch)["totals"]
+        assert (t["counted_cash"], t["sessions"], t["also_counted_on_till"]) == (3000.0, 1, 2)
+
+    def test_control_a_count_off_the_till_alone_still_adds(self, db, monkeypatch):
+        """No close of the day holds the drawer's count and no Z-Read row
+        exists: the failed-link close keeps adding, as before."""
+        _follow_ups(monkeypatch)
+        _open(db)
+        _cash_sale(db, 3000)
+        _count_misses_the_till(db, monkeypatch, "CR-R18-1")
+        t = _recon_summary(db, monkeypatch)["totals"]
+        assert (t["counted_cash"], t["also_counted_on_till"]) == (3000.0, 0)
+
+
+class TestR18D110TheRemainingReadersPayTheOwedTillRows:
+    """D110 says EVERY reader of till sessions. Three were left out: the
+    refund door's "is today's drawer counted" check, the bank reconciliation's
+    expected-deposit read and the Cash Reconciliation sign-off."""
+
+    @staticmethod
+    def _owed(db, monkeypatch, audit_rows, *, lock):
+        up = TestR17D110EveryReaderAndRetryPaysTheOwedTillRows._audit_down(monkeypatch, audit_rows)
+        _cash_sale(db, 1000)
+        sid = _blind_count(db, rupees=1000, lock=lock)
+        assert audit_rows == [] and _till(db, sid)["manager_followup"]["pending"] is True
+        up.append(True)
+        return sid
+
+    @staticmethod
+    def _paid(db, audit_rows, sid, want):
+        assert [r["action"] for r in audit_rows if r["action"].startswith("till.")] == want
+        assert {r["entity_id"] for r in audit_rows if r["action"].startswith("till.")} == {sid}
+        assert _till(db, sid)["manager_followup"]["pending"] is False
+
+    def test_the_refund_doors_drawer_check(self, db, monkeypatch, audit_rows):
+        from datetime import date
+
+        from api.routers import returns as returns_router
+
+        sid = self._owed(db, monkeypatch, audit_rows, lock=False)
+        monkeypatch.setattr(returns_router, "_get_db", lambda: db)
+        monkeypatch.setattr("api.utils.ist.ist_today", lambda: date.fromisoformat(DATE))
+        for _ in range(2):
+            assert returns_router._drawer_closed_today(STORE) is True
+        self._paid(db, audit_rows, sid, ["till.open", "till.blind_submit"])
+        # Control: a shop with no counted drawer answers as before.
+        assert returns_router._drawer_closed_today(OTHER_STORE) is False
+
+    def test_the_bank_reconciliations_expected_deposit_read(self, db, monkeypatch, audit_rows):
+        from api.services.bank_reconciliation import BankReconciliationEngine
+
+        sid = self._owed(db, monkeypatch, audit_rows, lock=False)
+        for _ in range(2):
+            trail = BankReconciliationEngine(db).build_cash_expected(STORE, DATE, DATE)
+            assert [(t["expected_paise"], t["source_id"]) for t in trail] == [(100000, sid)]
+        self._paid(db, audit_rows, sid, ["till.open", "till.blind_submit"])
+
+    def test_the_cash_reconciliation_sign_off(self, db, monkeypatch, audit_rows):
+        sid = self._owed(db, monkeypatch, audit_rows, lock=True)
+        monkeypatch.setattr(finance_router.cash_recon, "_get_db", lambda: db)
+        for _ in range(2):
+            asyncio.run(finance_router.cash_recon.cash_reconciliation_signoff(
+                body=finance_router.cash_recon.CashReconSignoff(session_id=sid, source="BLIND_EOD"),
+                current_user=MANAGER))
+        self._paid(db, audit_rows, sid, ["till.open", "till.blind_submit", "till.lock"])
+
+
+def test_r18_d111_payout_and_later_balance_on_real_mongo(monkeypatch):
+    """Native PyMongo with the real till indexes and TaskRepository: a payout
+    of the day and a cash advance before the first close's count; the balance
+    of that order and a second payout after it. The second session is charged
+    with the later payout only and holds the balance; no note, no alert."""
+    client, real_db, name = _real_till_db()
+    try:
+        till.ensure_till_indexes(real_db)
+        tasks = _real_task_repo(monkeypatch, real_db)
+        ndb = _NativeDB(real_db)
+        held = _cash_sale(real_db, 500, datetime(2026, 11, 4, 5, 0))
+        _cash_sale(real_db, 2500, datetime(2026, 11, 4, 6, 0))
+        _payout(real_db, 500)
+        first = _register(ndb, monkeypatch, "CR-R18-1", opened="04:00:00", closed="12:00:00", pieces=5)
+        sid = first["till_session_id"]
+        assert (first["expected"], first["variance_status"], first["till_link_ok"]) == (
+            2500.0, "BALANCED", True)
+        _counted_at(real_db, sid, "12:00:00")
+        real_db.orders.update_one(
+            {"_id": held}, {"$push": {"payments": {"method": "CASH", "amount": 2000.0}}})
+        _payout(real_db, 500)
+        second = _register(ndb, monkeypatch, "CR-R18-2", opened="12:30:00", closed="13:00:00",
+                           opening=2500.0, pieces=8)
+        assert _judged(second) == _balanced(4000.0)
+        assert (second["cash_sales"], second["cash_expenses"], second["till_standing_count"]) == (
+            2000.0, 500.0, 2500.0)
+        stored = real_db.cash_register_sessions.find_one({"session_id": "CR-R18-2"})
+        assert (stored["expected"], stored["variance"], stored["manager_followup"]["tasks"]) == (
+            4000.0, 0.0, [])
+        assert tasks.count_documents({}) == 0
+        assert real_db.till_sessions.find_one({"_id": sid})["blind_count_paisa"] == 250000
     finally:
         client.drop_database(name)
         client.close()
