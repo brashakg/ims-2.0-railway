@@ -34,6 +34,7 @@ import {
   type VarianceStatus,
 } from '../../services/api/till';
 import { ApiError } from '../../services/api/client';
+import { getErrorStatus } from '../../utils/errorHandler';
 import DenomGrid from '../../components/cash/DenominationGrid';
 import FaceTallyTable from '../../components/cash/FaceTallyTable';
 import {
@@ -91,6 +92,7 @@ export default function BlindEodTallyPage() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [sessions, setSessions] = useState<TillSession[]>([]);
+  const [loadFailed, setLoadFailed] = useState(false);
   // Per-face tallies, fetched on demand per locked Z-Read. `null` means the
   // fetch failed -- shown as such, never as a clean tally.
   const [ledgers, setLedgers] = useState<Record<string, ZRead | null>>({});
@@ -127,8 +129,13 @@ export default function BlindEodTallyPage() {
       // Submit Count panel unreachable by the very people who count.
       const rows = await tillApi.list({ store_id: storeId, limit: 30 });
       setSessions(rows);
-    } catch {
-      setSessions([]);
+      setLoadFailed(false);
+    } catch (e) {
+      // Unreadable is not "no drawer today": an empty list here offered to
+      // open a drawer that was already open. A refusal on permissions keeps
+      // its old empty view.
+      if (getErrorStatus(e) === 403) setSessions([]);
+      else setLoadFailed(true);
     } finally {
       setLoading(false);
     }
@@ -268,6 +275,33 @@ export default function BlindEodTallyPage() {
               there is no drawer to count or Z-Read to lock. Switch to a
               physical store from the header dropdown to run its blind EOD.
             </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (loadFailed) {
+    return (
+      <div className="max-w-5xl mx-auto p-6">
+        <div
+          data-testid="till-load-failed"
+          className="bg-amber-50 border border-amber-200 rounded-lg p-5 flex items-start gap-3"
+        >
+          <AlertTriangle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
+          <div className="text-sm text-amber-900">
+            <p className="font-semibold mb-1">The till could not be loaded.</p>
+            <p className="mb-3">
+              Nothing is shown because it could not be read. This does not mean no drawer
+              is open today.
+            </p>
+            <button
+              type="button"
+              onClick={() => void load()}
+              className="inline-flex items-center min-h-[44px] px-4 text-sm font-medium text-white bg-bv hover:bg-bv-600 rounded-lg"
+            >
+              Try again
+            </button>
           </div>
         </div>
       </div>

@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import time
 import uuid
 from typing import Any, Dict, List
 
@@ -2671,7 +2672,13 @@ def _fail_reads(db, name):
 def _follow_ups(monkeypatch):
     """Capture the "count it on the Z-Read" manager task at both doors."""
     raised = []
-    monkeypatch.setattr(till, "raise_count_not_on_till_task", lambda **kw: raised.append(kw))
+
+    def _raise(**kw):
+        kw.pop("task_id", None)  # the fixed id has its own tests (round 11)
+        raised.append(kw)
+        return True
+
+    monkeypatch.setattr(till, "raise_count_not_on_till_task", _raise)
     return raised
 
 
@@ -3077,6 +3084,661 @@ def test_d88_uncompared_close_counted_once_on_real_mongo(monkeypatch):
         assert res["totals"]["cash_sales"] == 4000.0
         assert res["totals"]["expected_cash"] == 4000.0
         assert res["totals"]["also_counted_on_till"] == 1
+    finally:
+        client.drop_database(name)
+        client.close()
+
+
+# ===========================================================================
+# Round 11 (Codex PR-1421-round3, F-1421-R3-A): a close that COMMITTED but
+# lost its acknowledgement keeps its manager follow-up
+# ===========================================================================
+# Drawer A Rs 1,000 counted and locked, B takes Rs 3,000; the counted-drawer
+# read fails so the Cash Register close of B stores till_link_ok False; Mongo
+# commits the CLOSED update and loses its acknowledgement. The route answered
+# 500, the identical retry a bare 409 "Session already closed", and the "count
+# the drawer on the till" task was never raised. The same class sat on the
+# sibling writes (the register's variance alert, the Blind EOD lock, the blind
+# count, the Day-End close).
+
+_TASK_RAISERS = (
+    "raise_variance_task", "raise_count_not_on_till_task", "raise_count_not_compared_task")
+
+
+def _raised(monkeypatch, store_up=lambda: True):
+    """Every manager task the till code raises, as (raiser, fixed task id).
+    ``store_up`` False = the task store cannot be written (the raiser answers
+    False, as the real one does)."""
+    raised = []
+
+    def _capture(name):
+        def _raise(**kw):
+            if not store_up():
+                return False
+            raised.append((name, kw.get("task_id")))
+            return True
+        return _raise
+
+    for name in _TASK_RAISERS:
+        monkeypatch.setattr(till, name, _capture(name))
+    return raised
+
+
+def _lose_ack(monkeypatch, coll, method, when=lambda *a, **k: True):
+    """Codex's fault: the REAL write runs (it commits), then its
+    acknowledgement is lost, once."""
+    real = getattr(coll, method)
+    fired = []
+
+    def _write(*a, **k):
+        out = real(*a, **k)
+        if not fired and when(*a, **k):
+            fired.append(True)
+            raise AutoReconnect(f"{method} committed, acknowledgement lost")
+        return out
+
+    monkeypatch.setattr(coll, method, _write)
+    return fired
+
+
+def _fail_read_back(monkeypatch, coll, fired):
+    """The one read straight after the lost acknowledgement fails too."""
+    real = coll.find_one
+    failed = []
+
+    def _find_one(*a, **k):
+        if fired and not failed:
+            failed.append(True)
+            raise AutoReconnect("read-back failed")
+        return real(*a, **k)
+
+    monkeypatch.setattr(coll, "find_one", _find_one)
+
+
+def _sets_status(status):
+    return lambda *a, **k: a[1].get("$set", {}).get("status") == status
+
+
+def _cr_again(db, monkeypatch, **body_kw):
+    """The same Cash Register close sent again (no new session inserted)."""
+    monkeypatch.setattr(finance_router, "_get_db", lambda: db)
+    monkeypatch.setattr(finance_router, "_iso_now", lambda: f"{DATE}T12:05:00")
+    body_kw.setdefault("denominations", [{"face": 500, "kind": "note", "pieces": 6}])
+    body_kw.setdefault("closing_count_state", "COUNTED")
+    return asyncio.run(finance_router.close_cash_register(
+        body=finance_router.CashRegisterClose(session_id="CR-D40", **body_kw),
+        current_user=MANAGER))
+
+
+def _cr_stored(db):
+    rows = [d for d in db.get_collection("cash_register_sessions").docs
+            if d.get("session_id") == "CR-D40"]
+    assert len(rows) == 1
+    return rows[0]
+
+
+def _cr_list(db, monkeypatch):
+    monkeypatch.setattr(finance_router, "_get_db", lambda: db)
+    return asyncio.run(finance_router.list_cash_register_sessions(
+        store_id=STORE, status=None, limit=50, current_user=MANAGER))
+
+
+class TestR11RegisterCloseKeepsItsFollowUp:
+    def _failed_link_close(self, db, monkeypatch, *, read_back_fails=False):
+        """Codex's sequence up to and including the lost acknowledgement."""
+        _drawer_a_then_b(db, a_sales=[1000], b_sales=[3000])
+        raised = _raised(monkeypatch)
+        cr = db.get_collection("cash_register_sessions")
+        fired = _lose_ack(monkeypatch, cr, "update_one", _sets_status("CLOSED"))
+        if read_back_fails:
+            _fail_read_back(monkeypatch, cr, fired)
+        restore = _fail_till_reads(db.get_collection("till_sessions"), counted_only=True)
+        try:
+            try:
+                first = _cr_close_b(db, monkeypatch, 6)
+            except HTTPException as exc:
+                first = exc
+        finally:
+            restore()
+        assert fired == [True]
+        return raised, first
+
+    def test_lost_ack_answers_the_saved_close_and_raises_the_task_once(self, db, monkeypatch):
+        raised, first = self._failed_link_close(db, monkeypatch)
+        # The write landed and the handler found that out: no error at all.
+        assert isinstance(first, dict), first
+        assert (first["status"], first["counted"], first["till_link_ok"]) == ("CLOSED", 3000.0, False)
+        task = ("raise_count_not_on_till_task", till.followup_task_id("uncounted", "CR-D40"))
+        assert raised == [task]
+        assert _cr_stored(db)["manager_followup"]["pending"] is False
+        # Identical retry, then a retry with a different count: the saved
+        # close comes back, nothing is rewritten, no second task.
+        for pieces in (6, 2):
+            with pytest.raises(HTTPException) as exc:
+                _cr_again(db, monkeypatch,
+                          denominations=[{"face": 500, "kind": "note", "pieces": pieces}])
+            code, body = _through_the_app_handler(exc.value)
+            assert code == 409
+            assert body["detail"]["message"] == "Session already closed"
+            assert body["detail"]["session"]["counted"] == 3000.0
+            assert body["detail"]["session"]["till_link_ok"] is False
+            assert "_id" not in body["detail"]["session"]
+        assert raised == [task]
+        assert _cr_stored(db)["counted"] == 3000.0
+
+    def test_codex_sequence_500_then_the_retry_restores_the_task_once(self, db, monkeypatch):
+        """The read-back fails as well, so the first answer is still the 500
+        Codex saw. The identical retry is the recovery path."""
+        raised, first = self._failed_link_close(db, monkeypatch, read_back_fails=True)
+        assert isinstance(first, HTTPException) and first.status_code == 500
+        stored = _cr_stored(db)
+        assert (stored["status"], stored["till_link_ok"]) == ("CLOSED", False)
+        assert stored["manager_followup"]["pending"] is True and raised == []
+
+        with pytest.raises(HTTPException) as exc:
+            _cr_again(db, monkeypatch)
+        code, body = _through_the_app_handler(exc.value)
+        assert code == 409 and body["detail"]["session"]["counted"] == 3000.0
+        assert body["detail"]["session"]["manager_followup"]["pending"] is False
+        task = ("raise_count_not_on_till_task", till.followup_task_id("uncounted", "CR-D40"))
+        assert raised == [task]
+        assert _cr_stored(db)["manager_followup"]["pending"] is False
+        with pytest.raises(HTTPException):
+            _cr_again(db, monkeypatch)
+        _cr_list(db, monkeypatch)
+        assert raised == [task]
+
+    def test_no_retry_at_all_the_next_load_of_the_screen_restores_it(self, db, monkeypatch):
+        """A stopped process leaves no retry: once the session shows as closed
+        the screen has no Close button. Reading the list finishes it."""
+        raised, first = self._failed_link_close(db, monkeypatch, read_back_fails=True)
+        assert isinstance(first, HTTPException) and raised == []
+        out = _cr_list(db, monkeypatch)
+        assert raised == [
+            ("raise_count_not_on_till_task", till.followup_task_id("uncounted", "CR-D40"))]
+        assert out["sessions"][0]["manager_followup"]["pending"] is False
+        _cr_list(db, monkeypatch)
+        assert len(raised) == 1
+
+    def test_task_store_down_the_close_stays_owing_until_it_is_back(self, db, monkeypatch):
+        _drawer_a_then_b(db, a_sales=[1000], b_sales=[3000])
+        up = []
+        raised = _raised(monkeypatch, store_up=lambda: bool(up))
+        restore = _fail_till_reads(db.get_collection("till_sessions"), counted_only=True)
+        try:
+            out = _cr_close_b(db, monkeypatch, 6)
+        finally:
+            restore()
+        assert out["status"] == "CLOSED" and out["manager_followup"]["pending"] is True
+        _cr_list(db, monkeypatch)
+        assert raised == [] and _cr_stored(db)["manager_followup"]["pending"] is True
+        up.append(True)
+        _cr_list(db, monkeypatch)
+        assert len(raised) == 1 and _cr_stored(db)["manager_followup"]["pending"] is False
+
+    def test_variance_alert_survives_the_lost_ack(self, db, monkeypatch):
+        """One drawer, Rs 1,000 short with a note: the alert above the band
+        (owner ruling 2026-08-25) was lost the same way."""
+        till.open_session(db, store_id=STORE, session_date=DATE, opening_float_paisa=0, actor=CASHIER)
+        _cash_sale(db, 3000)
+        raised = _raised(monkeypatch)
+        cr = db.get_collection("cash_register_sessions")
+        fired = _lose_ack(monkeypatch, cr, "update_one", _sets_status("CLOSED"))
+        _fail_read_back(monkeypatch, cr, fired)
+        with pytest.raises(HTTPException) as exc:
+            _cr_close_b(db, monkeypatch, 4, note="Rs 1,000 missing")
+        assert exc.value.status_code == 500 and raised == []
+        with pytest.raises(HTTPException) as exc:
+            _cr_again(db, monkeypatch, denominations=[{"face": 500, "kind": "note", "pieces": 4}],
+                      note="Rs 1,000 missing")
+        assert exc.value.status_code == 409
+        assert exc.value.detail["session"]["variance"] == -1000.0
+        assert raised == [("raise_variance_task", till.followup_task_id("variance", "CR-D40"))]
+        owed = _cr_stored(db)["manager_followup"]["tasks"][0]
+        assert (owed["variance_paisa"], owed["tolerance_paisa"], owed["note"]) == (
+            -100000, 0, "Rs 1,000 missing")
+
+    def test_a_balanced_linked_close_owes_nothing_and_writes_nothing_extra(self, db, monkeypatch):
+        till.open_session(db, store_id=STORE, session_date=DATE, opening_float_paisa=0, actor=CASHIER)
+        _cash_sale(db, 3000)
+        raised = _raised(monkeypatch)
+        out = _cr_close_b(db, monkeypatch, 6)
+        assert out["variance_status"] == "BALANCED"
+        assert (out["manager_followup"]["pending"], out["manager_followup"]["tasks"]) == (False, [])
+        assert raised == []
+
+    def test_a_count_that_landed_on_the_till_is_not_reported_as_missing(self, db, monkeypatch):
+        """The TILL write lost its acknowledgement inside the register close:
+        the close said the count never reached the till and raised the task,
+        for a drawer the till showed as counted."""
+        sid = till.open_session(
+            db, store_id=STORE, session_date=DATE, opening_float_paisa=0, actor=CASHIER
+        )["session"]["session_id"]
+        _cash_sale(db, 3000)
+        raised = _raised(monkeypatch)
+        fired = _lose_ack(monkeypatch, db.get_collection("till_sessions"),
+                          "find_one_and_update", _sets_status(till.STATUS_BLIND_SUBMITTED))
+        out = _cr_close_b(db, monkeypatch, 6)
+        assert fired == [True]
+        assert (out["till_link_ok"], out["counted"], out["variance_status"]) == (True, 3000.0, "BALANCED")
+        assert _till(db, sid)["blind_count_paisa"] == 300000 and raised == []
+
+
+class TestR11RegisterReadFaultsAreSaidSo:
+    """A read that FAILED was answered as "not found" / "no session open" /
+    an empty history."""
+
+    def _broken(self, db, monkeypatch, method):
+        monkeypatch.setattr(finance_router, "_get_db", lambda: db)
+        coll = db.get_collection("cash_register_sessions")
+
+        def _boom(*a, **k):
+            raise AutoReconnect("cash_register_sessions read fault")
+
+        monkeypatch.setattr(coll, method, _boom)
+
+    def test_close_of_an_unreadable_session_is_503_not_404(self, db, monkeypatch):
+        self._broken(db, monkeypatch, "find_one")
+        with pytest.raises(HTTPException) as exc:
+            _cr_again(db, monkeypatch)
+        assert exc.value.status_code == 503 and "could not be read" in exc.value.detail
+
+    def test_an_unreadable_history_is_503_not_an_empty_screen(self, db, monkeypatch):
+        self._broken(db, monkeypatch, "find")
+        with pytest.raises(HTTPException) as exc:
+            _cr_list(db, monkeypatch)
+        assert exc.value.status_code == 503
+
+    def test_an_unreadable_open_session_is_503_not_no_session_open(self, db, monkeypatch):
+        self._broken(db, monkeypatch, "find_one")
+        with pytest.raises(HTTPException) as exc:
+            _cr_list(db, monkeypatch)
+        assert exc.value.status_code == 503
+
+    def test_open_refuses_when_the_one_open_session_guard_cannot_be_read(self, db, monkeypatch):
+        self._broken(db, monkeypatch, "find_one")
+        monkeypatch.setattr(
+            finance_router.cash_drawer, "is_online_store", lambda _db, _sid: False)
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(finance_router.open_cash_register(
+                body=finance_router.CashRegisterOpen(store_id=STORE, opening_float=500.0),
+                current_user=MANAGER))
+        assert exc.value.status_code == 503
+        assert db.get_collection("cash_register_sessions").docs == []
+
+    def test_preview_read_fault_shows_no_preview_not_one_from_zero(self, db, monkeypatch):
+        db.get_collection("cash_register_sessions").insert_one({
+            "session_id": "CR-OPEN", "store_id": STORE, "status": "OPEN",
+            "opening_float": 0.0, "opened_at": f"{DATE}T04:00:00"})
+        monkeypatch.setattr(db.get_collection("orders"), "find", _raise_read_fault)
+        out = _cr_list(db, monkeypatch)
+        assert out["open_session"]["session_id"] == "CR-OPEN"
+        assert out["expected_preview"] is None
+
+
+def _raise_read_fault(*a, **k):
+    raise AutoReconnect("read fault")
+
+
+class TestR11TillLockAndCountKeepTheirFollowUp:
+    def _short_drawer(self, db):
+        _cash_sale(db, 1000)
+        return _blind_count(db, rupees=500, lock=False)
+
+    def test_lock_lost_ack_is_a_lock_with_its_audit_and_one_alert(self, db, monkeypatch, audit_rows):
+        sid = self._short_drawer(db)
+        raised = _raised(monkeypatch)
+        fired = _lose_ack(monkeypatch, db.get_collection("till_sessions"),
+                          "find_one_and_update", _sets_status(till.STATUS_LOCKED))
+        res = till.lock_session(db, sid, actor=MANAGER, variance_note="Rs 500 short")
+        assert fired == [True] and res["ok"], res
+        assert res["session"]["status"] == till.STATUS_LOCKED
+        assert len(raised) == 1 and raised[0][0] == "raise_variance_task"
+        assert [r["action"] for r in audit_rows].count("till.lock") == 1
+        again = till.lock_session(db, sid, actor=MANAGER, variance_note="Rs 500 short")
+        assert (again["ok"], again["http"], again["error"]) == (False, 409, "already_locked")
+        assert len(raised) == 1
+
+    def test_lock_500_then_the_retry_or_a_read_restores_the_alert_once(self, db, monkeypatch):
+        sid = self._short_drawer(db)
+        raised = _raised(monkeypatch)
+        coll = db.get_collection("till_sessions")
+        fired = _lose_ack(monkeypatch, coll, "find_one_and_update", _sets_status(till.STATUS_LOCKED))
+        _fail_read_back(monkeypatch, coll, fired)
+        res = till.lock_session(db, sid, actor=MANAGER, variance_note="Rs 500 short")
+        assert (res["ok"], res["http"]) == (False, 500) and raised == []
+        assert _till(db, sid)["status"] == till.STATUS_LOCKED
+        assert _till(db, sid)["manager_followup"]["pending"] is True
+        again = till.lock_session(db, sid, actor=MANAGER, variance_note="Rs 500 short")
+        assert (again["http"], again["error"]) == (409, "already_locked")
+        assert len(raised) == 1 and _till(db, sid)["manager_followup"]["pending"] is False
+        till.get_session(db, sid)
+        till.list_sessions(db, store_id=STORE)
+        assert len(raised) == 1
+
+    def test_no_retry_a_read_of_the_drawer_restores_the_alert(self, db, monkeypatch):
+        sid = self._short_drawer(db)
+        raised = _raised(monkeypatch)
+        coll = db.get_collection("till_sessions")
+        fired = _lose_ack(monkeypatch, coll, "find_one_and_update", _sets_status(till.STATUS_LOCKED))
+        _fail_read_back(monkeypatch, coll, fired)
+        assert till.lock_session(db, sid, actor=MANAGER, variance_note="short")["http"] == 500
+        till.list_sessions(db, store_id=STORE)
+        assert len(raised) == 1
+        till.list_sessions(db, store_id=STORE)
+        till.get_session(db, sid)
+        assert len(raised) == 1
+
+    def test_a_relock_after_a_reopen_is_a_new_lock_and_alerts_again(self, db, monkeypatch):
+        sid = self._short_drawer(db)
+        raised = _raised(monkeypatch)
+        assert till.lock_session(db, sid, actor=MANAGER, variance_note="short")["ok"]
+        assert till.reopen_session(db, sid, reason="recount", actor=MANAGER)["ok"]
+        time.sleep(0.005)  # a later lock instant, to the millisecond
+        assert till.lock_session(db, sid, actor=MANAGER, variance_note="still short")["ok"]
+        assert len(raised) == 2 and raised[0][1] != raised[1][1]
+
+    def test_uncompared_count_lost_ack_keeps_the_check_by_hand_task(self, db, monkeypatch):
+        _cash_sale(db, 1000, "2026-11-04T03:00:00")
+        TestR8D76OlderCodeDrawers._old_drawer(db, "OLD-A", 100000, 100000, "2026-11-04T02:00:00")
+        c = _open(db)
+        raised = _raised(monkeypatch)
+        coll = db.get_collection("till_sessions")
+        fired = _lose_ack(
+            monkeypatch, coll, "find_one_and_update", _sets_status(till.STATUS_BLIND_SUBMITTED))
+        notes = [{"face": 500, "kind": "note", "pieces": 1}]
+        res = till.blind_submit(db, c, blind_denominations=notes, idempotency_key="k1", actor=CASHIER)
+        assert fired == [True] and res["ok"], res
+        assert res["session"]["variance_status"] == till.COMPARISON_UNAVAILABLE
+        task = ("raise_count_not_compared_task", till.followup_task_id("uncompared", c))
+        assert raised == [task]
+        # The cashier's reply never carries the follow-up record.
+        assert "manager_followup" not in till.redact_for_cashier(res["session"])
+        again = till.blind_submit(db, c, blind_denominations=notes, idempotency_key="k1", actor=CASHIER)
+        assert again["ok"] and again["idempotent"] and raised == [task]
+
+    def test_uncompared_count_500_then_the_retry_restores_the_task(self, db, monkeypatch):
+        _cash_sale(db, 1000, "2026-11-04T03:00:00")
+        TestR8D76OlderCodeDrawers._old_drawer(db, "OLD-A", 100000, 100000, "2026-11-04T02:00:00")
+        c = _open(db)
+        raised = _raised(monkeypatch)
+        coll = db.get_collection("till_sessions")
+        fired = _lose_ack(
+            monkeypatch, coll, "find_one_and_update", _sets_status(till.STATUS_BLIND_SUBMITTED))
+        _fail_read_back(monkeypatch, coll, fired)
+        notes = [{"face": 500, "kind": "note", "pieces": 1}]
+        res = till.blind_submit(db, c, blind_denominations=notes, actor=CASHIER)
+        assert (res["ok"], res["http"]) == (False, 500) and raised == []
+        again = till.blind_submit(db, c, blind_denominations=notes, actor=CASHIER)
+        assert (again["http"], again["error"]) == (409, "already_submitted")
+        assert raised == [("raise_count_not_compared_task", till.followup_task_id("uncompared", c))]
+
+    def test_a_lock_carries_forward_what_the_count_still_owes(self, db, monkeypatch):
+        _cash_sale(db, 1000, "2026-11-04T03:00:00")
+        TestR8D76OlderCodeDrawers._old_drawer(db, "OLD-A", 100000, 100000, "2026-11-04T02:00:00")
+        c = _open(db)
+        up = []
+        raised = _raised(monkeypatch, store_up=lambda: bool(up))
+        notes = [{"face": 500, "kind": "note", "pieces": 1}]
+        assert till.blind_submit(db, c, blind_denominations=notes, actor=CASHIER)["ok"]
+        assert till.lock_session(db, c, actor=MANAGER)["ok"]
+        owed = _till(db, c)["manager_followup"]
+        assert owed["pending"] is True and [t["kind"] for t in owed["tasks"]] == ["uncompared"]
+        up.append(True)
+        till.get_session(db, c)
+        assert raised == [("raise_count_not_compared_task", till.followup_task_id("uncompared", c))]
+
+    def test_an_unreadable_session_is_503_not_404(self, db, monkeypatch):
+        sid = self._short_drawer(db)
+        monkeypatch.setattr(db.get_collection("till_sessions"), "find_one", _raise_read_fault)
+        for res in (
+            till.lock_session(db, sid, actor=MANAGER, variance_note="x"),
+            till.blind_submit(db, sid, blind_denominations=[], actor=CASHIER),
+        ):
+            assert (res["ok"], res["http"], res["error"]) == (False, 503, "session_read_failed")
+        monkeypatch.setattr(till_router, "_get_db", lambda: db)
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(till_router.get_till_session(sid, current_user=MANAGER))
+        assert exc.value.status_code == 503
+
+    def test_an_unreadable_drawer_list_is_503_not_no_drawer_today(self, db, monkeypatch):
+        self._short_drawer(db)
+        monkeypatch.setattr(till_router, "_get_db", lambda: db)
+        monkeypatch.setattr(db.get_collection("till_sessions"), "find", _raise_read_fault)
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(till_router.list_till_sessions(
+                store_id=STORE, date=None, status=None, limit=50, current_user=MANAGER))
+        assert exc.value.status_code == 503
+
+
+class TestR11DayEndCloseKeepsItsFollowUp:
+    """D88(3) accepted the Day-End lost acknowledgement with no task. The
+    shared follow-up record now restores it there too."""
+
+    def test_lost_ack_409_carries_the_saved_close_and_raises_the_task_once(
+        self, db, day_end, monkeypatch
+    ):
+        _drawer_a_then_b(db, a_sales=[1000], b_sales=[3000])
+        raised = _raised(monkeypatch)
+        fired = _lose_ack(monkeypatch, db.get_collection("day_end_closes"), "insert_one")
+        restore = _fail_till_reads(db.get_collection("till_sessions"), counted_only=True)
+        try:
+            with pytest.raises(HTTPException) as exc:
+                day_end(closing_cash=3000.0, system_cash=4000.0)
+        finally:
+            restore()
+        assert fired == [True]
+        code, body = _through_the_app_handler(exc.value)
+        assert code == 409 and body["detail"]["close"]["closing_cash"] == 3000.0
+        assert body["detail"]["close"]["till_link_ok"] is False
+        key = reports_router.day_end.day_end_close_key(STORE, DATE)
+        task = ("raise_count_not_on_till_task", till.followup_task_id("uncounted", key))
+        assert raised == [task]
+        with pytest.raises(HTTPException) as exc:
+            day_end(closing_cash=3000.0, system_cash=4000.0)
+        assert exc.value.status_code == 409 and raised == [task]
+        assert _stored_close(db)["manager_followup"]["pending"] is False
+
+    def test_task_store_down_the_next_read_of_the_day_raises_it(self, db, day_end, monkeypatch):
+        _drawer_a_then_b(db, a_sales=[1000], b_sales=[3000])
+        up = []
+        raised = _raised(monkeypatch, store_up=lambda: bool(up))
+        restore = _fail_till_reads(db.get_collection("till_sessions"), counted_only=True)
+        try:
+            out = day_end(closing_cash=3000.0, system_cash=4000.0)
+        finally:
+            restore()
+        assert out["close"]["manager_followup"]["pending"] is True and raised == []
+        up.append(True)
+        for _ in range(2):
+            got = asyncio.run(reports_router.get_day_end_close(
+                date=DATE, store_id=STORE, current_user=MANAGER))
+        assert len(raised) == 1 and got["close"]["manager_followup"]["pending"] is False
+
+    def test_a_linked_close_owes_nothing(self, db, day_end, monkeypatch):
+        raised = _raised(monkeypatch)
+        out = day_end(closing_cash=0.0, system_cash=0.0)
+        assert out["close"]["till_link_ok"] is True
+        assert out["close"]["manager_followup"]["pending"] is False and raised == []
+
+
+class TestR11OneOwedTaskIsStoredOnce:
+    """The fixed id: raising one owed task again stores nothing new, even
+    after the manager completed it."""
+
+    class _Repo:
+        def __init__(self):
+            self.collection = FakeCollection()
+
+        def create(self, data, *, raise_on_duplicate=False):
+            self.collection.insert_one({"_id": data["task_id"], **data})
+            return data
+
+        def find_by_id(self, task_id):
+            return self.collection.find_one({"task_id": task_id})
+
+    def test_same_fixed_id_is_one_task_and_another_event_is_another(self, monkeypatch):
+        import api.dependencies as deps
+
+        repo = self._Repo()
+        monkeypatch.setattr(deps, "get_task_repository", lambda: repo)
+        monkeypatch.setattr(
+            "api.services.task_triggers._person_holding", lambda role, store_id: "u-mgr")
+        tid = till.followup_task_id("uncounted", "CR-1")
+        kw = dict(store_id=STORE, session_date=DATE, source="Finance cash-register close")
+        assert till.raise_count_not_on_till_task(task_id=tid, **kw) is True
+        assert till.raise_count_not_on_till_task(task_id=tid, **kw) is True
+        assert len(repo.collection.docs) == 1
+        repo.collection.docs[0]["status"] = "COMPLETED"
+        assert till.raise_count_not_on_till_task(task_id=tid, **kw) is True
+        assert len(repo.collection.docs) == 1
+        other = till.followup_task_id("uncounted", "CR-2")
+        assert till.raise_count_not_on_till_task(task_id=other, **kw) is True
+        assert len(repo.collection.docs) == 2
+
+    def test_no_task_store_answers_false_so_the_close_keeps_owing(self, monkeypatch):
+        import api.dependencies as deps
+
+        monkeypatch.setattr(deps, "get_task_repository", lambda: None)
+        assert till.raise_count_not_on_till_task(
+            store_id=STORE, session_date=DATE, source="x", task_id="TSK-X") is False
+        assert till.raise_variance_task(
+            store_id=STORE, session_date=DATE, variance_paisa=-500, tolerance_paisa=0) is False
+
+
+def _native_lose_ack(monkeypatch, name, collection, method, when):
+    """Codex's native fault: the REAL PyMongo write commits, then its
+    acknowledgement is lost, once. Class-level, scoped to our database."""
+    from pymongo.collection import Collection
+
+    real = getattr(Collection, method)
+    fired = []
+
+    def _write(self, *a, **k):
+        out = real(self, *a, **k)
+        if (self.database.name == name and self.name == collection
+                and not fired and when(*a, **k)):
+            fired.append(True)
+            raise AutoReconnect("native committed write lost its acknowledgement")
+        return out
+
+    monkeypatch.setattr(Collection, method, _write)
+    return fired
+
+
+@pytest.mark.parametrize("read_back_fails", [False, True])
+def test_r11_register_lost_ack_restores_one_task_on_real_mongo(monkeypatch, read_back_fails):
+    """F-1421-R3-A on a native PyMongo Database with the REAL TaskRepository:
+    Codex's sequence (counted-drawer read fault, CLOSED update committed,
+    acknowledgement lost), then the identical retry twice."""
+    from pymongo.collection import Collection
+
+    client, real_db, name = _real_till_db()
+    try:
+        till.ensure_till_indexes(real_db)
+        tasks = _real_task_repo(monkeypatch, real_db)
+        a, b = _drawer_a_then_b(
+            real_db, a_sales=[1000], b_sales=[3000],
+            at=(datetime(2026, 11, 4, 5, 0), datetime(2026, 11, 4, 10, 0)),
+        )
+        real_find, real_find_one = Collection.find, Collection.find_one
+
+        def _fault(self, query=None, *a_, **k):
+            if (self.database.name == name and self.name == "till_sessions"
+                    and isinstance(query, dict) and isinstance(query.get("status"), dict)):
+                raise AutoReconnect("native counted-drawers read fault")
+            return real_find(self, query, *a_, **k)
+
+        monkeypatch.setattr(Collection, "find", _fault)
+        fired = _native_lose_ack(
+            monkeypatch, name, "cash_register_sessions", "update_one", _sets_status("CLOSED"))
+        failed = []
+
+        def _read_back(self, *a_, **k):
+            if (read_back_fails and fired and not failed
+                    and self.database.name == name and self.name == "cash_register_sessions"):
+                failed.append(True)
+                raise AutoReconnect("native read-back fault")
+            return real_find_one(self, *a_, **k)
+
+        monkeypatch.setattr(Collection, "find_one", _read_back)
+        try:
+            first = _cr_close_b(_NativeDB(real_db), monkeypatch, 6)
+        except HTTPException as exc:
+            first = exc
+        monkeypatch.setattr(Collection, "find", real_find)
+        assert fired == [True]
+        if read_back_fails:
+            assert first.status_code == 500 and tasks.count_documents({}) == 0
+        else:
+            assert (first["status"], first["till_link_ok"]) == ("CLOSED", False)
+
+        for _ in range(2):
+            with pytest.raises(HTTPException) as exc:
+                _cr_again(_NativeDB(real_db), monkeypatch)
+            code, body = _through_the_app_handler(exc.value)
+            assert code == 409 and body["detail"]["session"]["counted"] == 3000.0
+        rows = list(tasks.find({}))
+        assert [t["source_ref"] for t in rows] == [f"till_uncounted:{STORE}:{DATE}"]
+        assert rows[0]["_id"] == till.followup_task_id("uncounted", "CR-D40")
+        assert rows[0]["link"] == "/finance/blind-eod" and rows[0]["assigned_to"] == "u-mgr"
+        stored = real_db.cash_register_sessions.find_one({"session_id": "CR-D40"})
+        assert (stored["status"], stored["counted"], stored["till_link_ok"]) == ("CLOSED", 3000.0, False)
+        assert stored["manager_followup"]["pending"] is False
+        assert real_db.cash_register_sessions.count_documents({"session_id": "CR-D40"}) == 1
+        assert real_db.till_sessions.find_one({"_id": b})["status"] == till.STATUS_OPEN
+        # The manager completes the task; the same owed task raised again
+        # (a second worker racing the first) is refused by the fixed id.
+        tasks.update_one({"_id": rows[0]["_id"]}, {"$set": {"status": "COMPLETED"}})
+        assert till.raise_count_not_on_till_task(
+            store_id=STORE, session_date=DATE, source="Finance cash-register close",
+            task_id=rows[0]["_id"]) is True
+        assert tasks.count_documents({}) == 1
+    finally:
+        client.drop_database(name)
+        client.close()
+
+
+def test_r11_lock_and_count_lost_ack_on_real_mongo(monkeypatch):
+    """The sibling writes on a native PyMongo Database with the REAL
+    TaskRepository: the Blind EOD lock of a short drawer and the count of an
+    uncompared drawer each commit, lose the acknowledgement, and still store
+    exactly one manager task; the retry adds none."""
+    client, real_db, name = _real_till_db()
+    try:
+        till.ensure_till_indexes(real_db)
+        tasks = _real_task_repo(monkeypatch, real_db)
+        _cash_sale(real_db, 1000, datetime(2026, 11, 4, 3, 0))
+        TestR8D76OlderCodeDrawers._old_drawer(
+            real_db, "OLD-A", 100000, 100000, datetime(2026, 11, 4, 2, 0))
+        c = _open(real_db)
+        fired = _native_lose_ack(
+            monkeypatch, name, "till_sessions", "find_one_and_update",
+            _sets_status(till.STATUS_BLIND_SUBMITTED))
+        notes = [{"face": 500, "kind": "note", "pieces": 1}]
+        res = till.blind_submit(real_db, c, blind_denominations=notes, actor=CASHIER)
+        assert fired == [True] and res["ok"], res
+        assert till.blind_submit(real_db, c, blind_denominations=notes, actor=CASHIER)["http"] == 409
+        assert [t["source_ref"] for t in tasks.find({})] == [f"till_uncompared:{STORE}:{DATE}:{c}"]
+
+        # A short drawer on another day: lock commits, acknowledgement lost.
+        day2 = "2026-11-05"
+        _cash_sale(real_db, 1000, datetime(2026, 11, 5, 5, 0))
+        s = till.open_session(
+            real_db, store_id=STORE, session_date=day2, opening_float_paisa=0, actor=CASHIER
+        )["session"]["session_id"]
+        assert till.blind_submit(real_db, s, blind_denominations=notes, actor=CASHIER)["ok"]
+        fired = _native_lose_ack(
+            monkeypatch, name, "till_sessions", "find_one_and_update",
+            _sets_status(till.STATUS_LOCKED))
+        locked = till.lock_session(real_db, s, actor=MANAGER, variance_note="Rs 500 short")
+        assert fired == [True] and locked["ok"], locked
+        again = till.lock_session(real_db, s, actor=MANAGER, variance_note="Rs 500 short")
+        assert (again["http"], again["error"]) == (409, "already_locked")
+        alerts = list(tasks.find({"source_ref": f"till_variance:{STORE}:{day2}:{s}"}))
+        assert len(alerts) == 1 and alerts[0]["payload"]["variance_paisa"] == -50000
+        row = real_db.till_sessions.find_one({"_id": s})
+        assert row["status"] == till.STATUS_LOCKED and row["manager_followup"]["pending"] is False
     finally:
         client.drop_database(name)
         client.close()

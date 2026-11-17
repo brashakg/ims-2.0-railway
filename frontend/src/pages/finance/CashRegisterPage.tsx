@@ -39,7 +39,7 @@ import {
   hasCount,
   type DenomRow,
 } from '../../utils/denominations';
-import { getErrorMessage } from '../../utils/errorHandler';
+import { getErrorDetail, getErrorMessage, getErrorStatus } from '../../utils/errorHandler';
 
 const inr = (n?: number | null) => `₹${Math.round(Number(n) || 0).toLocaleString('en-IN')}`;
 
@@ -65,6 +65,7 @@ export default function CashRegisterPage() {
 
   const [loading, setLoading] = useState(true);
   const [data, setData] = useState<SessionsResponse | null>(null);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [busy, setBusy] = useState(false);
 
   // Open-form state
@@ -84,9 +85,12 @@ export default function CashRegisterPage() {
     try {
       const res = await cashRegisterApi.sessions({ store_id: storeId || undefined });
       setData(res);
+      setLoadFailed(false);
     } catch (e) {
+      // Unreadable is not empty. Showing "no session open" and an empty
+      // history here offered to open a till that was already open.
       toast.error(e instanceof Error ? e.message : 'Failed to load cash register');
-      setData({ sessions: [], open_session: null, expected_preview: null });
+      setLoadFailed(true);
     } finally {
       setLoading(false);
     }
@@ -131,6 +135,9 @@ export default function CashRegisterPage() {
         getErrorMessage(e, '') ||
         (e instanceof Error ? e.message : 'Could not open session');
       toast.error(msg);
+      // A session is already open (an earlier press whose reply was lost, or
+      // someone else opened it): show it instead of the open form.
+      if (getErrorStatus(e) === 409) await load();
     } finally {
       setBusy(false);
     }
@@ -191,6 +198,28 @@ export default function CashRegisterPage() {
       setCloseNote('');
       await load();
     } catch (e: unknown) {
+      if (getErrorStatus(e) === 409) {
+        // ALREADY CLOSED: an earlier press whose reply was lost, or someone
+        // else closed it. The saved close stands and comes back with the
+        // refusal, so say what was saved and show it, instead of leaving the
+        // count form up over a register that is closed.
+        const saved = (getErrorDetail(e) as { session?: CashRegisterSession } | undefined)
+          ?.session;
+        if (saved?.till_link_ok === false && saved?.counted != null) {
+          toast.warning(
+            'This register was already closed. Its count did not reach the till, so the drawer is still open there and has not been checked. Count it on the Blind EOD Tally (Z-Read) screen.',
+          );
+        } else {
+          toast.info(
+            'This register was already closed. The saved close is in the session history below.',
+          );
+        }
+        setCloseDenoms(blankDenoms());
+        setBankDeposit('');
+        setCloseNote('');
+        await load();
+        return;
+      }
       const msg =
         getErrorMessage(e, '') ||
         (e instanceof Error ? e.message : 'Could not close session');
@@ -213,6 +242,27 @@ export default function CashRegisterPage() {
       {loading ? (
         <div className="flex items-center gap-2 text-gray-500">
           <Loader2 className="w-4 h-4 animate-spin" /> Loading...
+        </div>
+      ) : loadFailed ? (
+        <div
+          data-testid="cash-register-load-failed"
+          className="bg-amber-50 border border-amber-200 rounded-lg p-5 flex items-start gap-3"
+        >
+          <AlertTriangle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
+          <div className="text-sm text-amber-900">
+            <p className="font-semibold mb-1">The cash register could not be loaded.</p>
+            <p className="mb-3">
+              Nothing is shown because it could not be read. This does not mean no till is
+              open or that there are no past sessions.
+            </p>
+            <button
+              type="button"
+              onClick={() => void load()}
+              className="inline-flex items-center min-h-[44px] px-4 text-sm font-medium text-white bg-bv hover:bg-bv-600 rounded-lg"
+            >
+              Try again
+            </button>
+          </div>
         </div>
       ) : (
         <>

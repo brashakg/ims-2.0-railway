@@ -73,6 +73,10 @@ export interface CashRegisterSession {
   till_drawers?: TillDrawerSummary[] | null;
   // The day already carried a declared opening float; that one stands.
   till_float_already_declared?: boolean;
+  // The manager task(s) this close owes (a variance alert, "count the drawer
+  // on the till"). `pending` true = not raised yet; the server raises it on
+  // the next retry or load of this screen.
+  manager_followup?: { pending: boolean; tasks?: Array<{ kind: string }> } | null;
 }
 
 export interface ExpectedPreview {

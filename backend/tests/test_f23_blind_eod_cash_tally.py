@@ -74,6 +74,11 @@ def _matches(doc: Dict[str, Any], query: Dict[str, Any]) -> bool:
                 return False
             continue
         actual = doc.get(k)
+        if "." in k and k not in doc:
+            # A dotted path into a sub-document, as Mongo reads it.
+            actual = doc
+            for part in k.split("."):
+                actual = actual.get(part) if isinstance(actual, dict) else None
         if isinstance(v, dict) and any(str(kk).startswith("$") for kk in v):
             for op, expected in v.items():
                 if not _cmp_op(actual, op, expected):

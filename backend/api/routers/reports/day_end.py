@@ -125,7 +125,13 @@ async def get_day_end_close(
         # No DB -> we genuinely don't know; report not-closed rather than fake.
         return {"closed": False, "store_id": sid, "date": date, "close": None}
 
-    doc = db.get_collection("day_end_closes").find_one({"store_id": sid, "date": date})
+    closes = db.get_collection("day_end_closes")
+    doc = closes.find_one({"store_id": sid, "date": date})
+    if doc:
+        # A close that still owes the manager its task (reply lost, or the
+        # process stopped before raising it) is finished on this read: once
+        # the day shows as closed the screen offers no retry.
+        till_service.settle_followup(closes, {"_id": doc.get("_id")}, doc)
     return {
         "closed": bool(doc),
         "store_id": sid,
@@ -167,15 +173,23 @@ async def create_day_end_close(
         )
 
     closes = db.get_collection("day_end_closes")
-    existing = closes.find_one({"store_id": sid, "date": body.date})
-    if existing:
+
+    def _already_closed(stored: dict):
+        """The stored close stands and goes back with the 409. If it still
+        owes the manager its task (its reply was lost: this retry is how the
+        screen finds out the close was saved), the task is raised here, once."""
+        till_service.settle_followup(closes, {"_id": stored.get("_id")}, stored)
         raise HTTPException(
             status_code=409,
             detail={
                 "message": f"Day {body.date} already closed for store {sid}",
-                "close": _day_end_doc_public(existing, current_user),
+                "close": _day_end_doc_public(stored, current_user),
             },
         )
+
+    existing = closes.find_one({"store_id": sid, "date": body.date})
+    if existing:
+        _already_closed(existing)
 
     # The notes-and-coins count, if one was entered. When the cashier counted
     # the grid but typed no total, the count IS the total -- that is what is
@@ -310,6 +324,23 @@ async def create_day_end_close(
         "notes": (body.notes or "").strip() or None,
         "closed_by": current_user.get("user_id"),
         "closed_at": utc_event_iso(now),
+        # The count did not reach the till: that drawer is still OPEN there
+        # and nothing has checked it, so the manager is told to count it on
+        # the Z-Read. Stored IN the close so the task cannot be lost between
+        # the insert below and the lines after it.
+        till_service.FOLLOWUP_FIELD: till_service.owed_followup(
+            {
+                "kind": "uncounted",
+                "store_id": sid,
+                "session_date": body.date,
+                "source": "Day-End close",
+                "task_id": till_service.followup_task_id(
+                    "uncounted", day_end_close_key(sid, body.date)
+                ),
+            }
+            if closing_cash is not None and not till_link.get("ok")
+            else None
+        ),
     }
 
     try:
@@ -327,13 +358,7 @@ async def create_day_end_close(
         # stored close as a 409 rather than a 500.
         winner = closes.find_one({"store_id": sid, "date": body.date})
         if winner:
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "message": f"Day {body.date} already closed for store {sid}",
-                    "close": _day_end_doc_public(winner, current_user),
-                },
-            )
+            _already_closed(winner)
         logger.exception("Day-end close record failed")
         raise HTTPException(
             status_code=500,
@@ -358,13 +383,7 @@ async def create_day_end_close(
             closes.delete_one({"_id": key})
         except Exception:  # noqa: BLE001
             logger.exception("Day-end close %s could not be taken back", key)
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "message": f"Day {body.date} already closed for store {sid}",
-                "close": _day_end_doc_public(rival, current_user),
-            },
-        )
+        _already_closed(rival)
 
     # Audit (fail-soft: an audit hiccup must not undo the business record).
     try:
@@ -394,12 +413,10 @@ async def create_day_end_close(
     except Exception:
         pass
 
-    # The count did not reach the till: that drawer is still OPEN there and
-    # nothing has checked it. The manager is told to count it on the Z-Read.
-    if closing_cash is not None and not till_link.get("ok"):
-        till_service.raise_count_not_on_till_task(
-            store_id=sid, session_date=body.date, source="Day-End close"
-        )
+    # Raise what the close owes (see manager_followup above). If the task
+    # cannot be stored the close stays saved and stays owing: the next retry
+    # or read of the day raises it.
+    till_service.settle_followup(closes, {"_id": key}, doc)
 
     return {
         "closed": True,

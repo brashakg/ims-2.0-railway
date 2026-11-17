@@ -362,7 +362,7 @@ class TestCashRegisterEndpoints:
             def find_many(self, q):
                 return [t for t in tasks if all(t.get(k) == v for k, v in (q or {}).items())]
 
-            def create(self, t):
+            def create(self, t, **_kw):  # the real one takes raise_on_duplicate
                 tasks.append(dict(t))
                 return dict(t)
 

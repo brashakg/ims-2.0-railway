@@ -31,6 +31,7 @@ No emoji (Windows cp1252).
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import uuid
 from datetime import datetime
@@ -226,7 +227,8 @@ def raise_variance_task(
     note: Optional[str] = None,
     source: str = "day-end close",
     session_id: Optional[str] = None,
-) -> None:
+    task_id: Optional[str] = None,
+) -> bool:
     """A SYSTEM task on the store manager's worklist for an out-of-band
     day-end cash variance (owner ruling 2026-08-25: manager alert above the
     band). REUSES ``task_triggers.create_system_task`` -- the in-app bell
@@ -237,14 +239,19 @@ def raise_variance_task(
     drawer's shortage was swallowed while the first drawer's task was open).
     No session id (a Finance close whose till link failed) keeps the old
     (store, day) key. Fail-soft: an alert failure never undoes the lock/close
-    that triggered it."""
+    that triggered it.
+
+    Returns True when the task is KNOWN to be on the worklist (or there is
+    nothing to raise); False when it could not be stored, so a caller that
+    owes it (``settle_followup``) keeps owing it. ``task_id`` is the fixed id
+    of that one owed task, so raising it twice stores it once."""
     try:
         v = int(variance_paisa or 0)
     except (TypeError, ValueError):
-        return
+        return True
     try:
         from ..dependencies import get_task_repository
-        from .task_triggers import create_system_task
+        from .task_triggers import create_system_task, task_on_worklist
 
         rupees = abs(v) / 100.0
         try:
@@ -253,8 +260,15 @@ def raise_variance_task(
             band_rupees = 0.0
         direction = "OVER" if v > 0 else "SHORT"
         day = str(session_date or "")
-        create_system_task(
-            get_task_repository(),
+        repo = get_task_repository()
+        dedupe_ref = (
+            f"till_variance:{store_id}:{day}:{session_id}"
+            if session_id
+            else f"till_variance:{store_id}:{day}"
+        )
+        created = create_system_task(
+            repo,
+            task_id=task_id,
             title=(
                 f"Cash drawer {direction} by Rs {rupees:.2f} at "
                 f"{store_id} ({day})"
@@ -274,11 +288,7 @@ def raise_variance_task(
             category="Finance",
             store_id=store_id,
             assigned_to="STORE_MANAGER",
-            dedupe_ref=(
-                f"till_variance:{store_id}:{day}:{session_id}"
-                if session_id
-                else f"till_variance:{store_id}:{day}"
-            ),
+            dedupe_ref=dedupe_ref,
             extra={
                 "link": "/finance/cash-register",
                 "payload": {
@@ -290,8 +300,9 @@ def raise_variance_task(
                 },
             },
         )
+        return task_on_worklist(repo, created, dedupe_ref, task_id)
     except Exception:  # noqa: BLE001
-        return
+        return False
 
 
 # Where a till drawer is counted and locked, named as the menu names it
@@ -303,16 +314,19 @@ ZREAD_SCREEN_NAME = "Blind EOD Tally (Z-Read)"
 
 def _drawer_check_task(
     *, store_id: Optional[str], title: str, description: str,
-    dedupe_ref: str, payload: Dict[str, Any],
-) -> None:
+    dedupe_ref: str, payload: Dict[str, Any], task_id: Optional[str] = None,
+) -> bool:
     """One SYSTEM task for the store manager about a drawer nothing has
-    judged. Fail-soft, like raise_variance_task."""
+    judged. Fail-soft, and the same True / False answer as
+    raise_variance_task."""
     try:
         from ..dependencies import get_task_repository
-        from .task_triggers import create_system_task
+        from .task_triggers import create_system_task, task_on_worklist
 
-        create_system_task(
-            get_task_repository(),
+        repo = get_task_repository()
+        created = create_system_task(
+            repo,
+            task_id=task_id,
             title=title,
             description=description,
             priority="P2",
@@ -322,20 +336,23 @@ def _drawer_check_task(
             dedupe_ref=dedupe_ref,
             extra={"link": ZREAD_SCREEN_LINK, "payload": payload},
         )
+        return task_on_worklist(repo, created, dedupe_ref, task_id)
     except Exception:  # noqa: BLE001
-        return
+        return False
 
 
 def raise_count_not_on_till_task(
-    *, store_id: Optional[str], session_date: Optional[str], source: str
-) -> None:
+    *, store_id: Optional[str], session_date: Optional[str], source: str,
+    task_id: Optional[str] = None,
+) -> bool:
     """A close's count did NOT reach the till (the link failed). That drawer
     is still OPEN on the till, so no blind count has judged it: without this,
     a real shortage on it could go unchecked and unalerted (owner ruling
     2026-08-25). One task per shop-day."""
     day = str(session_date or "")
-    _drawer_check_task(
+    return _drawer_check_task(
         store_id=store_id,
+        task_id=task_id,
         title=f"Count the cash drawer on the Blind EOD Tally at {store_id} ({day})",
         description=(
             f"The {day} close at store {store_id} ({source}) could not record "
@@ -349,15 +366,17 @@ def raise_count_not_on_till_task(
 
 
 def raise_count_not_compared_task(
-    *, store_id: Optional[str], session_date: Optional[str], session_id: Optional[str]
-) -> None:
+    *, store_id: Optional[str], session_date: Optional[str], session_id: Optional[str],
+    task_id: Optional[str] = None,
+) -> bool:
     """A drawer was counted but NOT compared (COMPARISON_UNAVAILABLE, D76):
     with no variance there is no automatic alert, so a drawer that may be
     short would go unchecked (owner ruling 2026-08-25). The manager checks it
     by hand. One task per drawer."""
     day = str(session_date or "")
-    _drawer_check_task(
+    return _drawer_check_task(
         store_id=store_id,
+        task_id=task_id,
         title=f"Check a cash drawer count by hand at {store_id} ({day})",
         description=(
             f"A {day} cash drawer at store {store_id} was counted, but its "
@@ -369,6 +388,104 @@ def raise_count_not_compared_task(
         dedupe_ref=f"till_uncompared:{store_id}:{day}:{session_id}",
         payload={"store_id": store_id, "session_date": day, "session_id": session_id},
     )
+
+
+# ---------------------------------------------------------------------------
+# The manager follow-up a committed close / count / lock still owes
+# ---------------------------------------------------------------------------
+# A manager task is raised AFTER the write that commits the close. When the
+# reply to that write was lost, or the process stopped in between, the task was
+# lost for good: the retry found the record already closed and stopped there
+# (Codex F-1421-R3-A). So the committing write itself now records what it owes
+# (``manager_followup``), and whatever next meets the record -- the same
+# request, its retry, or a read -- raises it and marks it paid. Every owed task
+# has a fixed id, so raising it twice stores it once.
+
+_SESSION_READ_FAILED = (
+    "The till could not be read just now. Nothing was changed. Try again in a moment."
+)
+
+FOLLOWUP_FIELD = "manager_followup"
+
+
+def followup_task_id(kind: str, *key: Any) -> str:
+    """The fixed id of ONE owed task (same shape as a generated task id)."""
+    raw = ":".join([kind, *(str(k) for k in key)])
+    return "TSK-" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:10].upper()
+
+
+def owed_followup(*tasks: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """What a committing write stores under ``manager_followup``. Each task is
+    ``{"kind": variance | uncounted | uncompared, **the raiser's arguments}``;
+    a None is skipped."""
+    owed = [t for t in tasks if t]
+    # ``id`` names THIS write of the field: marking it paid never clears a
+    # later write (a lock restating what the count owed).
+    return {"id": uuid.uuid4().hex, "pending": bool(owed), "tasks": owed}
+
+
+def unpaid_followup_tasks(doc: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The tasks a record still owes, for a later write that restates the
+    field (a lock after a count) to carry forward."""
+    owed = (doc or {}).get(FOLLOWUP_FIELD) or {}
+    return list(owed.get("tasks") or []) if owed.get("pending") else []
+
+
+def settle_followup(coll, key: Dict[str, Any], doc: Optional[Dict[str, Any]]) -> None:
+    """Raise the manager task(s) the stored record ``doc`` still owes and mark
+    them paid. Nothing owed -> nothing read or written. A task that cannot be
+    stored leaves the record owing, for the next retry or read. Never raises:
+    the close that owes it is already committed."""
+    owed = (doc or {}).get(FOLLOWUP_FIELD) or {}
+    if not owed.get("pending"):
+        return
+    raisers = {
+        "variance": raise_variance_task,
+        "uncounted": raise_count_not_on_till_task,
+        "uncompared": raise_count_not_compared_task,
+    }
+    try:
+        paid = [
+            bool(raisers[t["kind"]](**{k: v for k, v in t.items() if k != "kind"}))
+            for t in owed.get("tasks") or []
+        ]
+        if all(paid):
+            coll.update_one(
+                {**key, f"{FOLLOWUP_FIELD}.id": owed.get("id")},
+                {"$set": {f"{FOLLOWUP_FIELD}.pending": False}},
+            )
+            owed["pending"] = False
+    except Exception:  # noqa: BLE001
+        logger.exception("Manager follow-up could not be settled for %s", key)
+
+
+def _stored_instant(value: Any) -> Any:
+    """A datetime as Mongo hands it back (millisecond precision)."""
+    if isinstance(value, datetime):
+        return value.replace(microsecond=value.microsecond // 1000 * 1000, tzinfo=None)
+    return value
+
+
+def _own_write_landed(
+    coll, session_id: str, status: str, at_field: str, by_field: str,
+    now: datetime, actor: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """After a guarded write RAISED: read the session back and return it when
+    it shows THIS request's write (same status, same instant, same person) --
+    the write committed and only its acknowledgement was lost. None when it
+    did not land, landed from someone else, or cannot be read."""
+    try:
+        present = coll.find_one({"_id": session_id})
+    except Exception:  # noqa: BLE001
+        return None
+    if (
+        present is not None
+        and str(present.get("status")) == status
+        and _stored_instant(present.get(at_field)) == _stored_instant(now)
+        and present.get(by_field) == (actor or {}).get("user_id")
+    ):
+        return present
+    return None
 
 
 def variance_status(variance_paisa: int, tolerance_paisa: int = 0) -> str:
@@ -1012,10 +1129,16 @@ def blind_submit(
     try:
         session = coll.find_one({"_id": session_id})
     except Exception:  # noqa: BLE001
-        session = None
+        # Unreadable is not absent: "not found" sent staff looking for a
+        # drawer that exists.
+        logger.exception("Till session read failed before counting %s", session_id)
+        return {"ok": False, "error": "session_read_failed", "http": 503, "message": _SESSION_READ_FAILED}
     if session is None:
         return {"ok": False, "error": "not_found", "http": 404}
 
+    # A count that already landed may still owe its manager task (its reply
+    # was lost, or the process stopped before raising it): the retry pays it.
+    settle_followup(coll, {"_id": session_id}, session)
     # Idempotent retry: same key on an already-submitted session -> existing state.
     if str(session.get("status")) == STATUS_BLIND_SUBMITTED:
         if idempotency_key and session.get("idempotency_key") == idempotency_key:
@@ -1161,12 +1284,33 @@ def blind_submit(
                     "blind_submitted_at": now,
                     "blind_submitted_by": (actor or {}).get("user_id"),
                     "idempotency_key": idempotency_key,
+                    # Stored WITH the count, so the check-by-hand task cannot
+                    # be lost between this write and the lines below it.
+                    FOLLOWUP_FIELD: owed_followup(
+                        {
+                            "kind": "uncompared",
+                            "store_id": store_id,
+                            "session_date": session.get("session_date"),
+                            "session_id": session_id,
+                            "task_id": followup_task_id("uncompared", session_id),
+                        }
+                        if vstatus == COMPARISON_UNAVAILABLE
+                        else None
+                    ),
                 }
             },
             return_document=ReturnDocument.AFTER,
         )
     except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "error": f"submit_failed:{exc}", "http": 500}
+        # The write may have committed with only its acknowledgement lost.
+        # Answering "failed" then told the close screens the count never
+        # reached the till, for a drawer the till shows as counted.
+        updated = _own_write_landed(
+            coll, session_id, STATUS_BLIND_SUBMITTED,
+            "blind_submitted_at", "blind_submitted_by", now, actor,
+        )
+        if updated is None:
+            return {"ok": False, "error": f"submit_failed:{exc}", "http": 500}
     if updated is None:
         # Lost the race (status flipped off OPEN between read and update).
         return {"ok": False, "error": "already_submitted", "http": 409}
@@ -1187,11 +1331,9 @@ def blind_submit(
         store_id=store_id,
         detail={"session_date": session.get("session_date")},
     )
-    if vstatus == COMPARISON_UNAVAILABLE:
-        # Only the one count that landed reaches here (guarded update above).
-        raise_count_not_compared_task(
-            store_id=store_id, session_date=session.get("session_date"), session_id=session_id
-        )
+    # The check-by-hand task of an uncompared count (D76), from the record the
+    # count stored. Only the one count that landed reaches here.
+    settle_followup(coll, {"_id": session_id}, updated)
     updated["session_id"] = updated.get("_id")
     return {"ok": True, "session": updated}
 
@@ -1538,12 +1680,18 @@ def lock_session(
     try:
         session = coll.find_one({"_id": session_id})
     except Exception:  # noqa: BLE001
-        session = None
+        logger.exception("Till session read failed before locking %s", session_id)
+        return {"ok": False, "error": "session_read_failed", "http": 503, "message": _SESSION_READ_FAILED}
     if session is None:
         return {"ok": False, "error": "not_found", "http": 404}
 
     store_id = session.get("store_id")
     day = str(session.get("session_date") or "")
+
+    # A lock that already landed may still owe its manager alert (its reply
+    # was lost, or the process stopped before raising it): the retry pays it,
+    # and is then told the drawer is already locked, as before.
+    settle_followup(coll, {"_id": session_id}, session)
 
     # Out-of-band variance demands a written explanation BEFORE the lock. The
     # band is the one stored at blind-submit (the band the verdict was judged
@@ -1583,12 +1731,39 @@ def lock_session(
                     # The mandatory explanation for an out-of-band variance
                     # (None when the day balanced and none was given).
                     "variance_note": clean_note or None,
+                    # The manager alert this lock owes, stored WITH the lock.
+                    # Its id carries the lock instant: a reopen and relock is
+                    # a new lock and may alert again, a retry of THIS lock
+                    # cannot. A task the count still owes is carried forward.
+                    FOLLOWUP_FIELD: owed_followup(
+                        *unpaid_followup_tasks(session),
+                        {
+                            "kind": "variance",
+                            "store_id": store_id,
+                            "session_date": day,
+                            "variance_paisa": variance_paisa,
+                            "tolerance_paisa": tolerance_paisa,
+                            "note": clean_note,
+                            "source": "blind EOD Z-Read lock",
+                            "session_id": session_id,
+                            "task_id": followup_task_id(
+                                "variance", session_id, _stored_instant(now).isoformat()
+                            ),
+                        }
+                        if out_of_band
+                        else None,
+                    ),
                 }
             },
             return_document=ReturnDocument.AFTER,
         )
     except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "error": f"lock_failed:{exc}", "http": 500}
+        # The lock may have committed with only its acknowledgement lost.
+        locked = _own_write_landed(
+            coll, session_id, STATUS_LOCKED, "locked_at", "locked_by", now, actor
+        )
+        if locked is None:
+            return {"ok": False, "error": f"lock_failed:{exc}", "http": 500}
     if locked is None:
         present = None
         try:
@@ -1618,18 +1793,10 @@ def lock_session(
         severity="WARNING" if str(locked.get("variance_status")) != "BALANCED" else "INFO",
         detail={"session_date": day},
     )
-    # Manager alert above the band (owner ruling 2026-08-25). After the lock
-    # won -- exactly one of two concurrent locks reaches this line.
-    if out_of_band:
-        raise_variance_task(
-            store_id=store_id,
-            session_date=day,
-            variance_paisa=variance_paisa,
-            tolerance_paisa=tolerance_paisa,
-            note=clean_note,
-            source="blind EOD Z-Read lock",
-            session_id=session_id,
-        )
+    # Manager alert above the band (owner ruling 2026-08-25), from the record
+    # the lock stored. After the lock won -- exactly one of two concurrent
+    # locks reaches this line.
+    settle_followup(coll, {"_id": session_id}, locked)
     locked["session_id"] = locked.get("_id")
     return {"ok": True, "session": locked}
 
@@ -1768,18 +1935,25 @@ def reopen_session(
 # ---------------------------------------------------------------------------
 
 
-def get_session(db, session_id: str) -> Optional[Dict[str, Any]]:
+def get_session(db, session_id: str, *, strict: bool = False) -> Optional[Dict[str, Any]]:
     """Load a till session by id (or None). Used by the routes to store-scope the
-    actor BEFORE a mutation (cross-store IDOR guard)."""
+    actor BEFORE a mutation (cross-store IDOR guard).
+
+    ``strict``: a read that FAILED raises instead of answering None, so a
+    route can say "could not be read" rather than "not found". A session that
+    still owes a manager task (see ``settle_followup``) is paid on the way."""
     coll = _sessions_coll(db)
     if coll is None:
         return None
     try:
         doc = coll.find_one({"_id": session_id})
     except Exception:  # noqa: BLE001
+        if strict:
+            raise
         return None
     if doc is not None:
         doc["session_id"] = doc.get("_id")
+        settle_followup(coll, {"_id": session_id}, doc)
     return doc
 
 
@@ -1790,8 +1964,14 @@ def list_sessions(
     session_date: Optional[str] = None,
     status: Optional[str] = None,
     limit: int = 50,
+    strict: bool = False,
 ) -> List[Dict[str, Any]]:
-    """Session rows for a store/date/status, newest first. DB absent -> []."""
+    """Session rows for a store/date/status, newest first. DB absent -> [].
+
+    ``strict``: a read that FAILED raises instead of answering [], so the
+    screen can say the drawers could not be read instead of showing a shop-day
+    with no drawer. A row that still owes a manager task is paid on the way
+    (the screen offers no retry once a drawer shows as counted or locked)."""
     coll = _sessions_coll(db)
     if coll is None:
         return []
@@ -1804,9 +1984,14 @@ def list_sessions(
         match["status"] = str(status).upper()
     try:
         cursor = coll.find(match, {"_id": 0}).sort("opened_at", -1).limit(int(limit))
-        return list(cursor)
+        rows = list(cursor)
     except Exception:  # noqa: BLE001
+        if strict:
+            raise
         return []
+    for row in rows:
+        settle_followup(coll, {"session_id": row.get("session_id")}, row)
+    return rows
 
 
 # Fields a SALES_CASHIER / CASHIER must NEVER see before the manager locks
@@ -1830,6 +2015,9 @@ _CASHIER_HIDDEN_FIELDS = (
     "refund_double_entry_advisory",
     "off_till_expense_advisory",
     "variance_note",
+    # The manager task a count or lock owes: it names the variance, and that
+    # the count could not be compared.
+    FOLLOWUP_FIELD,
 )
 
 

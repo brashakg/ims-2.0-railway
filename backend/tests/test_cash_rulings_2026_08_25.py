@@ -91,7 +91,7 @@ class _TaskRepo:
 
         return [t for t in self.docs if all(ok(t.get(k), v) for k, v in (query or {}).items())]
 
-    def create(self, task):
+    def create(self, task, **_kw):  # the real one takes raise_on_duplicate
         self.docs.append(dict(task))
         return dict(task)
 
