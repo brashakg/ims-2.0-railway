@@ -487,3 +487,30 @@ describe('a refused sign-in signs no one out (owner 2026-11-07)', () => {
     expect(location.href).toBe('');
   });
 });
+
+// R10 (audit): on the sign-in screen (nothing stored) a wrong password came
+// back 401 and the client's final 401 handler sent the browser to /login --
+// a reload that blanked both fields and dropped the explanation.
+describe('a wrong password on the sign-in screen keeps the form and the reason (R10)', () => {
+  it('nothing stored: no navigation, and the server reason reaches the form', async () => {
+    mem.clear();
+    const adapter = vi.fn((config: InternalAxiosRequestConfig) =>
+      Promise.reject(Object.assign(failWith(401, config), {
+        response: { status: 401, data: { detail: 'Invalid username or password' }, headers: {}, config, statusText: '' },
+      })));
+    const err = await api.post('/auth/login', { username: 'x', password: 'bad' }, { adapter }).catch((e) => e);
+    expect(err.message).toBe('Invalid username or password');
+    expect(err.status).toBe(401);
+    expect(adapter).toHaveBeenCalledTimes(1);
+    expect(location.href).toBe('');
+    expect(mem.size).toBe(0);
+  });
+
+  it('positive control: an expired session elsewhere still signs out to /login', async () => {
+    vi.spyOn(axios, 'post').mockRejectedValueOnce(new Error('refresh refused'));
+    const adapter = answering(401);
+    await expect(api.get('/tasks', { adapter })).rejects.toBeTruthy();
+    expect(location.href).toBe('/login');
+    expect(mem.get('ims_token')).toBeUndefined();
+  });
+});

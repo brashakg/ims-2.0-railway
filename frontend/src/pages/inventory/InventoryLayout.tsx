@@ -20,28 +20,18 @@ import { Outlet, useLocation, useNavigate, useOutletContext } from 'react-router
 import {
   AlertTriangle,
   ArrowRightLeft,
-  BarChart3,
-  Boxes,
-  Clock,
-  Eye,
   Globe,
-  Hash,
-  LayoutGrid,
   Loader2,
-  Package,
   Plus,
   RefreshCw,
-  ShoppingCart,
-  TrendingDown,
-  Barcode,
 } from 'lucide-react';
-import type { LucideIcon } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { StockTransferModal } from '../../components/inventory/StockTransferModal';
 // ONLINE (stockless / pooled-fulfilment) store detection - single testable
 // source of truth (see storeMode.ts + its unit test).
 import { isOnlineStore, isOnlineStoreId } from './storeMode';
 import { canManageInventory } from './inventoryRoles';
+import { groupLanding, visibleInventoryGroups, type InventoryNavEntry } from './inventoryNav';
 import { isOnlineRow, isOnlineUnknown } from './sharedItem';
 import {
   CATEGORIES,
@@ -73,12 +63,7 @@ export function useInventoryContext() {
   return useOutletContext<InventoryContext>();
 }
 
-interface NavEntry {
-  path: string;
-  label: string;
-  icon: LucideIcon;
-  /** Manager-ladder only (audit + power grid live behind tighter routes). */
-  manageOnly?: boolean;
+interface NavEntry extends InventoryNavEntry {
   count?: number;
 }
 
@@ -183,60 +168,16 @@ export function InventoryLayout() {
     });
   }, []);
 
-  // Two-level nav, verbatim the old 5 groups. The two manage-gated entries
-  // navigate to the standalone routes that already implement those screens.
-  const baseGroups: Array<{ id: string; label: string; icon: LucideIcon; entries: NavEntry[] }> = [
-    {
-      id: 'catalog', label: 'Catalog', icon: Package,
-      entries: [
-        { path: '/inventory/stock', label: 'Stock ledger', icon: Package, count: totalSKUs },
-        { path: '/inventory/display-layout', label: 'Display layout', icon: LayoutGrid, count: fixtureCount || undefined },
-      ],
-    },
-    {
-      id: 'health', label: 'Stock health', icon: AlertTriangle,
-      entries: [
-        { path: '/inventory/non-moving', label: 'Non-moving', icon: TrendingDown },
-        { path: '/inventory/aging', label: 'Stock aging', icon: Clock },
-        { path: '/inventory/alerts', label: 'Alerts', icon: AlertTriangle },
-      ],
-    },
-    {
-      id: 'ops', label: 'Operations', icon: ShoppingCart,
-      entries: [
-        // S5: THE Reorder list (Low stock, Replenishment and Buy Desk merged).
-        { path: '/inventory/reorders', label: 'Reorder', icon: ShoppingCart, manageOnly: true },
-        { path: '/inventory/transfers', label: 'Transfers', icon: ArrowRightLeft },
-        { path: '/inventory/movements', label: 'Movements', icon: Eye },
-        { path: '/inventory/rebalance', label: 'Rebalance', icon: ArrowRightLeft },
-        { path: '/inventory/audit', label: 'Stock count', icon: Barcode, manageOnly: true },
-        { path: '/inventory/quarantine', label: 'Quarantine', icon: AlertTriangle, count: quarantineUnlabeled || undefined },
-        // Moved off the Stock & supply menu (owner, 2026-11-01).
-        { path: '/inventory/opening-stock', label: 'Opening stock', icon: Package, manageOnly: true },
-        { path: '/inventory/online-sync', label: 'Online stock', icon: Boxes, manageOnly: true },
-      ],
-    },
-    {
-      id: 'optical', label: 'Optical', icon: Eye,
-      entries: [
-        { path: '/inventory/serial-numbers', label: 'Serial numbers', icon: Hash },
-        { path: '/inventory/contact-lens', label: 'Contact lens', icon: Eye },
-        { path: '/inventory/power-grid', label: 'Lens power grid', icon: BarChart3, manageOnly: true },
-      ],
-    },
-    {
-      id: 'insights', label: 'Insights', icon: BarChart3,
-      entries: [
-        { path: '/inventory/sell-through', label: 'Sell-through', icon: TrendingDown },
-        { path: '/inventory/overstock', label: 'Overstock', icon: Boxes },
-        { path: '/inventory/brand-insights', label: 'Brands', icon: BarChart3 },
-        { path: '/inventory/collection-insights', label: 'Collections', icon: Boxes },
-      ],
-    },
-  ];
-  const groups = baseGroups.map((g) => ({
+  // Two-level nav: ONE list (inventoryNav.ts), shared with global search.
+  // Only the counts are this layout's own.
+  const counts: Record<string, number | undefined> = {
+    '/inventory/stock': totalSKUs,
+    '/inventory/display-layout': fixtureCount || undefined,
+    '/inventory/quarantine': quarantineUnlabeled || undefined,
+  };
+  const groups = visibleInventoryGroups(canManage).map((g) => ({
     ...g,
-    entries: g.entries.filter((e) => !e.manageOnly || canManage),
+    entries: g.entries.map((e): NavEntry => ({ ...e, count: counts[e.path] })),
   }));
 
   const activeGroup =
@@ -438,7 +379,8 @@ export function InventoryLayout() {
               key={g.id}
               onClick={() => {
                 if (g.id === activeGroup.id) return;
-                navigate(g.entries[0].path);
+                // R37: never a standalone page, which has no tabs to come back by.
+                navigate(groupLanding(g));
               }}
               className={activeGroup.id === g.id ? 'on' : ''}
             >

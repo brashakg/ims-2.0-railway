@@ -972,6 +972,19 @@
   scrollbar-width: none;
 }
 .top-nav-menu::-webkit-scrollbar { display: none; }
+/* R38: the bar hides its scrollbar, so when groups sit past either edge an
+   arrow says so and scrolls to them (TopNav measures; phones never show it). */
+.top-nav-scroll {
+  flex-shrink: 0; align-self: center;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 30px; height: 36px; padding: 0;
+  border: 0; border-radius: 8px;
+  background: #222220; color: #fff; cursor: pointer;
+}
+.top-nav-scroll:hover { background: #2e2e2b; }
+.top-nav-scroll:focus-visible { outline: 2px solid var(--bv); outline-offset: -2px; }
+.top-nav-scroll .top-nav-caret { opacity: 1; transform: rotate(90deg); }
+.top-nav-scroll.after .top-nav-caret { transform: rotate(-90deg); }
 .top-nav-li { display: flex; align-items: stretch; position: relative; }
 
 .top-nav-direct,
@@ -3738,7 +3751,10 @@ main input[type="date"] { background-color: #fff; border-color: #d1d5db; color: 
    status badges, count pills, the store-pill, or real CTAs.
    Usage: <button className="ims-chip">…  selected → add "ims-chip--on".
    Components must carry ONLY these classes plus layout utilities (margins,
-   flex-position) — no competing bg-*/text-*/border-* Tailwind utilities.
+   flex-position) — no competing Tailwind background, text-colour or border
+   utilities. (UI-02: never write a glob that ends in a star followed by a
+   slash in a comment here: it closes the comment early, the rest of the
+   sentence becomes this rule's selector, and the browser drops the rule.)
    NO dark fills here on purpose: the light-theme bridge bleaches dark
    backgrounds, which is exactly how the old white-on-white pills happened.
    ============================================================================ */
