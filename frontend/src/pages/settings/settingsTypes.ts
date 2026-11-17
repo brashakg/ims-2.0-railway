@@ -193,6 +193,9 @@ export const CATEGORY_DEFINITIONS: Category[] = [
   { code: 'FR', name: 'Frame', shortName: 'Spectacles', attributes: ['brandName', 'subbrand', 'modelNo', 'colourCode', 'lensSize', 'bridgeWidth', 'templeLength'], isActive: true },
   { code: 'SG', name: 'Sunglasses', shortName: 'Sunglasses', attributes: ['brandName', 'subbrand', 'modelNo', 'colourCode', 'lensSize', 'bridgeWidth', 'templeLength'], isActive: true },
   { code: 'CL', name: 'Contact Lens', shortName: 'Contact Lens', attributes: ['brandName', 'subbrand', 'modelNo', 'colourName', 'power', 'pack', 'expiryDate'], isActive: true },
+  // L1-F43: colour contact lenses are their own category (code CCL, canonical
+  // COLORED_CONTACT_LENS); without this box a brand could never cover them.
+  { code: 'CCL', name: 'Colour Contact Lens', shortName: 'Colour Contact Lens', attributes: ['brandName', 'subbrand', 'modelNo', 'colourName', 'power', 'pack', 'expiryDate'], isActive: true },
   { code: 'LS', name: 'Optical Lens', shortName: 'Lens', attributes: ['brandName', 'subbrand', 'index', 'coating', 'addOn1', 'addOn2', 'addOn3', 'lensCategory'], isActive: true },
   { code: 'RG', name: 'Reading Glasses', shortName: 'Readers', attributes: ['brandName', 'subbrand', 'modelNo', 'colourCode', 'lensSize', 'bridgeWidth', 'templeLength', 'power'], isActive: true },
   { code: 'WT', name: 'Wrist Watch', shortName: 'Watch', attributes: ['brandName', 'subbrand', 'modelNo', 'colourCode', 'dialColour', 'beltColour', 'dialSize', 'beltSize', 'watchCategory'], isActive: true },
