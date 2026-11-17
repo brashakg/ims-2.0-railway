@@ -19,6 +19,7 @@ from ._shared import (
     _cost_by_product,
     _get_db,
     _payroll_by_store,
+    _report_db,
     _store_maps,
     _store_name_map,
     compute_cogs_with_flag,
@@ -61,7 +62,7 @@ async def get_pnl_by_store(
     """
     if not is_salary_admin(current_user):
         raise HTTPException(status_code=403, detail=SALARY_RESTRICTED_MESSAGE)
-    db = _get_db()
+    db = _report_db(_get_db())  # no handle: 503, as on GET /pnl
     # With a company filter the shop list decides which shops are in the
     # table, so it is read strictly: unreadable must not read as "this company
     # has no shop" (an empty table) -- the request fails instead.
@@ -170,7 +171,7 @@ async def get_pnl_by_category(
     and a login with no shop reads none (resolve_store_scope); only an admin,
     who reads every shop, can narrow by entity_id."""
     store_id = resolve_store_scope(store_id, current_user)
-    db = _get_db()
+    db = _report_db(_get_db())
     # Exclude DRAFT/CANCELLED; compare the date range as datetimes
     # (created_at is a BSON datetime, so a string bound matched nothing).
     match: dict = {**real_sale_match(db)}

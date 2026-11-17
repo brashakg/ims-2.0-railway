@@ -293,6 +293,25 @@ PAYROLL_UNREADABLE = (
 )
 
 
+# What a reader of the revenue or profit-and-loss reports is told when there
+# is no database handle at all (a failed connect leaves ``get_db().db`` None).
+RECORDS_UNREACHABLE = (
+    "The records could not be reached, so this report was not worked out. "
+    "Nothing was changed. Try again."
+)
+
+
+def _report_db(db):
+    """The handle a revenue / P&L report reads from, or 503 when there is
+    none. GET /finance/pnl used to answer 200 with every figure 0 here, before
+    the payroll read below was reached: the R4-A false zero by another door.
+    Takes the handle (not ``_get_db()`` itself) so each route module keeps
+    its own patchable ``_get_db``."""
+    if db is None:
+        raise HTTPException(status_code=503, detail=RECORDS_UNREACHABLE)
+    return db
+
+
 def _posted_payroll_costs(db, from_date, to_date, store_id=None) -> list:
     """(store_id, cost-to-company) of every POSTED payroll row in the months
     overlapping the range. The ONE payroll read behind the P&L.

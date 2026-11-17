@@ -1172,6 +1172,50 @@ def test_r4a_unreadable_posted_payroll_answers_503_on_both_pnl_routes(rig, monke
     healthy()  # the identical request once the read works again
 
 
+def test_r4a_no_database_handle_answers_503_never_an_all_zero_pnl(rig, monkeypatch):
+    """A failed Mongo connect leaves ``get_db().db`` as None while a signed
+    token still authenticates. GET /finance/pnl then answered 200 with
+    revenue 0 and net_profit 0 before the payroll read was ever reached
+    (reproduced on the real app: C:/ims-wt/evidence-1410-r6/nodb-before.json),
+    the revenue summary answered 200 total_revenue 0, and the by-store and
+    by-category tables answered a bare 500. All four now say unavailable."""
+    from api.routers.finance import pnl, pnl_breakdown
+
+    _finance_on(rig, monkeypatch)
+    assert rig.run().status_code == 200 and rig.approve().status_code == 200
+    stored, cost = _saved_figures(rig), _posted_cost(rig)
+    assert cost > 0
+    by_category = f"/api/v1/finance/pnl/by-category?{RANGE}"
+    revenue = "/api/v1/finance/revenue?period=month"
+    admin = rig.client()
+
+    def healthy():
+        assert admin.get(PNL).json()["net_profit"] == -cost
+        assert admin.get(BY_STORE).json()["total_net"] == -cost
+        assert admin.get(by_category).status_code == 200
+        assert admin.get(revenue).status_code == 200
+
+    healthy()
+    with monkeypatch.context() as m:
+        m.setattr(pnl, "_get_db", lambda: None)
+        m.setattr(pnl_breakdown, "_get_db", lambda: None)
+        refused = {"detail": finance_shared.RECORDS_UNREACHABLE}
+        for user in (ADMIN, MANAGER, ACCOUNTANT):
+            c = rig.client(user)
+            for path in (PNL, PNL_ALL, by_category, revenue):
+                reply = c.get(path)
+                # No 200 and no figure of any kind, whoever asks.
+                assert reply.status_code == 503, (user["roles"], path, reply.status_code, reply.text)
+                assert reply.json() == refused
+        assert admin.get(BY_STORE).status_code == 503
+        assert admin.get(BY_STORE).json() == refused
+        # Salary stays ADMIN / SUPERADMIN only: the table is refused first.
+        for user in (MANAGER, ACCOUNTANT):
+            assert rig.client(user).get(BY_STORE).status_code == 403
+    assert _saved_figures(rig) == stored  # nothing stored moved
+    healthy()  # the identical request once the handle is back
+
+
 @pytest.mark.parametrize("user", [MANAGER, ACCOUNTANT], ids=["store-manager", "accountant"])
 def test_r4a_a_reader_who_is_not_shown_payroll_never_reads_it(rig, monkeypatch, user):
     """Salary stays ADMIN/SUPERADMIN only. The P&L of a manager or an

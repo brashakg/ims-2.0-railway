@@ -28,6 +28,7 @@ from ._shared import (
     _get_db,
     _je_cal_day,
     _payroll_cost,
+    _report_db,
     _ORDER_REVENUE_PROJECTION,
     compute_cogs_with_flag,
     router,
@@ -42,16 +43,8 @@ async def get_revenue(
     current_user: dict = Depends(get_current_user),
 ):
     store_id = resolve_store_scope(store_id, current_user)
-    db = _get_db()
-    if db is None:
-        return {
-            "total_revenue": 0,
-            "total_orders": 0,
-            "total_tax": 0,
-            "total_discount": 0,
-            "prev_revenue": 0,
-            "change_pct": None,
-        }
+    # No database handle answers 503 (_report_db), never a revenue of zero.
+    db = _report_db(_get_db())
     today = ist_today()
 
     if period == "day":
@@ -218,17 +211,9 @@ async def get_pnl(
     current_user: dict = Depends(get_current_user),
 ):
     store_id = resolve_store_scope(store_id, current_user)
-    db = _get_db()
-    if db is None:
-        return {
-            "revenue": 0,
-            "tax": 0,
-            "expenses": 0,
-            "gross_profit": 0,
-            "net_profit": 0,
-            "gross_margin_pct": 0,
-            "net_margin_pct": 0,
-        }
+    # No database handle answers 503 (_report_db): never the all-zero P&L
+    # this used to return before the payroll read was reached.
+    db = _report_db(_get_db())
     # Exclude DRAFT/CANCELLED (never-booked / reversed) and compare the
     # date range as datetimes (created_at is a BSON datetime, so a 'YYYY-MM-DD'
     # string bound matched nothing -> the whole date-ranged P&L read zero).
