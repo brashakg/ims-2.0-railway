@@ -42,6 +42,12 @@ Approving, rejecting and spending by id (/approve, /reject, /consume) follow
 the rule GET applies (_request_in_reach): its maker or consumer, else a caller
 whose shops it is in. Anyone else gets exactly what a missing id gets (404),
 checked before any role, tier or PIN gate could tell the two apart.
+
+/approve and /reject read the request strictly (_decision_engine, _strictly):
+a request that could not be read at the database is 503 "try again", never
+the 404 a missing request gets, and never a decision made without the reach
+check and the journal's note rule (the type of a request that cannot be read
+is not known, so this holds for every action type).
 """
 
 from __future__ import annotations
@@ -82,6 +88,25 @@ def _get_db():
 
 def _engine() -> ApprovalEngine:
     return ApprovalEngine(db=_get_db())
+
+
+def _decision_engine() -> ApprovalEngine:
+    """The engine as /approve and /reject use it: its request reads raise
+    when the request could not be read (the engine's opt-in strict mode)."""
+    return ApprovalEngine(db=_get_db(), strict=True)
+
+
+def _strictly(fn, *args, **kwargs):
+    """One call into the decision engine: a database failure inside it is 503
+    "try again" -- not an unhandled error, and not the engine's 404 for a
+    request it could not read."""
+    try:
+        return fn(*args, **kwargs)
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[APPROVALS] the request could not be read or decided: %s", e)
+        raise HTTPException(status_code=503, detail={"error": "approval_unreadable"}) from e
 
 
 def _roles(user: Dict[str, Any]) -> List[str]:
@@ -293,8 +318,9 @@ def _in_reach_or_missing(
     applies, _request_in_reach) answers exactly what a missing id answers --
     the engine's 404 not_found -- before the engine's tier, maker-checker,
     store or PIN gate can tell another shop's request from no request (F63).
-    Returns the request (None when there is none)."""
-    doc = eng.get(request_id)
+    Returns the request (None when there is none); 503 when it could not be
+    read (``eng`` is the strict _decision_engine)."""
+    doc = _strictly(eng.get, request_id)
     if doc is not None and not _request_in_reach(eng, doc, user):
         _decode({"ok": False, "http": 404, "error": "not_found"}, success_keys=())
     return doc
@@ -357,9 +383,10 @@ async def approve_request(
     mint are a single atomic op inside the engine. An 'rtv' request is the
     accounts roles' at any tier (R1); a manager gets 404 for one, and so does
     anyone for another shop's request (_in_reach_or_missing)."""
-    eng = _engine()
+    eng = _decision_engine()
     doc = _in_reach_or_missing(eng, request_id, current_user)
-    res = eng.approve(
+    res = _strictly(
+        eng.approve,
         request_id,
         approver_user_id=current_user.get("user_id"),
         approver_roles=_roles(current_user),
@@ -380,14 +407,15 @@ async def reject_request(
     """Reject a request with the approver's PIN. Same routing and the same
     shop rule as approve. A rejection that rejects a journal needs the
     journal's checker note (400 note_required without one)."""
-    eng = _engine()
+    eng = _decision_engine()
     doc = _in_reach_or_missing(eng, request_id, current_user)
     # Rejecting a journal's request rejects the journal: the journal screen's
     # checker-note rule (je_service) is held before anything is decided.
     refusal = je_service.inbox_reject_refusal(_get_db(), doc, _roles(current_user), body.reason)
     if refusal:
         _decode(refusal, success_keys=())
-    res = eng.reject(
+    res = _strictly(
+        eng.reject,
         request_id,
         approver_user_id=current_user.get("user_id"),
         approver_roles=_roles(current_user),
