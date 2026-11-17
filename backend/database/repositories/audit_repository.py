@@ -40,9 +40,9 @@ class AuditRepository(BaseRepository):
         products/etc.) is chained automatically with no call-site changes.
 
         We replicate BaseRepository's id/timestamp/_id stamping, then hand the
-        finished doc to append_audit_entry which claims the next seq + prev_hash
-        from the atomic `audit_chain_head` and computes entry_hash before the
-        actual insert. Fail-soft: any chain/insert error returns None (or an
+        finished doc to append_audit_entry which chains it from the last row
+        (seq + prev_hash + entry_hash) and claims that seq by the insert itself. Fail-soft: any chain/insert error
+        returns None (or an
         unchained row) and never raises, so an audit failure can't undo the
         business write that triggered it.
         """

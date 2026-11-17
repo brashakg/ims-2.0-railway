@@ -58,6 +58,13 @@ export interface JournalEntry {
   reversal_of?: string | null;
   reversed_by?: string | null;
   approval_request_id?: string | null;
+  // APPROVED, but its approval lapsed or was spent elsewhere: a checker
+  // (not the maker) must approve it again before it can be posted (D54).
+  needs_reapproval?: boolean;
+  // REVERSED, but the reversal voucher it names was never written (the write
+  // failed, or the server stopped between the two writes): pressing Reverse
+  // again writes that voucher, once.
+  reversal_unfinished?: boolean;
   created_at?: string | null;
   submitted_at?: string | null;
   checked_at?: string | null;

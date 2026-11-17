@@ -531,8 +531,9 @@ def pnl_by_category(orders, cost_by_product: dict, variance_by_category: Optiona
     return sorted(rows, key=lambda x: -x["revenue"])
 
 
-def is_period_locked(db, month, year) -> bool:
-    """True if the accounting period has been locked (closed)."""
+def is_period_locked(db, month, year, *, strict: bool = False) -> bool:
+    """True if the accounting period has been locked (closed). ``strict``: a
+    failed read raises instead of reading as "not locked"."""
     try:
         return (
             db.get_collection("period_locks").find_one(
@@ -541,14 +542,20 @@ def is_period_locked(db, month, year) -> bool:
             is not None
         )
     except Exception:
+        if strict:
+            raise
         return False
 
 
-def check_period_locked(db, posting_date) -> None:
+def check_period_locked(db, posting_date, *, strict: bool = False) -> None:
     """Raise HTTPException(423) if the posting_date's month/year is locked.
 
     Fail-soft: if db is None or period_locks lookup fails, does not raise.
     Used by orders/returns/vendor-bills/payments to guard financial-period closure.
+
+    ``strict`` (payroll run / approve / mark paid): a lock that cannot be read
+    refuses with 503 instead. Those writes can wait for a retry, and letting
+    them through saved and approved payroll inside a locked month.
     """
     if db is None:
         return
@@ -558,15 +565,22 @@ def check_period_locked(db, posting_date) -> None:
         if isinstance(posting_date, str):
             posting_date = date.fromisoformat(posting_date)
         month, year = posting_date.month, posting_date.year
-        if is_period_locked(db, month, year):
+        if is_period_locked(db, month, year, strict=strict):
             raise HTTPException(
                 status_code=423,
                 detail=f"Accounting period {month:02d}/{year} is locked; cannot post to a closed month.",
             )
     except HTTPException:
         raise
-    except Exception:
-        pass  # fail-soft: period check errors do not block posting
+    except Exception as exc:
+        if strict:
+            logger.error("Period lock read failed: %s", exc)
+            raise HTTPException(
+                status_code=503,
+                detail="Whether this accounting period is locked could not be "
+                "read, so nothing was saved. Try again.",
+            ) from exc
+        # fail-soft: period check errors do not block posting
 
 
 def _payroll_by_store(db, from_date, to_date) -> dict:

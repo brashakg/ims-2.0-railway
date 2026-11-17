@@ -60,6 +60,12 @@ function failureMessage(
       return 'Request not found.';
     case 503:
       return 'Approval service is unavailable. Try again shortly.';
+    case 400:
+      // Rejecting a journal's request rejects the journal, which needs the
+      // checker note the journal screen asks for.
+      if (error === 'note_required')
+        return 'A rejection note of at least 10 characters is required to reject a journal entry.';
+      return 'Could not complete the action. Please try again.';
     default:
       return 'Could not complete the action. Please try again.';
   }
@@ -101,11 +107,12 @@ export function PINApproveModal({ request, mode, onClose, onDone }: Props) {
       toast.error(
         failureMessage(res.status, res.error, res.remaining, res.retry_after_min),
       );
-      // A wrong PIN leaves the modal open so the approver can retry; everything
-      // else (locked / expired / already-actioned) is terminal — close it.
+      // A wrong PIN or a missing rejection note leaves the modal open so the
+      // approver can retry; everything else (locked / expired /
+      // already-actioned) is terminal — close it.
       if (res.status === 403 && res.error === 'wrong_pin') {
         setPin('');
-      } else {
+      } else if (res.error !== 'note_required') {
         onClose();
         if (res.status === 409 || res.status === 410) onDone();
       }
@@ -190,7 +197,7 @@ export function PINApproveModal({ request, mode, onClose, onDone }: Props) {
                 htmlFor="reject-reason"
                 className="block text-xs font-medium text-gray-700 mb-1"
               >
-                Reason (optional)
+                {request.action_type === 'journal_entry' ? 'Reason' : 'Reason (optional)'}
               </label>
               <textarea
                 id="reject-reason"
