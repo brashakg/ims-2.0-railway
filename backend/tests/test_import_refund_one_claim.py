@@ -1042,6 +1042,193 @@ def test_an_old_worker_never_takes_the_imports_unfinished_claim_over(db, monkeyp
 # --- native Mongo, two threads -------------------------------------------------
 
 
+# --- decision D125: a live door never books without its claim -------------------
+
+
+def claim_insert_fails(monkeypatch, db, refund_id, lands=False, read_back_fails=False):
+    """A live door's claim insert for this refund fails ONCE with an error that
+    is not a duplicate key (a dropped connection). `lands`: the write is
+    stored and only its answer is lost. `read_back_fails`: the door's read of
+    the stored claim right after fails too. Works on mongomock and on native
+    pymongo. Returns the return ids of the inserts it failed."""
+    cls = type(db.returns)
+    real_insert, real_find, fired, armed = cls.insert_one, cls.find_one, [], []
+
+    def insert_one(self, doc, *a, **k):
+        if (self.name == "returns" and doc.get("shopify_refund_id") == refund_id
+                and doc.get("source") == "shopify" and not fired):
+            fired.append(doc.get("return_id"))
+            if lands:
+                real_insert(self, doc, *a, **k)
+            if read_back_fails:
+                armed.append(1)
+            raise ConnectionError("the claim insert was not acknowledged")
+        return real_insert(self, doc, *a, **k)
+
+    def find_one(self, flt=None, *a, **k):
+        if self.name == "returns" and flt == {"shopify_refund_id": refund_id} and armed:
+            armed.clear()
+            raise ConnectionError("the read-back failed")
+        return real_find(self, flt, *a, **k)
+
+    monkeypatch.setattr(cls, "insert_one", insert_one)
+    monkeypatch.setattr(cls, "find_one", find_one)
+    return fired
+
+
+def confirm_whose_claim_insert_fails_on_a_refund_the_import_holds(db, monkeypatch, tag="CI"):
+    """Decision D125, the doubled reversal. The webhook queued a review row in
+    the import's window and the import was killed after its claim. At the
+    accountant's Confirm the claim insert fails with a dropped connection
+    (not the unique index). The door logged "claim insert failed" and booked a
+    credit note under a fresh return id; the next import run then booked its
+    own: two ledger rows, the tax reversed twice in GSTR-3B and GSTR-1. The
+    door reads the stored claim instead: it is the import's, so nothing is
+    booked and the screen says so."""
+    from fastapi import HTTPException
+
+    monkeypatch.delenv("SHOPIFY_REFUND_AUTO", raising=False)
+    s = seed(db, tag)
+    shop = gst_shop(db, s, f"S-{tag}")
+    live = after_the_imports_booked_read(monkeypatch, s.refund_id, lambda: live_webhook(db, s))
+    killed_import(monkeypatch, db, s)
+    assert live[0]["status"] == "queued" and claims(db, s) == [(f"RET-HIST-{s.refund_id}", "PENDING", False)]
+    before = db.returns.find_one({"shopify_refund_id": s.refund_id})
+    fired = claim_insert_fails(monkeypatch, db, s.refund_id)
+    with pytest.raises(HTTPException) as refused:
+        confirm_at_the_screen(db, s)
+    assert fired and refused.value.status_code == 422 and "order-history import" in refused.value.detail
+    assert not books(db, s).rows and db.returns.find_one({"shopify_refund_id": s.refund_id}) == before
+    assert db.returns.count_documents({"order_id": s.oid}) == 1
+    assert import_run(db, s)["credit_notes"] == 1
+    assert confirm_at_the_screen(db, s)["status"] == "POSTED"
+    b = books(db, s)
+    assert [r["_id"] for r in b.rows] == [f"SHOPIFY-HIST-REFUND-{s.refund_id}"] and (b.gross, b.tax) == (s.gross, s.tax)
+    assert len(b.docs) == 1 and gst_filed(db, shop) == ((47.62, 952.38), [47.62])
+    return s
+
+
+def webhook_whose_claim_insert_fails(db, monkeypatch, tag="WI"):
+    """Decision D125 at the AUTO webhook, no other holder. (1) The insert did
+    not land: an error the inbox retries, nothing booked, nothing stored; the
+    redelivery books the one note. (2) The insert landed and only its answer
+    was lost: the stored claim is this run's own, so the post goes on under
+    it and books once; the redelivery is the duplicate."""
+    monkeypatch.setenv("SHOPIFY_REFUND_AUTO", "on")
+    s = seed(db, f"{tag}1", never_shipped=True)
+    fired = claim_insert_fails(monkeypatch, db, s.refund_id)
+    hook = live_webhook(db, s)
+    assert fired and (hook["status"], hook["reason"]) == ("error", "refund_not_claimed"), hook
+    assert "could not be saved" in hook["error"] and "claim_unknown" not in hook and not inbox_marks_it_done(hook)
+    b = books(db, s)
+    assert (len(b.rows), len(b.docs), b.returned) == (0, 0, 0.0)
+    assert db.shopify_refund_review.count_documents({"shopify_refund_id": s.refund_id}) == 0
+    assert live_webhook(db, s)["status"] == "credited" and live_webhook(db, s)["status"] == "duplicate"
+    b = books(db, s)
+    assert len(b.rows) == 1 and (b.gross, b.tax) == (s.gross, s.tax) and len(b.docs) == 1
+
+    s2 = seed(db, f"{tag}2", never_shipped=True)
+    fired = claim_insert_fails(monkeypatch, db, s2.refund_id, lands=True)
+    hook = live_webhook(db, s2)
+    assert fired and hook["status"] == "credited", hook
+    b = books(db, s2)
+    assert len(b.rows) == 1 and (b.gross, b.tax) == (s2.gross, s2.tax)
+    assert [(d["return_id"], d["status"], d["credit_note_issued"]) for d in b.docs] == [(fired[0], "COMPLETED", True)]
+    assert b.rows[0]["ref"] == fired[0]
+    assert live_webhook(db, s2)["status"] == "duplicate" and len(books(db, s2).rows) == 1
+    return s, s2
+
+
+def webhook_that_cannot_tell_whether_its_claim_landed(db, monkeypatch, tag="WU"):
+    """Decision D125, both faults: the claim landed, its answer was lost and
+    the read-back failed. Nothing is booked and the answer says the claim may
+    exist. The stored claim is an unfinished one like any dead run's: a
+    redelivery while it is fresh is retried, and once it is stale the
+    redelivery takes it over and books the one note."""
+    from api.services import shopify_refund
+
+    monkeypatch.setenv("SHOPIFY_REFUND_AUTO", "on")
+    s = seed(db, tag, never_shipped=True)
+    fired = claim_insert_fails(monkeypatch, db, s.refund_id, lands=True, read_back_fails=True)
+    hook = live_webhook(db, s)
+    assert fired and (hook["status"], hook["reason"], hook.get("claim_unknown")) == (
+        "error", "refund_not_claimed", True), hook
+    assert "could not tell" in hook["error"] and not inbox_marks_it_done(hook)
+    b = books(db, s)
+    assert not b.rows and [(d["return_id"], d["status"]) for d in b.docs] == [(fired[0], "PENDING")]
+    fresh = live_webhook(db, s)
+    assert fresh["status"] == "error" and not inbox_marks_it_done(fresh) and not books(db, s).rows
+    db.returns.update_one({"shopify_refund_id": s.refund_id}, {"$set": {"created_at": "2026-11-08T05:00:00+00:00"}})
+    assert shopify_refund._unfinished_claim(db, s.refund_id) is not None
+    assert live_webhook(db, s)["status"] == "credited" and live_webhook(db, s)["status"] == "duplicate"
+    b = books(db, s)
+    assert len(b.rows) == 1 and (b.gross, b.tax) == (s.gross, s.tax) and b.rows[0]["ref"] == fired[0]
+    assert [(d["return_id"], d["status"], d["credit_note_issued"]) for d in b.docs] == [(fired[0], "COMPLETED", True)]
+    return s
+
+
+def second_delivery_whose_claim_insert_fails(db, monkeypatch, tag="WD"):
+    """Decision D125, two live deliveries of one refund. The second passed its
+    "is it booked" read before the first claimed; the first then booked the
+    note; the second's own claim insert fails with a dropped connection. It
+    booked a second note under a fresh return id. It reads the stored claim
+    -- the first delivery's, credited -- and answers duplicate."""
+    from api.services import shopify_refund
+
+    monkeypatch.setenv("SHOPIFY_REFUND_AUTO", "on")
+    s = seed(db, tag, never_shipped=True)
+    real, box = shopify_refund._refund_already_processed, {}
+
+    def read(d, rid, strict=False):  # the second delivery's "is it booked" read
+        answer = real(d, rid, strict=strict)
+        if rid == s.refund_id and not box:
+            box["x"] = 1
+            box["first"] = live_webhook(db, s)
+            box["fired"] = claim_insert_fails(monkeypatch, db, s.refund_id)
+        return answer
+
+    monkeypatch.setattr(shopify_refund, "_refund_already_processed", read)
+    second = live_webhook(db, s)
+    monkeypatch.setattr(shopify_refund, "_refund_already_processed", real)
+    assert box["first"]["status"] == "credited" and box["fired"] and second["status"] == "duplicate", (box, second)
+    b = books(db, s)
+    assert len(b.rows) == 1 and (b.gross, b.tax) == (s.gross, s.tax) and len(b.docs) == 1
+    return s
+
+
+def test_a_confirm_whose_claim_insert_fails_books_nothing_for_a_refund_the_import_holds(db, monkeypatch):
+    confirm_whose_claim_insert_fails_on_a_refund_the_import_holds(db, monkeypatch)
+
+
+def test_a_webhook_whose_claim_insert_fails_books_nothing_or_goes_on_under_its_landed_claim(db, monkeypatch):
+    webhook_whose_claim_insert_fails(db, monkeypatch)
+
+
+def test_a_webhook_that_cannot_tell_whether_its_claim_landed_books_nothing_until_it_is_stale(db, monkeypatch):
+    webhook_that_cannot_tell_whether_its_claim_landed(db, monkeypatch)
+
+
+def test_a_second_delivery_whose_claim_insert_fails_is_the_duplicate(db, monkeypatch):
+    second_delivery_whose_claim_insert_fails(db, monkeypatch)
+
+
+def test_a_door_with_no_returns_collection_books_nothing():
+    """Decision D125: no collection to claim in is no claim."""
+    from api.services import shopify_refund
+
+    class NoReturns:
+        def get_collection(self, name):
+            if name == "returns":
+                raise ConnectionError("no returns collection")
+            return mongomock.MongoClient()["x"][name]
+
+    out = shopify_refund._post_locked(
+        NoReturns(), refund_id="RF-NC", order={"order_id": "OC-NC", "customer_id": "CU-NC", "store_id": "S1"},
+        return_lines=[], credit_note={"gross_refund": 1000.0, "gst_breakup": {"taxable": 952.38, "tax": 47.62}},
+        restock_store=None, settled_externally=True, restock_unverified=False, allowance=(0.0, "", None, False))
+    assert (out["status"], out["reason"], out["credit_note_issued"]) == ("error", "refund_not_claimed", False), out
+
+
 def race(db, s, live, timeout=20):
     """The import and a live door on one refund, released together."""
     start, out = threading.Barrier(2, timeout=timeout), {}
@@ -1159,3 +1346,10 @@ def test_native_a_failed_read_of_the_claim_is_an_error_never_duplicate(native_db
 
 def test_native_an_old_worker_never_takes_the_imports_unfinished_claim_over(native_db, monkeypatch):
     an_old_worker_never_takes_the_imports_claim_over(native_db, monkeypatch, tag="NV")
+
+
+def test_native_a_live_door_never_books_without_its_claim(native_db, monkeypatch):
+    confirm_whose_claim_insert_fails_on_a_refund_the_import_holds(native_db, monkeypatch, tag="NCI")
+    webhook_whose_claim_insert_fails(native_db, monkeypatch, tag="NWI")
+    webhook_that_cannot_tell_whether_its_claim_landed(native_db, monkeypatch, tag="NWU")
+    second_delivery_whose_claim_insert_fails(native_db, monkeypatch, tag="NWD")
