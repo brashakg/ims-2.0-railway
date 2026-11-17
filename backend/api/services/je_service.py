@@ -518,7 +518,7 @@ def _stamp(event: Event, status: str) -> Dict[str, Any]:
     owes. The journal's new state and the note land together or not at all,
     so whatever happens after that write -- its reply lost, the process dead
     before the audit insert, the insert refused -- the journal itself says
-    which row is missing, and repair_events writes it (D84)."""
+    which row is missing, and repair_posted_events writes it (D84)."""
     _key, action, actor, reason = event
     return {"action": action, "actor": actor, "status": status, "reason": reason or None}
 
@@ -663,11 +663,11 @@ def _set(db, je_id: str, fields: Dict[str, Any], *, expect_status: Optional[str]
 def _load(db, je_id: str, *, poster_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """A door's read of its journal: the journal as stored (None when there
     is none), after writing every audit row its transitions are still owed
-    (repair_events). So the press that follows a lost reply, or a process
+    (repair_posted_events). So the press that follows a lost reply, or a process
     that died mid-door, writes the missing row once (D84)."""
     je = get_je(db, je_id)
     if je is not None:
-        repair_events(db, [je], poster_id=poster_id, reason="recorded_on_retry")
+        repair_posted_events(db, [je], poster_id=poster_id, reason="recorded_on_retry")
     return je
 
 
@@ -1142,10 +1142,11 @@ def _posted_event_id(je_id: str) -> str:
 _READ_REPAIR_GRACE = timedelta(minutes=2)
 
 
-def repair_events(db, rows: List[Dict[str, Any]], *, poster_id: Optional[str] = None,
-                  reason: str = "recorded_on_read") -> List[Dict[str, Any]]:
+def repair_posted_events(db, rows: List[Dict[str, Any]], *, poster_id: Optional[str] = None,
+                         reason: str = "recorded_on_read") -> List[Dict[str, Any]]:
     """Write, once, every audit row the journals of ``rows`` are owed and do
-    not have (D68/D84): the door answered but its audit insert failed, the
+    not have (D68/D84; it began with je_posted alone, hence the name, and now
+    covers every transition): the door answered but its audit insert failed, the
     process died between the journal write and the audit, or the journal
     write's reply was lost. Run by every door on the journal it reads (_load)
     and by every read of journals (list, detail, Tally export) -- the screen
@@ -1210,8 +1211,8 @@ def repair_events(db, rows: List[Dict[str, Any]], *, poster_id: Optional[str] = 
 def _already_posted(db, je: Dict[str, Any], poster_id: str) -> Dict[str, Any]:
     """A Post that finds the journal POSTED (a retry, a racing poster, or this
     Post's own write whose reply was lost) first writes its missing je_posted
-    event (repair_events), then answers already_posted."""
-    repair_events(db, [je], poster_id=poster_id, reason="recorded_on_retry")
+    event (repair_posted_events), then answers already_posted."""
+    repair_posted_events(db, [je], poster_id=poster_id, reason="recorded_on_retry")
     return {"ok": False, "http": 409, "error": "already_posted"}
 
 
@@ -1315,7 +1316,7 @@ def reverse_je(db, *, je_id: str, actor_id: str, actor_name: Optional[str] = Non
         # unless it is REVERSED and its mirror was never written.
         mirror = get_je(db, rev_id) if rev_id else None
         if mirror is not None:
-            repair_events(db, [mirror], reason="recorded_on_retry")
+            repair_posted_events(db, [mirror], reason="recorded_on_retry")
         if mirror is not None or not rev_id or je.get("status") != STATUS_REVERSED:
             return {"ok": False, "http": 409, "error": "already_reversed"}
         claimed = je

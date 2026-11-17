@@ -1109,7 +1109,7 @@ def test_d68_racing_posts_and_repairs_write_one_event(mongo_db):
     db.get_collection("audit_logs").delete_many({"action": "je_posted"})
     _aged(db, j["je_id"])
     turn = iter(range(6))
-    got = _together(6, lambda: (je_service.repair_events(db, [_je(db, j["je_id"])])
+    got = _together(6, lambda: (je_service.repair_posted_events(db, [_je(db, j["je_id"])])
                                 if next(turn) >= 2 else _post(db, j["je_id"])))
     assert len(got) == 6
     assert len(_posted_rows(db, j["je_id"])) == 1
