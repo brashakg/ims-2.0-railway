@@ -1349,7 +1349,10 @@ def blind_submit(
                     "idempotency_key": idempotency_key,
                     # Stored WITH the count, so the check-by-hand task cannot
                     # be lost between this write and the lines below it.
+                    # The row the OPEN still owes is carried forward (a close
+                    # screen opens and counts in one request).
                     FOLLOWUP_FIELD: owed_followup(
+                        *unpaid_followup_tasks(session),
                         # Audit records the FULL truth (expected + variance)
                         # -- the redaction is only for the cashier's HTTP
                         # response, not the immutable trail.
