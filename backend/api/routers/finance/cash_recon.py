@@ -153,6 +153,8 @@ async def cash_reconciliation_summary(
     # D88: Cash Register closes whose figures are not one till drawer's own
     # (the link failed, or the day had several drawers). See 2c.
     unattributed_ids = set()
+    # (closed_at, close id, drawer id) of each close that landed on one drawer.
+    linked_closes: List[tuple] = []
 
     # --- 1) Manual close-by-denomination sessions (rupees) -----------------
     cr_match: Dict = {"status": "CLOSED"}
@@ -209,6 +211,10 @@ async def cash_reconciliation_summary(
             pending_user_ids.append(closed_by)
         if withheld or s.get("till_link_ok") is False:
             unattributed_ids.add(s.get("session_id"))
+        elif s.get("till_session_id"):
+            linked_closes.append(
+                (str(closed_at or ""), str(s.get("session_id")), s["till_session_id"])
+            )
         rows.append(
             {
                 "session_id": s.get("session_id"),
@@ -400,11 +406,22 @@ async def cash_reconciliation_summary(
         for r in rows
         if r.get("source") == "BLIND_EOD"
     }
+    # Two Cash Register closes that landed on the SAME drawer both hold that
+    # drawer's one count (the second adopted it). Until its Z-Read locks and
+    # 2b folds them, only the first close adds; a later one is marked too.
+    drawers_seen = set()
+    repeat_ids = set()
+    for _closed, cr_id, drawer_id in sorted(linked_closes):
+        if drawer_id in drawers_seen:
+            repeat_ids.add(cr_id)
+        drawers_seen.add(drawer_id)
     for r in rows:
-        r["also_counted_on_till"] = (
-            r.get("source") == "CASH_REGISTER"
-            and r.get("session_id") in unattributed_ids
-            and (r.get("store_id"), r.get("session_date")) in zread_days
+        r["also_counted_on_till"] = r.get("source") == "CASH_REGISTER" and (
+            r.get("session_id") in repeat_ids
+            or (
+                r.get("session_id") in unattributed_ids
+                and (r.get("store_id"), r.get("session_date")) in zread_days
+            )
         )
 
     # Resolve any missing closer names in one batch, then backfill.
