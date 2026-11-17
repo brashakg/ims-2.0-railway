@@ -149,6 +149,12 @@ export interface CartLineItem {
     material: string;            // CR-39 / Polycarbonate / Hi-Index
     index?: string;              // 1.5 / 1.56 / 1.6 / 1.67 / 1.74
     coatings: string[];          // AR / Blue-cut / Photochromic
+    // D44: the lens master rows the till priced the line from.
+    brand_id?: string;
+    brand?: string;
+    coating_id?: string;
+    add_on_ids?: string[];
+    add_ons?: string[];
   };
 
   // Discount (validated server-side; WHO approved it is the server's

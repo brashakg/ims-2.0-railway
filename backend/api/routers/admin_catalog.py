@@ -702,7 +702,15 @@ class LensBrandUpdate(BaseModel):
     tier: Optional[str] = None
 
 
-class LensIndexCreate(BaseModel):
+class _LensNumbers(BaseModel):
+    """L1-F08: every lens master number is a FINITE number. Infinity passed
+    `ge=0`, was stored, and then made the whole master list fail to load (it
+    cannot be sent as JSON); NaN slipped past bounds the same way."""
+
+    model_config = ConfigDict(allow_inf_nan=False)
+
+
+class LensIndexCreate(_LensNumbers):
     value: str = Field(..., description="e.g. 1.50, 1.56, 1.60, 1.67, 1.74")
     multiplier: float = Field(
         ..., gt=0, le=10, description="Pricing multiplier vs base"
@@ -710,27 +718,28 @@ class LensIndexCreate(BaseModel):
     description: Optional[str] = None
 
 
-class LensIndexUpdate(BaseModel):
+class LensIndexUpdate(_LensNumbers):
     value: Optional[str] = None
-    multiplier: Optional[float] = None
+    multiplier: Optional[float] = Field(None, gt=0, le=10)
     description: Optional[str] = None
 
 
-class LensCoatingCreate(BaseModel):
+class LensCoatingCreate(_LensNumbers):
     name: str = Field(..., min_length=2, max_length=80)
     code: str = Field(..., min_length=2, max_length=24)
     price: float = Field(..., ge=0)
     description: Optional[str] = None
 
 
-class LensCoatingUpdate(BaseModel):
+class LensCoatingUpdate(_LensNumbers):
     name: Optional[str] = None
     code: Optional[str] = None
-    price: Optional[float] = None
+    # L1-F08: same floor as create (an edit could save a negative / NaN price).
+    price: Optional[float] = Field(None, ge=0)
     description: Optional[str] = None
 
 
-class LensAddonCreate(BaseModel):
+class LensAddonCreate(_LensNumbers):
     name: str = Field(..., min_length=2, max_length=80)
     code: str = Field(..., min_length=2, max_length=24)
     price: float = Field(..., ge=0)
@@ -738,15 +747,15 @@ class LensAddonCreate(BaseModel):
     description: Optional[str] = None
 
 
-class LensAddonUpdate(BaseModel):
+class LensAddonUpdate(_LensNumbers):
     name: Optional[str] = None
     code: Optional[str] = None
-    price: Optional[float] = None
+    price: Optional[float] = Field(None, ge=0)
     type: Optional[str] = None
     description: Optional[str] = None
 
 
-class LensPricingCreate(BaseModel):
+class LensPricingCreate(_LensNumbers):
     """INV-15: accept BOTH the legacy camelCase keys (brandId/indexId/basePrice)
     that the exact-match pricing master was built on AND the snake_case keys
     (brand_id/index_id/base_price) used by the newer range-based system.  The
@@ -754,7 +763,7 @@ class LensPricingCreate(BaseModel):
     DB docs are unchanged.  Callers should prefer snake_case going forward.
     """
 
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True, allow_inf_nan=False)
 
     brandId: Optional[str] = Field(None, alias="brandId")
     brand_id: Optional[str] = Field(None, alias="brand_id")
@@ -814,8 +823,26 @@ async def update_lens_brand(brand_id: str, payload: LensBrandUpdate):
     )
 
 
+def _refuse_if_lens_priced(range_key: str, doc_id: str, what: str) -> None:
+    """L1-F07 safeguard: a lens brand / index that an ACTIVE price range still
+    points at is not deleted out from under it. Only active ranges block: staff
+    can deactivate those on Settings > Lens range pricing. Legacy matrix rows
+    (lens_pricing_masters) have no screen or route that removes them, so they
+    must not block a delete staff could never unblock; they are left as stored."""
+    ranges = _coll("lens_pricing_ranges")
+    if ranges is not None and ranges.find_one({range_key: doc_id, "is_active": {"$ne": False}}):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"This lens {what} still has active prices in Settings > Lens range pricing. "
+                "Deactivate those prices first."
+            ),
+        )
+
+
 @router.delete("/lens/brands/{brand_id}")
 async def delete_lens_brand(brand_id: str):
+    _refuse_if_lens_priced("brand_id", brand_id, "brand")
     return _delete_doc("lens_brand_masters", "brand_id", brand_id)
 
 
@@ -849,6 +876,7 @@ async def update_lens_index(index_id: str, payload: LensIndexUpdate):
 
 @router.delete("/lens/indices/{index_id}")
 async def delete_lens_index(index_id: str):
+    _refuse_if_lens_priced("index_id", index_id, "index")
     return _delete_doc("lens_index_masters", "index_id", index_id)
 
 
@@ -977,7 +1005,7 @@ async def upsert_lens_pricing(payload: LensPricingCreate):
 # Pure resolver lives in `api/services/lens_pricing.py`.
 
 
-class LensPricingRangeCreate(BaseModel):
+class LensPricingRangeCreate(_LensNumbers):
     brand_id: str
     index_id: str
     category: str = Field(
@@ -993,14 +1021,14 @@ class LensPricingRangeCreate(BaseModel):
     base_price: float = Field(..., ge=0)
 
 
-class LensPricingRangeUpdate(BaseModel):
+class LensPricingRangeUpdate(_LensNumbers):
     min_value: Optional[float] = None
     max_value: Optional[float] = None
     base_price: Optional[float] = Field(None, ge=0)
     is_active: Optional[bool] = None
 
 
-class LensPriceQuoteInput(BaseModel):
+class LensPriceQuoteInput(_LensNumbers):
     brand_id: str
     index_id: str
     category: str
