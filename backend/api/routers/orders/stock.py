@@ -12,6 +12,14 @@ from datetime import datetime, timedelta
 from fastapi import HTTPException
 from typing import Dict, List, Optional
 from ...dependencies import get_order_repository, get_stock_repository
+# THE rule for which lines take a serialized stock unit lives in a service, so
+# the return side (and its read-only script) asks the same one.
+from ...services.restock_engine import (  # noqa: F401 -- names re-exported
+    LENS_RESERVED_ITEM_TYPES as _LENS_RESERVED_ITEM_TYPES,
+    NON_SERIALIZED_ITEM_TYPES as _NON_SERIALIZED_ITEM_TYPES,
+    VIRTUAL_PID_PREFIXES as _VIRTUAL_PID_PREFIXES,
+    takes_serialized_stock as _takes_serialized_stock,
+)
 from ._shared import logger
 
 
@@ -177,56 +185,6 @@ def _resolve_catalog_product_doc(pid: str):
         "_resolved_from": "catalog_products",
     }
     return mapped
-
-
-# Item types / product_id prefixes that have NO serialized stock to mark sold.
-# SERVICE = labour line (eg fitting); EYE_TEST/etc = a clinical consultation line
-# (GST-exempt SAC 9993, see gst_rates.py) -- a service, not a stocked good;
-# custom-/lens-/lens-sug- = virtual POS items the configurator/suggestion helper
-# generates on the fly. These never carry a stock_unit row, so trying to
-# mark_sold them is a no-op (not an error).
-_VIRTUAL_PID_PREFIXES = ("custom-", "lens-", "lens-sug-")
-_NON_SERIALIZED_ITEM_TYPES = {
-    "SERVICE",
-    "EYE_TEST",
-    "EYE_EXAM",
-    "EYE_CHECKUP",
-    "CONSULT",
-    "CONSULTATION",
-    "OPTOMETRY",
-}
-
-# Item types whose stock is reserved by the LENS hook (reserve_for_order_item),
-# NOT by the serialized stock_units availability gate below.
-_LENS_RESERVED_ITEM_TYPES = {"LENS"}
-
-
-def _takes_serialized_stock(line: dict) -> bool:
-    """Does this order line consume a SERIALIZED stock_units row?
-
-    THE single predicate for that question. It previously existed three times,
-    written three slightly different ways, and they drifted: the availability
-    assert and the line-release both excluded LENS lines while _mark_units_sold
-    did NOT. POSLayout maps OPTICAL_LENS to item_type 'LENS' and sends the REAL
-    catalog product_id, so a stock-lens line had its unit flipped SOLD on the
-    way in, was never availability-checked, and was never released when the line
-    was removed -- stranded permanently once the order reached DELIVERED.
-
-    Reserved-by-the-lens-hook lines and non-stocked service lines are excluded;
-    so are virtual POS ids that have no stock_units row at all.
-    """
-    if not isinstance(line, dict):
-        return False
-    item_type = (line.get("item_type") or "").upper()
-    if (
-        item_type in _NON_SERIALIZED_ITEM_TYPES
-        or item_type in _LENS_RESERVED_ITEM_TYPES
-    ):
-        return False
-    pid = line.get("product_id") or ""
-    if not pid or pid.startswith(_VIRTUAL_PID_PREFIXES):
-        return False
-    return True
 
 
 def _assert_serialized_stock_available(

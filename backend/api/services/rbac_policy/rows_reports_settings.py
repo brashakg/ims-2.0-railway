@@ -293,6 +293,14 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/returns/{return_id}/owed-paid",
         "allowed": ["ACCOUNTANT", "ADMIN"],
     },
+    # "Retry stock step" on a record completed in Needs completing (decision
+    # D7, 2026-11-11): its pieces still out of stock go back once, never by
+    # hand. The same audience and capability as Complete record.
+    {
+        "method": "POST",
+        "path": "/api/v1/returns/{return_id}/complete-record/restock",
+        "allowed": ["ACCOUNTANT", "ADMIN"],
+    },
     # "Give back this unbilled payment" (money review 20): the one door for a
     # till store-credit / voucher payment taken but never on its bill. The
     # same audience and capability as Complete record.

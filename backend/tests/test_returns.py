@@ -312,12 +312,28 @@ class _FakeColl:
         return _FakeResult(1)
 
     def update_one(self, query, update, upsert=False):
-        # $set only: a credit row is marked applied once its balance moved (#1264).
+        # $set (a credit row is marked applied once its balance moved, #1264)
+        # and $addToSet with $each (a return's quarantined units, D95).
         for d in self.docs:
             if all(d.get(k) == v for k, v in (query or {}).items()):
                 d.update((update or {}).get("$set") or {})
+                for key, val in ((update or {}).get("$addToSet") or {}).items():
+                    arr = d.setdefault(key, [])
+                    for item in (val["$each"] if isinstance(val, dict) and "$each" in val else [val]):
+                        if item not in arr:
+                            arr.append(item)
                 return type("R", (), {"matched_count": 1, "modified_count": 1})()
         return type("R", (), {"matched_count": 0, "modified_count": 0})()
+
+    def find_one_and_update(self, query, update, return_document=None):
+        # The claim of a record's stock step (returns._claim_restock):
+        # equality and {"$ne": value} only; $set only.
+        for d in self.docs:
+            if all(d.get(k) != v["$ne"] if isinstance(v, dict) and set(v) == {"$ne"} else d.get(k) == v
+                   for k, v in (query or {}).items()):
+                d.update((update or {}).get("$set") or {})
+                return dict(d)
+        return None
 
     def find(self, query=None, projection=None):
         q = query or {}
@@ -423,6 +439,8 @@ def ctx(monkeypatch):
         returns_router, "get_product_repository",
         lambda: _FakeProductRepoForExchange(),
     )
+    # No stock store in these fakes (the press's stock steps fail soft).
+    monkeypatch.setattr(returns_router, "get_stock_repository", lambda: None)
     # Patch the local get_db import target used by _get_db().
     monkeypatch.setattr(
         "api.dependencies.get_db", lambda: fake_db, raising=False
@@ -500,6 +518,20 @@ def test_create_return_records_refund_and_restocks(ctx):
     assert data["restocked"][0]["applied"] is False
     # Persisted.
     assert ctx["returns_coll"].docs[0]["return_id"] == data["return_id"]
+
+
+def test_create_refuses_when_the_stock_repository_cannot_be_built(ctx, monkeypatch):
+    """D82: a stock store that cannot even be opened leaves the return-slot
+    guarantee unknown -- 503 before anything is written (the press used to
+    crash after its money step, a 500)."""
+    def broken():
+        raise AttributeError("stock_units")
+
+    monkeypatch.setattr(returns_router, "get_stock_repository", broken)
+    tok = _staff_token(["CASHIER"])
+    r = ctx["client"].post("/api/v1/returns", json=_payload(), headers={"Authorization": f"Bearer {tok}"})
+    assert r.status_code == 503, r.text
+    assert ctx["returns_coll"].docs == []
 
 
 def test_damaged_item_not_restocked(ctx):

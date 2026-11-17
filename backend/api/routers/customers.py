@@ -2668,6 +2668,10 @@ def store_credit_balance_unready(repo, customer_id: str, exclude_entry_id: Optio
 # scheduler and before any posting for the same customer.
 # --------------------------------------------------------------------------- #
 STORE_CREDIT_REFS = "store_credit_refs"
+# An entry id in this list: the line's move may never land (D85: "Nothing
+# was paid" took over a counter return whose credit line is VOID). Its own
+# field, never read as "the move landed" (_guard_landed reads the refs).
+STORE_CREDIT_FENCED = "store_credit_fenced"
 PENDING = "ISSUING"
 VOID = "VOID"
 PENDING_TIMEOUT_SECONDS = 600
@@ -2689,6 +2693,40 @@ def _guard_landed(repo, customer_id: str, entry_id: str) -> Optional[bool]:
     except Exception as exc:  # noqa: BLE001
         logger.error("[CUSTOMERS] credit guard %s unreadable: %s", entry_id, exc)
         return None
+
+
+def fence_credit_move(repo, customer_id: Optional[str], entry_id: Optional[str]) -> Optional[bool]:
+    """D79 / D85: THE fence of a credit line's balance move, one
+    compare-and-set on the customer. False: the move had not landed, and from
+    this write on it never can (apply_store_credit_delta refuses a fenced
+    ref) -- a stalled press can no longer complete a line somebody else is
+    giving back. True: it landed first; the credit stands. None: unknown
+    (nothing may be given back). Used by every takeover of a counter
+    return's line: the reconciler's void, and "Nothing was paid"."""
+    coll = getattr(repo, "collection", None)
+    if coll is None or not customer_id or not entry_id:
+        return False  # no customer balance: no move can land
+    try:
+        res = coll.update_one({"customer_id": customer_id, STORE_CREDIT_REFS: {"$ne": entry_id}},
+                              {"$addToSet": {STORE_CREDIT_FENCED: entry_id}})
+        if getattr(res, "matched_count", getattr(res, "modified_count", 0)):
+            return False
+        return coll.find_one({"customer_id": customer_id, STORE_CREDIT_REFS: entry_id}) is not None
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[CUSTOMERS] late credit of %s not fenced: %s", entry_id, exc)
+        return None
+
+
+def _takeover_landed(repo, row: Dict[str, Any], undo: bool) -> Optional[bool]:
+    """Did the move of a line the reconciler is voiding land? A counter
+    return's line whose claims and hold are about to be given back (``undo``)
+    is FENCED in the same step (fence_credit_move): its press may still be
+    inside its balance move, and a move landing after the give-back was a
+    second credit beside whatever refunded the bill meanwhile. Any other
+    line (re-posted under its id by its own door) is only read."""
+    if undo and row.get("undo_on_void"):
+        return fence_credit_move(repo, row.get("customer_id"), row.get("entry_id"))
+    return _guard_landed(repo, row.get("customer_id"), row.get("entry_id"))
 
 
 def _month_of(value: Any) -> str:
@@ -2863,7 +2901,9 @@ def _void_credit_row(repo, ledger, row: Dict[str, Any], why: str, *, undo: bool 
     pending row that was read, so a second pass (or a press finishing it)
     can never void it twice. Its delta is zeroed (kept in void_delta: an
     older build summing every delta never counts it). Then the guard is read
-    once more: a move that landed after all heals the row; an unreadable
+    once more -- and, with ``undo``, fenced in that same write so the press's
+    move can never land later (_takeover_landed, D79): a move that landed
+    after all heals the row; an unreadable
     guard puts it back to ISSUING (same pending_at) for the next pass. Only a
     void that stands writes the number off -- and, with ``undo`` (the
     reconciler: the claims' one owner), gives a counter return's claims
@@ -2882,7 +2922,7 @@ def _void_credit_row(repo, ledger, row: Dict[str, Any], why: str, *, undo: bool 
         return False
     if int(getattr(res, "modified_count", getattr(res, "matched_count", 0)) or 0) != 1:
         return False  # another pass or the press settled it first
-    landed = _guard_landed(repo, row.get("customer_id"), eid)
+    landed = _takeover_landed(repo, row, undo)
     if landed is None:
         try:
             ledger.update_one({"entry_id": eid, "type": VOID},
@@ -3026,6 +3066,18 @@ def _settle_credit_row(repo, ledger, row: Dict[str, Any]) -> str:
         return UNCLEAR
     if now_row.get("applied") and now_row.get("type") not in (PENDING, VOID):
         return POSTED
+    if now_row.get("type") == VOID:
+        # A takeover fenced this move (the reconciler voiding a stalled
+        # counter return, or "Nothing was paid": fence_credit_move): it did
+        # not land and never can -- a clean refusal, not "it may have
+        # landed". The return's give-backs are on its one set of marks, so
+        # the stale press repeats none of them.
+        try:
+            coll = getattr(repo, "collection", None)
+            if coll is not None and coll.find_one({"customer_id": cid, STORE_CREDIT_FENCED: eid}) is not None:
+                return REFUSED
+        except Exception:  # noqa: BLE001 -- unknown stays unclear
+            pass
     return UNCLEAR
 
 
@@ -3094,6 +3146,12 @@ def _post_ledger_credit(repo, entry: Dict[str, Any], *, ledger=None) -> str:
     row = dict(row)
     row.pop("_id", None)
     kind = row.get("type")
+    from ..services import store_credit_ledger as scl
+
+    if kind == scl.FENCED:
+        # "Nothing was paid" took this line's place (D85): nothing posts here.
+        entry[NOT_WRITTEN] = True
+        return REFUSED
     # A final row (or a pre-#1264 row with no 'applied' key at all) carries
     # its balance already: only an explicit applied False is ever moved.
     if kind not in (PENDING, VOID) and row.get("applied") is not False:
@@ -3159,7 +3217,7 @@ def reconcile_pending_credits(repo=None, *, customer_id: Optional[str] = None, l
         logger.error("[CUSTOMERS] unsettled voids unreadable: %s", exc)
         unsettled = []
     for row in unsettled:
-        landed = _guard_landed(repo, row.get("customer_id"), row.get("entry_id"))
+        landed = _takeover_landed(repo, row, bool(row.get("void_undo")))
         if landed is None:
             continue
         if landed:
@@ -3256,13 +3314,20 @@ def _task_leg_not_billed(leg: Dict[str, Any]) -> bool:
 
 async def scheduled_credit_reconcile() -> None:
     """Scheduler tick (agents/scheduler): blocking pymongo off the event loop.
-    Then the kept refund holds no one owns (returns.sweep_stuck_return_holds)."""
+    Then the kept refund holds no one owns (returns.sweep_stuck_return_holds),
+    the online refunds a post claimed and never finished (before the points
+    sweep: a return it finishes is that sweep's the same tick) and the loyalty
+    reversals no staff door can reach."""
     import asyncio
 
+    from . import online_store_refund_reviews as refund_reviews
+    from .loyalty import reconcile_loyalty_reversals
     from .returns import sweep_stuck_return_holds
 
     await asyncio.to_thread(reconcile_pending_credits)
     await asyncio.to_thread(sweep_stuck_return_holds)
+    await asyncio.to_thread(refund_reviews.finish_unfinished_refunds)
+    await asyncio.to_thread(reconcile_loyalty_reversals)
 
 
 def apply_store_credit_delta(
@@ -3301,6 +3366,7 @@ def apply_store_credit_delta(
     upd: Dict[str, Any] = {"$inc": {"store_credit": float(delta)}}
     if guard_ref:
         flt[STORE_CREDIT_REFS] = {"$ne": guard_ref}
+        flt[STORE_CREDIT_FENCED] = {"$ne": guard_ref}
         upd["$push"] = {STORE_CREDIT_REFS: guard_ref}
     res = coll.update_one(flt, upd)
     if getattr(res, "matched_count", getattr(res, "modified_count", 0)):

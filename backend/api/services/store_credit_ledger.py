@@ -27,6 +27,11 @@ ENTRY_TYPES = {ISSUED, REDEEMED, ADJUSTED}
 # supply reversed (an advance paid back as credit, a referral reward), and the
 # posting door's in-flight ISSUING and dead VOID rows are never notes.
 CREDIT_NOTE_TYPE = ISSUED
+# A counter return's credit line taken by "Nothing was paid" (D85): written at
+# the line's own id ('<return id>:credit') before anything is given back, so a
+# press stalled before its credit can never post there (the posting door
+# refuses it). Never money, never a note, never on a balance.
+FENCED = "FENCED"
 
 _EPS = 1e-9
 
