@@ -19,6 +19,7 @@ Run: JWT_SECRET_KEY=test ENVIRONMENT=test python -m pytest
      backend/tests/test_einvoice_audit_l3.py -q
 """
 
+import json
 import os
 import sys
 import uuid
@@ -967,6 +968,237 @@ async def test_1409_r3a_an_answer_that_accepts_and_also_reports_an_error_is_not_
     retry = await einvoice.cancel_irn(cancel_db, order)  # a clean accept (a null error field is no error)
     assert retry == {"status": "CANCELLED", "reason": None, "persisted": True}
     assert _row(cancel_db, "orders", order_id="ORD-L3")["einvoice_status"] == "CANCELLED" and len(posts) == 2
+
+
+# --- 1409 round 3, second pass (reviewers): "accepted" was contradicted only
+# by ErrorDetails. A GSP "success" beside NIC Status 0, beside a top-level
+# error, or wrapped round a refusal under "data" was still stored CANCELLED --
+# for good, since a recorded cancel is never asked again. Now anything in the
+# answer, at any depth, that speaks against "accepted" leaves it unknown.
+
+_R3B_ERR = [{"ErrorCode": "2270", "ErrorMessage": "synthetic refusal"}]
+_SAYS_BOTH = {
+    "status0-str-gsp-success": {"Status": "0", "status": "success"},
+    "status0-int-gsp-success": {"Status": 0, "status": "success", "ErrorDetails": None},
+    "gsp-success-top-error": {"status": "success", "error": "cancel window is over"},
+    "gsp-success-inner-refusal": {"status": "success", "data": {"Status": "0", "ErrorDetails": _R3B_ERR}},
+    "status1-gsp-failure": {"Status": "1", "status": "failure"},
+    "status1-inner-error": {"Status": "1", "data": {"error": "synthetic"}},
+    "status1-success-false": {"Status": "1", "success": False},
+    "status2-gsp-success": {"Status": "2", "status": "success"},
+    "status1-list-inner-status0": {"Status": "1", "data": [{"Status": "0"}]},
+    "status1-error-message": {"Status": "1", "ErrorMessage": "synthetic"},
+    "gsp-success-refusal-as-json-text": {"status": "success",
+                                         "data": json.dumps({"Status": "0", "ErrorDetails": _R3B_ERR})},
+    "status1-about-another-irn": {"Status": "1", "data": {"Irn": "ANOTHER-IRN", "CancelDate": "2026-11-17"}},
+    "status1-irn-still-active": {"Status": "1", "data": {"Irn": "SYNTHETIC-IRN-NOT-VALID", "Status": "ACT"}},
+    "status1-unknown-status-word": {"Status": "1", "status": "unsuccessful"},
+    "gsp-success-uppercase-error": {"status": "success", "ERROR": {"code": 17}},
+}
+
+
+@pytest.mark.parametrize("coll,key", _BOTH_RECORDS, ids=["orders", "invoices"])
+@pytest.mark.parametrize("body", list(_SAYS_BOTH.values()), ids=list(_SAYS_BOTH))
+@pytest.mark.asyncio
+async def test_1409_r3b_an_answer_that_says_accepted_and_refused_is_never_stored_cancelled(
+    monkeypatch, cancel_db, coll, key, body
+):
+    """The IRN may still be live: FAILED "could not be read", the request
+    kept, and the next clear answer records the cancel once."""
+    rec = _issued(cancel_db, coll, **{key: "REC-R3B"})
+    posts = _cancel_irp(monkeypatch, body, _IRP_ALREADY)
+
+    first = await einvoice.cancel_irn(cancel_db, rec)
+    stored = _row(cancel_db, coll, **{key: "REC-R3B"})
+    assert (first["status"], first["persisted"]) == (einvoice.STATUS_FAILED, False)
+    assert "could not be read" in first["reason"]
+    assert stored["einvoice_status"] == "GENERATED" and "einvoice_cancelled_at" not in stored
+    assert stored["einvoice_cancel_pending"]["irn"] == "SYNTHETIC-IRN-NOT-VALID"
+
+    retry = await einvoice.cancel_irn(cancel_db, rec)
+    stored = _row(cancel_db, coll, **{key: "REC-R3B"})
+    assert (retry["status"], retry["persisted"]) == ("CANCELLED", True)
+    assert stored["einvoice_status"] == "CANCELLED" and "einvoice_cancel_pending" not in stored
+
+    again = await einvoice.cancel_irn(cancel_db, rec)
+    assert (again["status"], again["persisted"], len(posts)) == ("CANCELLED", True, 2)
+
+
+@pytest.mark.parametrize("coll,key", _BOTH_RECORDS, ids=["orders", "invoices"])
+@pytest.mark.parametrize(
+    "both",
+    [{"Status": "1", "ErrorDetails": _IRP_ALREADY["ErrorDetails"]},
+     {**_IRP_ALREADY, "data": {"status": "success"}},
+     {**_IRP_ALREADY, "Irn": "ANOTHER-IRN"}],
+    ids=["beside-accepted", "beside-inner-success", "about-another-irn"],
+)
+@pytest.mark.asyncio
+async def test_1409_r3b_already_cancelled_beside_accepted_is_unknown_too(monkeypatch, cancel_db, coll, key, both):
+    """With IMS's earlier request on record, "already cancelled" is only
+    taken from an answer that is a plain "no" about THIS IRN; one that also
+    says "accepted", or names another IRN, is as unreadable as any other
+    answer that says both."""
+    rec = _issued(cancel_db, coll, **{key: "REC-R3B"})
+    posts = _cancel_irp(monkeypatch, {"ErrorDetails": 17}, both, _IRP_ALREADY)
+
+    for _ in range(2):  # an unreadable answer, then the one that says both
+        out = await einvoice.cancel_irn(cancel_db, rec)
+        stored = _row(cancel_db, coll, **{key: "REC-R3B"})
+        assert (out["status"], out["persisted"]) == (einvoice.STATUS_FAILED, False)
+        assert stored["einvoice_status"] == "GENERATED" and stored["einvoice_cancel_pending"]
+
+    third = await einvoice.cancel_irn(cancel_db, rec)
+    assert (third["status"], third["persisted"], len(posts)) == ("CANCELLED", True, 3)
+    assert _row(cancel_db, coll, **{key: "REC-R3B"})["einvoice_status"] == "CANCELLED"
+
+
+_CLEAN_ACCEPT = {
+    "nic-int": {"Status": 1},
+    "gsp": {"status": "success"},
+    "nic-with-data": {"Status": "1", "ErrorDetails": None, "InfoDtls": None,
+                      "data": {"Irn": "SYNTHETIC-IRN-NOT-VALID", "CancelDate": "2026-11-17 10:00:00"}},
+    "nic-data-as-json-text": {"Status": 1, "Data": json.dumps({"Irn": "SYNTHETIC-IRN-NOT-VALID",
+                                                               "CancelDate": "2026-11-17 10:00:00"})},
+    "both-agree": {"Status": "1", "status": "success", "ErrorDetails": [], "error": None},
+}
+
+
+@pytest.mark.parametrize("coll,key", _BOTH_RECORDS, ids=["orders", "invoices"])
+@pytest.mark.parametrize("body", list(_CLEAN_ACCEPT.values()), ids=list(_CLEAN_ACCEPT))
+@pytest.mark.asyncio
+async def test_1409_r3b_a_clean_acceptance_is_still_recorded_once(monkeypatch, cancel_db, coll, key, body):
+    """The other side: an answer with nothing against it is a cancel."""
+    rec = _issued(cancel_db, coll, **{key: "REC-R3B"})
+    posts = _cancel_irp(monkeypatch, body)
+
+    out = await einvoice.cancel_irn(cancel_db, rec)
+    assert out == {"status": "CANCELLED", "reason": None, "persisted": True}
+    again = await einvoice.cancel_irn(cancel_db, rec)
+    assert (again["status"], len(posts)) == ("CANCELLED", 1)
+    assert _row(cancel_db, coll, **{key: "REC-R3B"})["einvoice_status"] == "CANCELLED"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [{"Status": "0", "status": "failure", "ErrorDetails": _R3B_ERR},
+     {"status": "error", "ErrorDetails": _R3B_ERR}],
+    ids=["status0-gsp-failure", "gsp-error-with-list"],
+)
+@pytest.mark.asyncio
+async def test_1409_r3b_a_plain_refusal_with_a_gsp_failure_beside_it_is_still_a_refusal(
+    monkeypatch, cancel_db, body
+):
+    order = _issued(cancel_db, order_id="ORD-L3")
+    _cancel_irp(monkeypatch, body, _IRP_ALREADY)
+
+    for _ in range(2):
+        out = await einvoice.cancel_irn(cancel_db, order)
+        stored = _row(cancel_db, "orders", order_id="ORD-L3")
+        assert out["status"] == einvoice.STATUS_FAILED
+        assert stored["einvoice_status"] == "GENERATED" and "einvoice_cancel_pending" not in stored
+
+
+# --- D114 on generation (the same shared reading of the answer): an IRN that
+# comes next to anything that speaks against success is not an issued
+# e-invoice. Nothing is stored; the next press asks again. The one refusal
+# that IS the document's IRN -- the IRP's duplicate reply -- still recovers a
+# lost answer (L3-21).
+
+_NIC_DUPLICATE = {
+    "Status": "0",
+    "ErrorDetails": [{"ErrorCode": "2150", "ErrorMessage": "Duplicate IRN"}],
+    "InfoDtls": [{"InfCd": "DUPIRN", "Desc": {"AckNo": 112010012345, "AckDt": "2026-11-04 10:00:00",
+                                              "Irn": "SYNTHETIC-IRN-NOT-VALID"}}],
+}
+_GEN_NOT_ISSUED = {
+    "status1-error-list": {"Status": "1", "ErrorDetails": _R3B_ERR, **_IRP_OK},
+    "status1-unreadable-error": {"Status": "1", "ErrorDetails": 17, **_IRP_OK},
+    "gsp-success-status0": {"status": "success", "Status": "0", **_IRP_OK},
+    "gsp-success-top-error": {"status": "success", "error": "synthetic", "data": dict(_IRP_OK)},
+    "gsp-success-inner-refusal": {"status": "success",
+                                  "data": {"Status": "0", "ErrorDetails": _R3B_ERR, **_IRP_OK}},
+    "status1-success-false": {"Status": "1", "success": False, **_IRP_OK},
+    "refusal-with-a-stray-irn": {"Status": "0", "ErrorDetails": _R3B_ERR, **_IRP_OK},
+    "status0-alone": {"Status": 0, **_IRP_OK},
+    "error-list-no-status": {"ErrorDetails": _R3B_ERR, **_IRP_OK},
+    "duplicate-beside-accepted": {**_NIC_DUPLICATE, "Status": "1"},
+    "irn-status-not-a-yes": {**_IRP_OK, "Status": "CNL"},
+    "refusal-as-json-text": {**_IRP_OK, "info": json.dumps([{"ErrorDetails": _R3B_ERR}])},
+}
+
+
+def _unissued(db, coll, key):
+    rec = {k: v for k, v in _till_order([FRAME]).items() if k != "order_id"}
+    rec[key] = "REC-D114"
+    db.get_collection(coll).insert_one(dict(rec))
+    return rec
+
+
+@pytest.mark.parametrize("coll,key", _BOTH_RECORDS, ids=["orders", "invoices"])
+@pytest.mark.parametrize("body", list(_GEN_NOT_ISSUED.values()), ids=list(_GEN_NOT_ISSUED))
+@pytest.mark.asyncio
+async def test_1409_d114_an_irn_beside_a_refusal_is_never_stored_as_generated(
+    monkeypatch, cancel_db, coll, key, body
+):
+    rec = _unissued(cancel_db, coll, key)
+    calls = _provider(monkeypatch, body, {"Irn": "SYNTHETIC-IRN-NOT-VALID"})
+
+    first = await einvoice.generate_irn(cancel_db, rec)
+    stored = _row(cancel_db, coll, **{key: "REC-D114"})
+    assert (first["status"], first["irn"], first["signed_qr"]) == (einvoice.STATUS_FAILED, None, None)
+    assert "could not be read" in first["reason"] and "persisted" not in first
+    assert not {"irn", "ack_no", "einvoice_signed_qr", "einvoice_status", "einvoice_generated_at"} & set(stored)
+
+    retry = await einvoice.generate_irn(cancel_db, rec)  # the re-check: a clear answer settles it
+    assert (retry["status"], retry["persisted"], len(calls)) == (einvoice.STATUS_GENERATED, True, 2)
+    assert _row(cancel_db, coll, **{key: "REC-D114"})["irn"] == "SYNTHETIC-IRN-NOT-VALID"
+
+
+_GEN_ISSUED = {
+    "flat": _IRP_OK,
+    "nic-status1-data": {"Status": "1", "ErrorDetails": None, "InfoDtls": None,
+                         "data": {**_IRP_OK, "Status": "ACT"}},
+    "gsp-success-data": {"status": "success", "error": None, "errors": [], "data": dict(_IRP_OK)},
+}
+
+
+@pytest.mark.parametrize("coll,key", _BOTH_RECORDS, ids=["orders", "invoices"])
+@pytest.mark.parametrize("body", list(_GEN_ISSUED.values()), ids=list(_GEN_ISSUED))
+@pytest.mark.asyncio
+async def test_1409_d114_a_clean_generation_answer_is_still_saved(monkeypatch, cancel_db, coll, key, body):
+    """The other side: nothing in the answer speaks against it."""
+    rec = _unissued(cancel_db, coll, key)
+    calls = _provider(monkeypatch, body)
+
+    out = await einvoice.generate_irn(cancel_db, rec)
+    stored = _row(cancel_db, coll, **{key: "REC-D114"})
+    assert (out["status"], out["persisted"], out["reason"]) == (einvoice.STATUS_GENERATED, True, None)
+    assert (stored["irn"], stored["einvoice_signed_qr"], stored["einvoice_status"]) == (
+        "SYNTHETIC-IRN-NOT-VALID", "SYNTHETIC-QR-NOT-VALID", "GENERATED")
+    again = await einvoice.generate_irn(cancel_db, rec)
+    assert (again["status"], len(calls)) == (einvoice.STATUS_SKIPPED, 1)
+
+
+@pytest.mark.parametrize("coll,key", _BOTH_RECORDS, ids=["orders", "invoices"])
+@pytest.mark.asyncio
+async def test_1409_d114_the_irps_duplicate_reply_still_recovers_a_lost_answer(monkeypatch, cancel_db, coll, key):
+    """A plain "no: this document already has an IRN" (NIC 2150 / DUPIRN, no
+    "accepted" beside it) names the document's own IRN: saved, and said to
+    have come without its signed QR."""
+    rec = _unissued(cancel_db, coll, key)
+    calls = _provider(monkeypatch, TimeoutError("synthetic timeout"), _NIC_DUPLICATE)
+
+    lost = await einvoice.generate_irn(cancel_db, rec)
+    assert lost["status"] == einvoice.STATUS_FAILED and "irn" not in _row(cancel_db, coll, **{key: "REC-D114"})
+
+    retry = await einvoice.generate_irn(cancel_db, rec)
+    stored = _row(cancel_db, coll, **{key: "REC-D114"})
+    assert (retry["status"], retry["persisted"]) == (einvoice.STATUS_GENERATED, True)
+    assert "no signed qr" in retry["reason"].lower()
+    assert (stored["irn"], stored["ack_no"], stored["einvoice_status"]) == (
+        "SYNTHETIC-IRN-NOT-VALID", "112010012345", "GENERATED")
+    third = await einvoice.generate_irn(cancel_db, rec)
+    assert (third["status"], len(calls)) == (einvoice.STATUS_SKIPPED, 2)
 
 
 # --- 1409 round 3, the same failure classes hunted on the paths this PR

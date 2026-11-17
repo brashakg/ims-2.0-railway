@@ -19,7 +19,9 @@ closed -- each is a MANDATORY blocker, none is fixed here:
   5. no screen fetches a signed QR the IRP's reply did not carry;
   6. the government sandbox has never accepted a payload from this module
      (rounding tolerance, reply formats incl. the cancel "already cancelled"
-     answer _irp_says_already_cancelled trusts).
+     answer _irp_says_already_cancelled trusts, the generation "duplicate"
+     answer _irp_says_duplicate trusts, and the words _irp_says_no reads as
+     a refusal).
 
 Credential shape (integrations.config for type="einvoice"):
   {
@@ -823,6 +825,14 @@ async def generate_irn(db, order: Dict[str, Any]) -> Dict[str, Any]:
     try:
         body = await _call_irp(cfg, einvoice_json)
         irn_fields = _parse_irp_response(body)
+        # D114: refusal is read before acceptance. An IRN next to anything
+        # that speaks against success is not an issued e-invoice -- except the
+        # IRP's plain "this document already has an IRN" (_irp_says_duplicate).
+        unread = bool(
+            irn_fields.get("irn")
+            and any(_irp_says_no(n, also_yes=("act",)) for n in _irp_nodes(body))
+            and not _irp_says_duplicate(body)
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning("[EINVOICE] IRP call failed for order %s: %s", order_id, exc)
         return {
@@ -832,6 +842,21 @@ async def generate_irn(db, order: Dict[str, Any]) -> Dict[str, Any]:
             "ack_date": None,
             "signed_qr": None,
             "reason": f"IRP/GSP error: {str(exc)[:400]}",
+            "einvoice_json": einvoice_json,
+        }
+
+    if unread:
+        return {
+            "status": STATUS_FAILED,
+            "irn": None,
+            "ack_no": None,
+            "ack_date": None,
+            "signed_qr": None,
+            "reason": (
+                "The IRP's answer could not be read as an issued e-invoice (it carries "
+                "an IRN next to an error or a refusal), so no IRN was saved; press "
+                f"again to check: {str(body)[:250]}"
+            ),
             "einvoice_json": einvoice_json,
         }
 
@@ -893,28 +918,84 @@ def _irp_error_list(body: Any) -> bool:
     )
 
 
+def _irp_nodes(body: Any):
+    """Every object in the answer, at any depth (a GSP wraps the IRP's own
+    answer under "data" / "result", sometimes as JSON text)."""
+    if isinstance(body, str) and body.lstrip()[:1] in ("{", "["):
+        try:
+            body = json.loads(body)
+        except ValueError:
+            return
+    if isinstance(body, dict):
+        yield body
+        body = list(body.values())
+    if isinstance(body, list):
+        for val in body:
+            yield from _irp_nodes(val)
+
+
 def _irp_says_ok(body: Any) -> bool:
     """NIC Status 1 (as a string or int), or a GSP's status "success"."""
     return isinstance(body, dict) and (str(body.get("Status")) == "1" or body.get("status") == "success")
 
 
-def _irp_cancel_ok(body: Any) -> bool:
-    """The IRP / GSP accepted the cancel and carries nothing under
-    ErrorDetails: an answer that says both proves neither (audit 1409 round
-    3)."""
-    return _irp_says_ok(body) and not body.get("ErrorDetails")
+_IRP_YES = ("1", "true", "success")
 
 
-def _irp_refused(body: Any) -> bool:
-    """The IRP / GSP said NO to this request: NIC Status 0, or a readable
-    error list (_irp_error_list) with no "accepted" beside it. Any other
-    answer -- not an object, empty, no Status, error data that cannot be read
-    -- says nothing about the outcome (audit 1409-P2 round 2; R3-A round 3:
-    ``{"ErrorDetails": 17}`` was taken as a refusal and the request record
-    was deleted)."""
+def _irp_says_no(node: Dict[str, Any], also_yes: tuple = ()) -> bool:
+    """This object speaks against "accepted": a status / success field (any
+    letter case) holding anything but a known yes, or anything at all under a
+    field named error* (ErrorDetails, error, errors, ErrorMessage ...). Read
+    wide on purpose: a wrong "no" only asks for a re-check, a missed one
+    stores a false result (D114). Not verified against the sandbox -- D31
+    blocker (6)."""
+    for key, val in node.items():
+        name = str(key).lower()
+        if name in ("status", "success") and val is not None:
+            if str(val).strip().lower() not in _IRP_YES + also_yes:
+                return True
+        if name.startswith("error") and val:
+            return True
+    return False
+
+
+def _irp_cancel_verdict(body: Any, irn: str) -> Optional[str]:
+    """What a cancel answer proves: "no", "ok" or None (unknown). Decision
+    D114: refusal is read before acceptance, and an answer that says both
+    proves neither.
+
+    "no"  -- NIC Status 0, or a readable error list (_irp_error_list), with no
+             "accepted" anywhere in the answer.
+    "ok"  -- Status 1 / "success" at the top and nothing at any depth that
+             speaks against it (_irp_says_no).
+    None  -- everything else: not an object, empty, no Status, error data that
+             cannot be read (R3-A: ``{"ErrorDetails": 17}``), a GSP "success"
+             beside Status 0 / a top-level error / a refusal under "data", or
+             an answer that names another IRN.
+    """
     if not isinstance(body, dict):
-        return False
-    return str(body.get("Status")) == "0" or (_irp_error_list(body) and not _irp_says_ok(body))
+        return None
+    nodes = list(_irp_nodes(body))
+    if any(str(n.get(k)).strip() != irn for n in nodes for k in ("Irn", "irn") if n.get(k) is not None):
+        return None
+    if str(body.get("Status")) == "0" or _irp_error_list(body):
+        return None if any(_irp_says_ok(n) for n in nodes) else "no"
+    if _irp_says_ok(body) and not any(_irp_says_no(n) for n in nodes):
+        return "ok"
+    return None
+
+
+def _irp_says_duplicate(body: Any) -> bool:
+    """The IRP refused a generation because this document already has an IRN
+    (NIC error 2150, InfoDtls "DUPIRN") and nothing in the answer says
+    "accepted". The IRN it names is the document's own (an IRN is derived
+    from seller GSTIN + document number + year), so it is saved -- the one way
+    a lost answer is recovered (audit L3-21). The exact sandbox reply is not
+    yet verified -- D31 blocker (6)."""
+    nodes = list(_irp_nodes(body))
+    return not any(_irp_says_ok(n) for n in nodes) and any(
+        str(n.get("ErrorCode") or "") == "2150" or n.get("InfCd") == "DUPIRN" for n in nodes
+    )
 
 
 def _irp_says_already_cancelled(body: Any) -> bool:
@@ -1066,22 +1147,22 @@ async def cancel_irn(
             cfg,
             {"Irn": irn, "CnlRsn": cancel_reason_code, "CnlRem": cancel_remark or "Cancelled via IMS"},
         )
-        accepted = _irp_cancel_ok(body)
-        already = asked_before and _irp_says_already_cancelled(body)
-        refused = _irp_refused(body)
+        verdict = _irp_cancel_verdict(body, irn)
+        # "already cancelled" is only taken from a plain "no"
+        already = verdict == "no" and asked_before and _irp_says_already_cancelled(body)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[EINVOICE] cancel_irn failed: %s", exc)
         return failed(f"cancel error: {exc}")
 
-    if accepted:
+    if verdict == "ok":
         note = None
     elif already:
         note = "The IRP says this IRN is already cancelled (IMS asked earlier); recorded now."
-    elif not refused:
-        # An answer that neither accepts nor refuses (not an object, empty,
-        # no Status, error data that cannot be read, "accepted" next to an
-        # error): the IRP may have cancelled it. The request stays on record,
-        # so the next press can take "already cancelled" as its answer.
+    elif verdict is None:
+        # An answer that neither accepts nor refuses, or says both (D114):
+        # the IRP may have cancelled it. Never recorded CANCELLED; the request
+        # stays on record, so the next press can take "already cancelled" as
+        # its answer.
         return failed(
             "The IRP's answer could not be read, so the cancel may or may not have "
             f"happened; press cancel again to confirm: {str(body)[:250]}"
