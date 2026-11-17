@@ -595,16 +595,24 @@ def test_owner_brief_expense_month_is_the_ist_month():
 
 
 def test_owner_brief_payroll_and_targets_use_the_ist_month_key():
-    """Self-found month labels: salary_records.month and targets.period are
-    'YYYY-MM' IST payroll/business periods."""
+    """Self-found month labels: the payroll month and targets.period are IST
+    business periods. Payroll is read from the payroll engine's ``payroll``
+    rows (audit L3-16: the engine is the official calculation), never from the
+    retired ``salary_records`` collection."""
     ctx = _jarvis_ctx(
-        salary_records=[
-            {"month": "2026-07", "net_pay": 15000.0},
-            {"month": "2026-06", "net_pay": 14000.0},  # last month: must stay out
+        payroll=[
+            {"month": 7, "year": 2026, "net_salary": 15000.0, "status": "PAID"},
+            {"month": 7, "year": 2026, "net_salary": 9000.0, "status": "DRAFT"},
+            {"month": 6, "year": 2026, "net_salary": 14000.0, "status": "PAID"},
         ],
+        # An old-calculation row for this month must not be counted.
+        salary_records=[{"month": 7, "year": 2026, "breakdown": {"net_pay": 1.0}}],
         targets=[{"store_id": STORE, "period": "2026-07", "target_amount": 1.0}],
     )
-    assert ctx["payroll_mtd"]["records_this_month"] == 1
+    assert ctx["payroll_mtd"] == {
+        "records_this_month": 2,  # June stays out
+        "total_paid_this_month": 15000.0,  # a draft is not paid
+    }
     assert len(ctx["targets"]) == 1
 
 

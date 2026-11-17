@@ -1390,24 +1390,25 @@ class JarvisAnalyticsEngine:
         except Exception:
             pass
 
-        # PAYROLL: salary records + advances + payslips signal
+        # PAYROLL: this month's payroll run. The payroll engine is the
+        # official salary calculation (owner ruling 2026-11-11, audit L3-16),
+        # so this reads its ``payroll`` rows; the retired ``salary_records``
+        # collection is no longer read.
         try:
-            col = get_db_collection("salary_records")
+            col = get_db_collection("payroll")
             if col is not None:
-                # BUG-104 (self-found): salary_records.month is a "YYYY-MM"
-                # payroll-period label, an IST business concept -- the month
-                # key must come from the IST clock, not the UTC box clock.
-                month_start = now_ist().strftime("%Y-%m-01")
+                # The payroll period is an IST business month.
+                today = now_ist()
+                rows = list(
+                    col.find({"month": today.month, "year": today.year}).limit(500)
+                )
                 ctx["payroll_mtd"] = {
-                    "records_this_month": col.count_documents(
-                        {"month": {"$gte": month_start[:7]}}
-                    ),
+                    "records_this_month": len(rows),
                     "total_paid_this_month": round(
                         sum(
-                            float(r.get("net_pay") or 0)
-                            for r in col.find(
-                                {"month": {"$gte": month_start[:7]}}
-                            ).limit(500)
+                            float(r.get("net_salary") or 0)
+                            for r in rows
+                            if r.get("status") == "PAID"
                         ),
                         2,
                     ),

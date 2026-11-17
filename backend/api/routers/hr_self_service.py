@@ -339,54 +339,32 @@ async def cancel_my_leave(
 async def my_latest_payslip(current_user: dict = Depends(get_current_user)):
     """The requesting employee's OWN most-recent payslip.
 
-    Reuses the payroll module's payslip builder so the shape exactly matches
-    GET /payroll/payslip/{id}. Searches the ``payslips`` cache first, then the
-    run-engine ``payroll`` collection. Self-only. Fail-soft.
+    The SAME read as GET /payroll/payslip/{id} (payroll._latest_payslip), so
+    the shape and the figures always match the payroll run. Self-only.
+    A read that fails answers 503, never "no payslip" (the screen would say
+    none was generated while one is saved).
+
+    This is the STAFF door, for every role: a payslip is shown once payroll is
+    APPROVED or PAID. While the newest run is a draft the answer carries
+    ``not_ready`` (which month) and the newest approved payslip, if any.
     """
     caller = _caller_id(current_user)
-    db = _get_db()
-    if db is None or not caller:
+    if not caller:
         return {"payslip": None}
+    db = _get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail=_PAYSLIP_UNREADABLE)
 
     try:
-        # Reuse payroll helpers (same collections + shape as /payroll/payslip).
-        from .payroll import (
-            _build_payslip_from_run_row,
-            _get_employee_details,
-            _strip_id,
-        )
+        from .payroll import _latest_payslip
 
-        payslips_coll = db.get_collection("payslips")
-        cached = list(
-            payslips_coll.find({"employee_id": caller})
-            .sort([("year", -1), ("month", -1)])
-            .limit(1)
-        )
-        if cached:
-            return {"payslip": _strip_id(cached[0])}
-
-        run_row = (
-            list(
-                db.get_collection("payroll")
-                .find({"employee_id": caller})
-                .sort([("year", -1), ("month", -1)])
-                .limit(1)
-            )
-            or [None]
-        )[0]
-        if not run_row:
-            return {"payslip": None}
-
-        employee = _get_employee_details(db, caller)
-        payslip = _build_payslip_from_run_row(run_row, employee, db)
-        try:
-            payslips_coll.insert_one({**payslip})
-        except Exception:
-            pass
-        return {"payslip": _strip_id(payslip)}
+        return _latest_payslip(db, caller, include_draft=False)
     except Exception as e:
         logger.error("Self payslip read failed: %s", e)
-        return {"payslip": None}
+        raise HTTPException(status_code=503, detail=_PAYSLIP_UNREADABLE)
+
+
+_PAYSLIP_UNREADABLE = "Your payslip could not be loaded just now. Try again in a minute."
 
 
 # ============================================================================

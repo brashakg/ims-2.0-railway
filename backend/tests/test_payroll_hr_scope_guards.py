@@ -418,14 +418,14 @@ def test_floor_roles_never_reach_these_routes_at_all(payroll_client, template):
 
 
 def test_payslip_gate_applies_before_the_db_is_touched(monkeypatch):
-    """With Mongo down the routes fail soft (200/None). Authorization must not
-    depend on the database being up."""
+    """With Mongo down the routes answer 503 (never a false "no payslip",
+    batch b27). Authorization must not depend on the database being up."""
     monkeypatch.setattr(payroll_mod, "_get_db", lambda: None)
     c = TestClient(_mounted(payroll_mod.router, "/payroll"))
     tok = _token(["ACCOUNTANT"], user_id=SELF_ID, store_ids=[STORE_A])
     assert c.get(f"/payroll/payslip/{OTHER_ID}", headers=_auth(tok)).status_code == 403
     own = c.get(f"/payroll/payslip/{SELF_ID}", headers=_auth(tok))
-    assert own.status_code == 200 and own.json() == {"payslip": None}
+    assert own.status_code == 503
 
 
 def test_unauthenticated_still_401(payroll_client):
@@ -1281,7 +1281,10 @@ def test_salary_calculate_refuses_even_your_own_id(payroll_client, role):
     assert r.status_code == 403, f"{role}: {r.text}"
 
 
-def test_salary_calculate_still_works_for_admin(payroll_client):
+def test_salary_calculate_is_switched_off_for_admin(payroll_client):
+    """Owner ruling 2026-11-11 (audit L3-16): the payroll engine is the
+    official calculation, so the old writer refuses even an admin and points
+    to Payroll Run. (It used to answer 200/201 here.)"""
     r = payroll_client.post(
         "/payroll/salary/calculate",
         json={
@@ -1293,7 +1296,8 @@ def test_salary_calculate_still_works_for_admin(payroll_client):
         },
         headers=_auth(_token(["ADMIN"], user_id="u-admin", store_ids=[])),
     )
-    assert r.status_code in (200, 201), r.text
+    assert r.status_code == 410, r.text
+    assert "Payroll Run" in r.json()["detail"]
 
 
 # ===========================================================================
