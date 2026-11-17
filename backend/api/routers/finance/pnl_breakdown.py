@@ -20,6 +20,7 @@ from ._shared import (
     _get_db,
     _payroll_by_store,
     _report_db,
+    _company_shop_ids,
     _store_maps,
     _store_name_map,
     compute_cogs_with_flag,
@@ -63,13 +64,11 @@ async def get_pnl_by_store(
     if not is_salary_admin(current_user):
         raise HTTPException(status_code=403, detail=SALARY_RESTRICTED_MESSAGE)
     db = _report_db(_get_db())  # no handle: 503, as on GET /pnl
-    # With a company filter the shop list decides which shops are in the
-    # table, so it is read strictly: unreadable must not read as "this company
-    # has no shop" (an empty table) -- the request fails instead.
-    s2e, _ = _store_maps(db, strict=True) if entity_id else _store_maps(db)
-    store_ids = (
-        [sid for sid, eid in s2e.items() if eid == entity_id] if entity_id else None
-    )
+    # The company filter is THE strict reader's (_company_shop_ids: a shop
+    # list that cannot be read answers 503, never "this company has no shop").
+    # Without the filter the shop list only labels the rows.
+    store_ids = _company_shop_ids(db, entity_id) if entity_id else None
+    s2e, _ = _store_maps(db)
 
     # Exclude DRAFT/CANCELLED and compare the date range as datetimes
     # (created_at is a BSON datetime). THE real-sale rule (api/utils/real_sale)
@@ -179,8 +178,7 @@ async def get_pnl_by_category(
     if store_id:
         store_ids = [store_id]
     elif entity_id:
-        s2e, _ = _store_maps(db)
-        store_ids = [sid for sid, eid in s2e.items() if eid == entity_id]
+        store_ids = _company_shop_ids(db, entity_id)
     if store_ids is not None:
         match["store_id"] = {"$in": store_ids}
     _apply_created_at_range(match, from_date, to_date)

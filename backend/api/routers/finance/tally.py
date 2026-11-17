@@ -20,7 +20,7 @@ from ._shared import (
     _get_db,
     _order_is_interstate,
     _require_org_finance,
-    _store_maps,
+    _company_shop_ids,
     _store_state_map,
     logger,
     router,
@@ -252,8 +252,7 @@ def _b2b_invoices(
     if store_id:
         store_ids = [store_id]
     elif entity_id:
-        s2e, _ = _store_maps(db)
-        store_ids = [sid for sid, eid in s2e.items() if eid == entity_id]
+        store_ids = _company_shop_ids(db, entity_id)
     if store_ids is not None:
         match["store_id"] = {"$in": store_ids}
     _apply_sale_range(match, from_date, to_date)
@@ -661,8 +660,7 @@ async def get_tally_sales_jv(
     if store_id:
         store_ids = [store_id]
     elif entity_id:
-        s2e, _ = _store_maps(db)
-        store_ids = [sid for sid, eid in s2e.items() if eid == entity_id]
+        store_ids = _company_shop_ids(db, entity_id)
     if store_ids is not None:
         match["store_id"] = {"$in": store_ids}
     _apply_sale_range(match, from_date, to_date)

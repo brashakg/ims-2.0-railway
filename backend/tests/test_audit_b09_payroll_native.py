@@ -59,6 +59,7 @@ from strict_fakes import StrictCollection, StrictDB  # noqa: E402
 from api.routers import finance as finance_router  # noqa: E402
 from api.routers import hr_self_service  # noqa: E402
 from api.routers import payroll as payroll_router  # noqa: E402
+from api.routers import reconciliation  # noqa: E402
 from api.routers.auth import get_current_user  # noqa: E402
 from api.routers.finance import _shared as finance_shared  # noqa: E402
 from api.routers.finance import period_lock  # noqa: E402
@@ -147,6 +148,7 @@ class Rig:
         app.include_router(payroll_router.router, prefix="/api/v1/payroll")
         app.include_router(hr_self_service.router, prefix="/api/v1/hr")
         app.include_router(finance_router.router, prefix="/api/v1/finance")
+        app.include_router(reconciliation.router, prefix="/api/v1/finance")
         app.dependency_overrides[get_current_user] = lambda: user
         return TestClient(app, raise_server_exceptions=False)
 
@@ -1271,6 +1273,62 @@ def test_r4a_by_store_company_filter_applies_to_payroll_and_an_unreadable_shop_l
         assert "stores" not in reply.text
         # Without the filter the shop list only labels the rows: figures stay.
         assert table() == [(STORE, cost), ("ST-B09-OTHER", 11000.0)]
+
+
+COMPANY_REPORTS = ["pnl/by-category", "pnl/by-store", "tally/sales-jv", "b2b-invoices",
+                   "tally/tender-receipt-jv"]
+
+
+@pytest.mark.parametrize("report", COMPANY_REPORTS)
+def test_r4a_company_filter_over_an_unreadable_shop_list_answers_503_on_every_report(
+    rig, monkeypatch, report
+):
+    """Every report an admin can narrow to ONE COMPANY turns the company into
+    its shops from the shop list. With that list unreadable the company had
+    no shop, so the request answered 200 with an empty report: no category
+    and a revenue of 0 on the by-category P&L, a Tally sales JV with no
+    voucher, an empty B2B invoice book, an empty tender receipt JV (the
+    by-store table already refused, with a bare 500). All five now answer 503
+    from the one reader (_company_shop_ids). A company that truly has no shop
+    keeps its plain empty report."""
+    from api.routers.finance import tally
+
+    _finance_on(rig, monkeypatch)
+    monkeypatch.setattr(tally, "_get_db", lambda: rig.db)
+    monkeypatch.setattr(reconciliation, "_get_db", lambda: rig.db)
+    monkeypatch.setattr(reconciliation, "tender_receipt_policy_enabled", lambda **_: True)
+    rig.db.get_collection("stores").insert_many(
+        [{"store_id": STORE, "entity_id": ENTITY, "state": "Jharkhand"},
+         {"store_id": "ST-B09-OTHER", "entity_id": "ENT-B09-OTHER", "state": "Jharkhand"}])
+    rig.db.get_collection("customers").insert_one(
+        {"customer_id": "CUST-B09-B2B", "name": "ZZ Trade Buyer", "customer_type": "B2B",
+         "gstin": "20ABCDE1234F1Z5", "state": "Jharkhand"})
+    rig.db.get_collection("orders").insert_one(
+        {"order_id": "ORD-B09-CO", "order_number": "ORD-B09-CO", "store_id": STORE,
+         "customer_id": "CUST-B09-B2B", "customer_name": "ZZ Trade Buyer", "status": "DELIVERED",
+         "payment_status": "PAID", "created_at": datetime(YEAR, MONTH, 10, 12),
+         "subtotal": 1000.0, "tax_amount": 180.0, "grand_total": 1180.0,
+         "items": [{"product_id": "P-B09-CO", "category": "FRAME", "item_type": "FRAME",
+                    "quantity": 1, "unit_price": 1000.0, "line_total": 1000.0, "total": 1000.0,
+                    "gst_rate": 18, "tax_amount": 180.0}],
+         "payments": [{"method": "CASH", "amount": 1180.0}]})
+    c = rig.client()
+
+    def read(entity):
+        return c.get(f"/api/v1/finance/{report}?entity_id={entity}&{RANGE}")
+
+    full, none = read(ENTITY), read("ENT-B09-NO-SHOP")
+    assert full.status_code == 200 and none.status_code == 200, (full.text, none.text)
+    assert full.content != none.content  # the company's sale is in its report
+    for how in ("call", "cursor"):
+        with _Unreadable(monkeypatch, rig, "stores", how):
+            reply = read(ENTITY)
+            assert reply.status_code == 503, reply.text  # was 200 with the empty report
+            assert "could not be reached" in _detail(reply)
+            assert "ORD-B09-CO" not in reply.text and "stores" not in reply.text
+    again = read(ENTITY)
+    assert again.status_code == 200 and again.content != none.content
+    assert read("ENT-B09-NO-SHOP").status_code == 200  # no shop: the plain empty report
 
 
 @pytest.mark.parametrize("collection", ["payroll", "payslips"])

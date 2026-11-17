@@ -511,6 +511,21 @@ def _store_maps(db, *, strict: bool = False):
     return s2e, enames
 
 
+def _company_shop_ids(db, entity_id) -> list:
+    """The shops of ONE company: THE company filter (``entity_id``) of every
+    report that takes one -- the by-store and by-category P&L, the Tally sales
+    JV, the B2B invoice book, the tender receipt JV. The shop list decides
+    which shops are in the report, so it is read strictly: unreadable, the
+    company matched no shop and the report answered 200 with nothing in it
+    (revenue 0, a Tally file with no voucher) -- it answers 503 instead. A
+    company that has no shop still gets [] (its plain empty report)."""
+    try:
+        s2e, _ = _store_maps(db, strict=True)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=RECORDS_UNREACHABLE) from exc
+    return [sid for sid, eid in s2e.items() if eid == entity_id]
+
+
 def _store_state_map(db, *, strict=False) -> dict:
     """store_id -> the shop fields the place-of-supply rule reads (state_code,
     state, GSTIN -- org_validation.shop_state_code), for _order_is_interstate."""
