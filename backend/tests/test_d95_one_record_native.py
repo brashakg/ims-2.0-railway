@@ -690,3 +690,28 @@ def test_a_named_unit_another_return_took_is_replaced_by_one_other(native, monke
     assert db["returns"].find_one({"_id": "ret:RET-X"})["damaged_unit_ids"] == ["U2"]
     units = {u["_id"]: u["status"] for u in db["stock_units"].find({})}
     assert units == {"U1": "AVAILABLE", "U2": "QUARANTINED"}
+
+
+def test_a_record_an_older_build_wrote_is_found_before_the_press_inserts(native, monkeypatch):
+    """D95(1): an older build's Needs completing wrote its record under
+    'recovered:<rid>' -- an _id the press's 'ret:<rid>' never collides with,
+    and there is no index on return_id here. The press looks for a record of
+    its return BEFORE its insert: 409, one record (it inserted a second
+    COMPLETED record and answered 201)."""
+    db, out = native["db"], {}
+    real_keep = returns_router._keep_order_refund_hold
+
+    def older_build_completes_it(order_id, rid, *a, extra=None, **k):
+        res = real_keep(order_id, rid, *a, extra=extra, **k)
+        if "money_out" in (extra or {}) and "rid" not in out:
+            out["rid"] = rid
+            db["returns"].insert_one({"_id": f"recovered:{rid}", "return_id": rid, "order_id": "ORD-1",
+                                      "status": "COMPLETED", "recovered": True, "store_id": STORE})
+        return res
+
+    monkeypatch.setattr(returns_router, "_keep_order_refund_hold", older_build_completes_it)
+    r = _press(_payload())
+    assert out.get("rid") and r.status_code == 409 and r.json()["detail"] == returns_router.RECORD_TAKEN_MESSAGE, r.text
+    b = _books(db)
+    assert b["records"] == [(f"recovered:{out['rid']}", "COMPLETED", True)] and b["units"] == ["SOLD", "SOLD"]
+    assert b["audits"] == []
