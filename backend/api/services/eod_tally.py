@@ -1133,7 +1133,9 @@ def open_session(
             existing.pop("_id", None)
             return {"ok": True, "session": existing, "already_open": True}
         return {"ok": False, "error": "already_open", "http": 409}
-    except Exception as exc:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
+        # The driver's text (hosts, index names) is for the log, not the reply.
+        logger.exception("Till open failed for %s on %s", store_id, session_date)
         # The insert may have committed with only its acknowledgement lost
         # (the id is this request's own).
         try:
@@ -1141,7 +1143,7 @@ def open_session(
         except Exception:  # noqa: BLE001
             landed = None
         if landed is None:
-            return {"ok": False, "error": f"write_failed:{exc}", "http": 500}
+            return {"ok": False, "error": "write_failed", "http": 500}
 
     settle_followup(coll, {"_id": session_id}, doc)
     doc.pop("_id", None)
@@ -1380,7 +1382,8 @@ def blind_submit(
             },
             return_document=ReturnDocument.AFTER,
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
+        logger.exception("Till blind count failed for session %s", session_id)
         # The write may have committed with only its acknowledgement lost.
         # Answering "failed" then told the close screens the count never
         # reached the till, for a drawer the till shows as counted.
@@ -1389,7 +1392,7 @@ def blind_submit(
             "blind_submitted_at", "blind_submitted_by", now, actor,
         )
         if updated is None:
-            return {"ok": False, "error": f"submit_failed:{exc}", "http": 500}
+            return {"ok": False, "error": "submit_failed", "http": 500}
     if updated is None:
         # Lost the race (status flipped off OPEN between read and update).
         return {"ok": False, "error": "already_submitted", "http": 409}
@@ -1845,13 +1848,14 @@ def lock_session(
             },
             return_document=ReturnDocument.AFTER,
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
+        logger.exception("Till lock failed for session %s", session_id)
         # The lock may have committed with only its acknowledgement lost.
         locked = _own_write_landed(
             coll, session_id, STATUS_LOCKED, "locked_at", "locked_by", now, actor
         )
         if locked is None:
-            return {"ok": False, "error": f"lock_failed:{exc}", "http": 500}
+            return {"ok": False, "error": "lock_failed", "http": 500}
     if locked is None:
         present = None
         try:

@@ -3872,7 +3872,8 @@ class TestR12TillWritesKeepTheirAuditRow:
         fired = _lose_ack(monkeypatch, coll, "find_one_and_update", _sets_status(till.STATUS_LOCKED))
         _fail_read_back(monkeypatch, coll, fired)
         res = till.lock_session(db, sid, actor=MANAGER, variance_note="Rs 500 short")
-        assert (res["ok"], res["http"]) == (False, 500)
+        # The bare code: the driver's text is for the log, not the reply.
+        assert (res["ok"], res["http"], res["error"]) == (False, 500, "lock_failed")
         assert _rows(audit_rows, "till.lock", sid) == []
         again = till.lock_session(db, sid, actor=MANAGER, variance_note="Rs 500 short")
         assert (again["http"], again["error"]) == (409, "already_locked")
@@ -3915,7 +3916,7 @@ class TestR12TillWritesKeepTheirAuditRow:
         _fail_read_back(monkeypatch, coll, fired)
         notes = [{"face": 500, "kind": "note", "pieces": 1}]
         res = till.blind_submit(db, c, blind_denominations=notes, idempotency_key="k1", actor=CASHIER)
-        assert (res["ok"], res["http"]) == (False, 500)
+        assert (res["ok"], res["http"], res["error"]) == (False, 500, "submit_failed")
         assert _rows(audit_rows, "till.blind_submit", c) == []
         again = till.blind_submit(db, c, blind_denominations=notes, idempotency_key="k1", actor=CASHIER)
         assert again["ok"] and again["idempotent"], again
@@ -3945,7 +3946,7 @@ class TestR12TillWritesKeepTheirAuditRow:
         res = till.open_session(db, **kw)
         assert fired == [True]
         if read_back_fails:
-            assert (res["ok"], res["http"]) == (False, 500)
+            assert (res["ok"], res["http"], res["error"]) == (False, 500, "write_failed")
             assert _rows(audit_rows, "till.open") == []
         else:
             assert res["ok"] and not res.get("already_open"), res
