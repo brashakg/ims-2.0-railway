@@ -1280,6 +1280,19 @@ def test_lock_that_cannot_be_read_refuses_payroll_writes_in_that_month(
     assert _saved_figures(rig) == stored
 
 
+def test_incentive_summary_that_cannot_be_read_is_not_answered_as_not_found(rig, monkeypatch):
+    path = f"/api/v1/payroll/incentive-summary/{EMP}/{MONTH}/{YEAR}"
+    rig.db.get_collection("incentives").insert_one(
+        {"staff_id": EMP, "month": MONTH, "year": YEAR, "amount": 500})
+    c = rig.client()
+    assert c.get(path).json()["incentive"]["amount"] == 500
+    with _Unreadable(monkeypatch, rig, "incentives"):
+        reply = c.get(path)
+        assert reply.status_code == 500, reply.text  # was 200 "Incentive data not found"
+        assert "incentive" not in reply.json()
+    assert c.get(path).json()["incentive"]["amount"] == 500
+
+
 def test_other_postings_keep_their_fail_soft_lock_check():
     """Only payroll asks for the strict check: a till sale or a supplier bill
     is not stopped by a lock that cannot be read (unchanged)."""

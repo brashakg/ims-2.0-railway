@@ -65,6 +65,10 @@ export function PayrollRunPage() {
   const [busy, setBusy] = useState(false);
   const [payslip, setPayslip] = useState<PayrollRow | null>(null);
   const [summary, setSummary] = useState<StatutorySummary | null>(null);
+  // A failed load says so: an empty list here reads as "no salary setups" /
+  // "payroll not run yet", which is a different fact.
+  const [configsFailed, setConfigsFailed] = useState(false);
+  const [rowsFailed, setRowsFailed] = useState(false);
 
   const scope = useCallback(
     () => (entityId ? { entity_id: entityId } : {}),
@@ -75,8 +79,10 @@ export function PayrollRunPage() {
     try {
       const r = await payrollApi.listConfigs(entityId ? { entity_id: entityId } : {});
       setConfigs(r.configs || []);
+      setConfigsFailed(false);
     } catch (e) {
       setConfigs([]);
+      setConfigsFailed(!isForbiddenError(e));
       if (isForbiddenError(e)) {
         setNoAccess(forbiddenDetail(e, 'Payroll data is restricted to administrators.'));
       }
@@ -89,9 +95,11 @@ export function PayrollRunPage() {
       setRows(r.rows || []);
       setTotals(r.totals || {});
       setNoAccess(null);
+      setRowsFailed(false);
     } catch (e) {
       setRows([]);
       setTotals({});
+      setRowsFailed(!isForbiddenError(e));
       if (isForbiddenError(e)) {
         setNoAccess(forbiddenDetail(e, 'The payroll register is restricted to administrators.'));
       }
@@ -268,7 +276,11 @@ export function PayrollRunPage() {
         <div className="px-4 py-2 text-sm font-medium text-gray-700 border-b border-gray-100">
           1. Inputs — {configs.length} employee{configs.length === 1 ? '' : 's'}
         </div>
-        {configs.length === 0 ? (
+        {configsFailed ? (
+          <div role="alert" className="p-6 text-center text-red-700 text-sm">
+            The salary setups could not be loaded. Reload the page to try again.
+          </div>
+        ) : configs.length === 0 ? (
           <div className="p-6 text-center text-gray-500 text-sm">
             No salary configs in scope. Add them under Salary Setup first.
           </div>
@@ -362,6 +374,10 @@ export function PayrollRunPage() {
         </div>
         {noAccess ? (
           <PayrollAccessNotice message={noAccess} what="the payroll register" />
+        ) : rowsFailed ? (
+          <div role="alert" className="p-6 text-center text-red-700 text-sm">
+            The payroll register could not be loaded. Reload the page to try again.
+          </div>
         ) : rows.length === 0 ? (
           <div className="p-6 text-center text-gray-500 text-sm">No payroll rows yet. Run payroll above.</div>
         ) : (

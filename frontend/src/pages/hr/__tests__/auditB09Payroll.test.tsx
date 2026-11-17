@@ -134,6 +134,31 @@ describe('L3-02 Payroll Run: Tally JV and PF ECR wait for an approved row', () =
   });
 });
 
+// Codex round 4 (R4-A class): a failed read is not an empty list. The screen
+// used to say "No payroll rows yet. Run payroll above." when the register
+// could not be read, and "No salary configs in scope" when the setups could not.
+describe('Payroll Run: a list that could not be loaded says so', () => {
+  it('the register read failed: no "No payroll rows yet"', async () => {
+    payrollApi.listRunRows.mockRejectedValue(new Error('Payroll operation failed. Please try again.'));
+    render(<PayrollRunPage />);
+    expect(await screen.findByText(/The payroll register could not be loaded/)).toBeInTheDocument();
+    expect(screen.queryByText(/No payroll rows yet/)).not.toBeInTheDocument();
+  });
+
+  it('the salary setups read failed: no "No salary configs in scope"', async () => {
+    payrollApi.listConfigs.mockRejectedValue(new Error('Payroll operation failed. Please try again.'));
+    render(<PayrollRunPage />);
+    expect(await screen.findByText(/The salary setups could not be loaded/)).toBeInTheDocument();
+    expect(screen.queryByText(/No salary configs in scope/)).not.toBeInTheDocument();
+  });
+
+  it('an empty month still reads as empty', async () => {
+    render(<PayrollRunPage />);
+    expect(await screen.findByText(/No payroll rows yet/)).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+});
+
 // ---------------------------------------------------------------------------
 // L3-14
 // ---------------------------------------------------------------------------

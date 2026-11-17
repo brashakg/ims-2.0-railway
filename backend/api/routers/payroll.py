@@ -1456,16 +1456,12 @@ async def get_incentive_summary(
         return {"incentive": None}
 
     try:
-        # Try to get from incentives collection if available
-        try:
-            incentives_coll = db.get_collection("incentives")
-            incentive = incentives_coll.find_one(
-                {"staff_id": employee_id, "month": month, "year": year}
-            )
-            return {"incentive": _strip_id(incentive)}
-        except Exception as e:
-            logger.error(f"Error fetching incentive: {str(e)}", exc_info=True)
-            return {"incentive": None, "message": "Incentive data not found"}
+        # A failed read answers 500 below: it used to answer 200 "Incentive
+        # data not found", which reads as "no incentive this month".
+        incentive = db.get_collection("incentives").find_one(
+            {"staff_id": employee_id, "month": month, "year": year}
+        )
+        return {"incentive": _strip_id(incentive)}
     except Exception as e:
         logger.error("Payroll operation failed: %s", e)
         raise HTTPException(
