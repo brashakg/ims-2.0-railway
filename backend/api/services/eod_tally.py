@@ -400,6 +400,12 @@ def raise_count_not_compared_task(
 # (``manager_followup``), and whatever next meets the record -- the same
 # request, its retry, or a read -- raises it and marks it paid. Every owed task
 # has a fixed id, so raising it twice stores it once.
+#
+# The AUDIT ROW of a till write (open, blind count, lock, reopen) is owed the
+# same way (lead decision D84): it rides on the same record as an ``audit``
+# entry with a fixed ``log_id``, so a write whose request did not carry on (a
+# lost acknowledgement whose read-back failed too, a stopped process) still
+# gets its one row from the identical retry or the next read.
 
 _SESSION_READ_FAILED = (
     "The till could not be read just now. Nothing was changed. Try again in a moment."
@@ -424,6 +430,46 @@ def owed_followup(*tasks: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     return {"id": uuid.uuid4().hex, "pending": bool(owed), "tasks": owed}
 
 
+def owed_audit(
+    action: str,
+    *,
+    session_id: str,
+    at: datetime,
+    actor: Optional[Dict[str, Any]],
+    store_id: Optional[str],
+    before: Any = None,
+    after: Any = None,
+    detail: Optional[Dict[str, Any]] = None,
+    severity: str = "INFO",
+) -> Dict[str, Any]:
+    """The audit row a till write owes, as an entry for ``owed_followup``: the
+    whole row, decided BEFORE the write and stored WITH it. ``log_id`` is
+    fixed by (action, session, instant of the write), so writing the row twice
+    stores it once, and a reopen and relock (a later instant) is a new row."""
+    stamp = _stored_instant(at)
+    raw = f"{action}:{session_id}:{stamp.isoformat()}"
+    return {
+        "kind": "audit",
+        "row": {
+            "log_id": "AUD-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12].upper(),
+            "action": action,
+            "entity_type": "till_session",
+            "entity_id": session_id,
+            "store_id": store_id or (actor or {}).get("active_store_id"),
+            "user_id": (actor or {}).get("user_id"),
+            "user_name": (actor or {}).get("full_name") or (actor or {}).get("username"),
+            "severity": severity,
+            "source": "eod_tally",
+            "before_state": before,
+            "after_state": after,
+            "detail": detail or {},
+            # When the write happened: the row itself may be written later,
+            # by the retry or read that repairs it.
+            "occurred_at": stamp,
+        },
+    }
+
+
 def unpaid_followup_tasks(doc: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """The tasks a record still owes, for a later write that restates the
     field (a lock after a count) to carry forward."""
@@ -432,10 +478,10 @@ def unpaid_followup_tasks(doc: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]
 
 
 def settle_followup(coll, key: Dict[str, Any], doc: Optional[Dict[str, Any]]) -> None:
-    """Raise the manager task(s) the stored record ``doc`` still owes and mark
-    them paid. Nothing owed -> nothing read or written. A task that cannot be
-    stored leaves the record owing, for the next retry or read. Never raises:
-    the close that owes it is already committed."""
+    """Raise the manager task(s) and write the audit row the stored record
+    ``doc`` still owes, and mark them paid. Nothing owed -> nothing read or
+    written. One that cannot be stored leaves the record owing, for the next
+    retry or read. Never raises: the close that owes it is already committed."""
     owed = (doc or {}).get(FOLLOWUP_FIELD) or {}
     if not owed.get("pending"):
         return
@@ -443,6 +489,7 @@ def settle_followup(coll, key: Dict[str, Any], doc: Optional[Dict[str, Any]]) ->
         "variance": raise_variance_task,
         "uncounted": raise_count_not_on_till_task,
         "uncompared": raise_count_not_compared_task,
+        "audit": _audit,
     }
     try:
         paid = [
@@ -989,6 +1036,8 @@ def open_session(
         # The shared drawer already exists. If nobody had declared a float on
         # it and this door just did, that declaration lands -- see
         # _adopt_declared_float.
+        # An open whose reply was lost may still owe its audit row.
+        settle_followup(coll, {"_id": existing.get("_id")}, existing)
         if bool(denoms) or opening_float_paisa is not None:
             existing = _adopt_declared_float(
                 coll,
@@ -1050,6 +1099,18 @@ def open_session(
         "locked_by": None,
         "reopen_count": 0,
         "history": [],
+        # The audit row this open owes, stored WITH it.
+        FOLLOWUP_FIELD: owed_followup(
+            owed_audit(
+                "till.open",
+                session_id=session_id,
+                at=now,
+                actor=actor,
+                store_id=store_id,
+                after={"status": STATUS_OPEN, "opening_float_paisa": declared},
+                detail={"session_date": session_date, "shift": (shift or "").upper() or None},
+            )
+        ),
     }
     try:
         coll.insert_one(dict(doc))
@@ -1073,16 +1134,16 @@ def open_session(
             return {"ok": True, "session": existing, "already_open": True}
         return {"ok": False, "error": "already_open", "http": 409}
     except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "error": f"write_failed:{exc}", "http": 500}
+        # The insert may have committed with only its acknowledgement lost
+        # (the id is this request's own).
+        try:
+            landed = coll.find_one({"_id": session_id})
+        except Exception:  # noqa: BLE001
+            landed = None
+        if landed is None:
+            return {"ok": False, "error": f"write_failed:{exc}", "http": 500}
 
-    _audit(
-        "till.open",
-        entity_id=session_id,
-        actor=actor,
-        after={"status": STATUS_OPEN, "opening_float_paisa": declared},
-        store_id=store_id,
-        detail={"session_date": session_date, "shift": doc["shift"]},
-    )
+    settle_followup(coll, {"_id": session_id}, doc)
     doc.pop("_id", None)
     return {"ok": True, "session": doc}
 
@@ -1287,6 +1348,24 @@ def blind_submit(
                     # Stored WITH the count, so the check-by-hand task cannot
                     # be lost between this write and the lines below it.
                     FOLLOWUP_FIELD: owed_followup(
+                        # Audit records the FULL truth (expected + variance)
+                        # -- the redaction is only for the cashier's HTTP
+                        # response, not the immutable trail.
+                        owed_audit(
+                            "till.blind_submit",
+                            session_id=session_id,
+                            at=now,
+                            actor=actor,
+                            store_id=store_id,
+                            before={"status": STATUS_OPEN},
+                            after={
+                                "status": STATUS_BLIND_SUBMITTED,
+                                "blind_count_paisa": counted,
+                                "expected_cash_paisa": expected_cash_paisa,
+                                "variance_paisa": variance_paisa,
+                            },
+                            detail={"session_date": session.get("session_date")},
+                        ),
                         {
                             "kind": "uncompared",
                             "store_id": store_id,
@@ -1315,24 +1394,9 @@ def blind_submit(
         # Lost the race (status flipped off OPEN between read and update).
         return {"ok": False, "error": "already_submitted", "http": 409}
 
-    _audit(
-        "till.blind_submit",
-        entity_id=session_id,
-        actor=actor,
-        before={"status": STATUS_OPEN},
-        # Audit records the FULL truth (expected + variance) -- the redaction is
-        # only for the cashier's HTTP response, not the immutable trail.
-        after={
-            "status": STATUS_BLIND_SUBMITTED,
-            "blind_count_paisa": counted,
-            "expected_cash_paisa": expected_cash_paisa,
-            "variance_paisa": variance_paisa,
-        },
-        store_id=store_id,
-        detail={"session_date": session.get("session_date")},
-    )
-    # The check-by-hand task of an uncompared count (D76), from the record the
-    # count stored. Only the one count that landed reaches here.
+    # The audit row, and the check-by-hand task of an uncompared count (D76),
+    # from the record the count stored. Only the one count that landed reaches
+    # here.
     settle_followup(coll, {"_id": session_id}, updated)
     updated["session_id"] = updated.get("_id")
     return {"ok": True, "session": updated}
@@ -1737,6 +1801,30 @@ def lock_session(
                     # cannot. A task the count still owes is carried forward.
                     FOLLOWUP_FIELD: owed_followup(
                         *unpaid_followup_tasks(session),
+                        # The lock leaves the count's figures as they stand,
+                        # so the row is known before the write.
+                        owed_audit(
+                            "till.lock",
+                            session_id=session_id,
+                            at=now,
+                            actor=actor,
+                            store_id=store_id,
+                            before={"status": STATUS_BLIND_SUBMITTED},
+                            after={
+                                "status": STATUS_LOCKED,
+                                "zread_number": zread,
+                                "expected_cash_paisa": session.get("expected_cash_paisa"),
+                                "variance_paisa": variance_paisa,
+                                "variance_status": session.get("variance_status"),
+                                "variance_note": clean_note or None,
+                            },
+                            severity=(
+                                "WARNING"
+                                if str(session.get("variance_status")) != "BALANCED"
+                                else "INFO"
+                            ),
+                            detail={"session_date": day},
+                        ),
                         {
                             "kind": "variance",
                             "store_id": store_id,
@@ -1776,26 +1864,9 @@ def lock_session(
         # Still OPEN (never blind-submitted) -> cannot lock yet.
         return {"ok": False, "error": "not_submitted", "http": 409}
 
-    _audit(
-        "till.lock",
-        entity_id=session_id,
-        actor=actor,
-        before={"status": STATUS_BLIND_SUBMITTED},
-        after={
-            "status": STATUS_LOCKED,
-            "zread_number": zread,
-            "expected_cash_paisa": locked.get("expected_cash_paisa"),
-            "variance_paisa": locked.get("variance_paisa"),
-            "variance_status": locked.get("variance_status"),
-            "variance_note": locked.get("variance_note"),
-        },
-        store_id=store_id,
-        severity="WARNING" if str(locked.get("variance_status")) != "BALANCED" else "INFO",
-        detail={"session_date": day},
-    )
-    # Manager alert above the band (owner ruling 2026-08-25), from the record
-    # the lock stored. After the lock won -- exactly one of two concurrent
-    # locks reaches this line.
+    # The audit row, and the manager alert above the band (owner ruling
+    # 2026-08-25), from the record the lock stored. After the lock won --
+    # exactly one of two concurrent locks reaches this line.
     settle_followup(coll, {"_id": session_id}, locked)
     locked["session_id"] = locked.get("_id")
     return {"ok": True, "session": locked}
@@ -1849,6 +1920,21 @@ def reopen_session(
     if not (roles & allowed):
         return {"ok": False, "error": "not_permitted_to_reopen", "http": 403}
 
+    # A write that already landed may still owe its audit row or manager task
+    # (its reply was lost, or the process stopped first): the retry pays it.
+    settle_followup(coll, {"_id": session_id}, session)
+    # The identical retry of a reopen that already landed (same person, same
+    # reason, the drawer still as that reopen left it): the saved state, with
+    # nothing written again.
+    if (
+        str(session.get("status")) == STATUS_BLIND_SUBMITTED
+        and session.get("reopened_at") is not None
+        and session.get("reopened_by") == (actor or {}).get("user_id")
+        and session.get("reopen_reason") == clean_reason
+    ):
+        session["session_id"] = session.get("_id")
+        return {"ok": True, "session": session, "idempotent": True}
+
     now = datetime.utcnow()
     history_entry = {
         "action": "reopen",
@@ -1871,6 +1957,24 @@ def reopen_session(
                     "reopen_reason": clean_reason,
                     "locked_at": None,
                     "locked_by": None,
+                    # The audit row of this soft-lock release, stored WITH it.
+                    FOLLOWUP_FIELD: owed_followup(
+                        *unpaid_followup_tasks(session),
+                        owed_audit(
+                            "till.reopen",
+                            session_id=session_id,
+                            at=now,
+                            actor=actor,
+                            store_id=store_id,
+                            before={"status": STATUS_LOCKED},
+                            after={"status": STATUS_BLIND_SUBMITTED, "reason": clean_reason},
+                            severity="WARNING",
+                            detail={
+                                "session_date": session.get("session_date"),
+                                "reopen_count": int(session.get("reopen_count") or 0) + 1,
+                            },
+                        ),
+                    ),
                 },
                 "$inc": {"reopen_count": 1},
                 "$push": {"history": history_entry},
@@ -1910,23 +2014,19 @@ def reopen_session(
     except Exception:  # noqa: BLE001
         # The driver's text (hosts, index names) is for the log, not the reply.
         logger.exception("Till reopen failed for session %s", session_id)
-        return {"ok": False, "error": "reopen_failed", "http": 500}
+        # The reopen may have committed with only its acknowledgement lost.
+        reopened = _own_write_landed(
+            coll, session_id, STATUS_BLIND_SUBMITTED, "reopened_at", "reopened_by", now, actor
+        )
+        if reopened is None:
+            return {"ok": False, "error": "reopen_failed", "http": 500}
     if reopened is None:
         status = str(session.get("status"))
         if status != STATUS_LOCKED:
             return {"ok": False, "error": "not_locked", "http": 409}
         return {"ok": False, "error": "reopen_failed", "http": 409}
 
-    _audit(
-        "till.reopen",
-        entity_id=session_id,
-        actor=actor,
-        before={"status": STATUS_LOCKED},
-        after={"status": STATUS_BLIND_SUBMITTED, "reason": clean_reason},
-        store_id=store_id,
-        severity="WARNING",
-        detail={"session_date": session.get("session_date"), "reopen_count": reopened.get("reopen_count")},
-    )
+    settle_followup(coll, {"_id": session_id}, reopened)
     reopened["session_id"] = reopened.get("_id")
     return {"ok": True, "session": reopened}
 
@@ -2232,40 +2332,26 @@ def ensure_till_indexes(db) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _audit(
-    action: str,
-    *,
-    entity_id: str,
-    actor: Optional[Dict[str, Any]],
-    before: Any = None,
-    after: Any = None,
-    detail: Optional[Dict[str, Any]] = None,
-    store_id: Optional[str] = None,
-    severity: str = "INFO",
-) -> None:
-    """One append-only hash-chained audit row via AuditRepository.create (NEVER
-    append_audit_entry). Fail-soft -- an audit failure never undoes the business
-    write that triggered it."""
+def _audit(*, row: Dict[str, Any]) -> bool:
+    """Write ONE owed audit row (see ``owed_audit``) through
+    AuditRepository.create (append-only, hash-chained; NEVER
+    append_audit_entry), once: ``log_id`` is the row's _id, so a row already
+    there is left alone. True when the row is KNOWN to be stored; False when it
+    is not, so the record that owes it keeps owing it. Never raises -- an
+    audit failure never undoes the business write that owes the row."""
     try:
         from api.dependencies import get_audit_repository
 
         repo = get_audit_repository()
         if repo is None:
-            return
-        repo.create(
-            {
-                "action": action,
-                "entity_type": "till_session",
-                "entity_id": entity_id,
-                "store_id": store_id or (actor or {}).get("active_store_id"),
-                "user_id": (actor or {}).get("user_id"),
-                "user_name": (actor or {}).get("full_name") or (actor or {}).get("username"),
-                "severity": severity,
-                "source": "eod_tally",
-                "before_state": before,
-                "after_state": after,
-                "detail": detail or {},
-            }
-        )
+            return False
+        coll = getattr(repo, "collection", None)
+
+        def stored() -> bool:
+            return coll is not None and coll.find_one({"log_id": row["log_id"]}, {"_id": 1}) is not None
+
+        # create() is fail-soft (None), also when a racing writer got there
+        # first: either way the row must be there.
+        return stored() or bool(repo.create(dict(row))) or stored()
     except Exception:  # noqa: BLE001
-        return
+        return False

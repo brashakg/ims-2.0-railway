@@ -100,19 +100,37 @@ def _pin_environment(monkeypatch):
     )
 
 
+class _AuditStore:
+    """The audit store as the services meet it. A row that names its own
+    ``log_id`` is stored once: a second create of that id is refused, as the
+    real collection's _id does. ``up`` False = the store cannot be written
+    (create answers None, as the real one does); ``stop`` = raise that once
+    instead of writing (the process stopping right there)."""
+
+    def __init__(self, rows, up=lambda: True, stop=None):
+        self.rows, self.up, self.stop = rows, up, stop
+        self.collection = self
+
+    def find_one(self, query, *a, **k):
+        key = (query or {}).get("log_id")
+        return next((r for r in self.rows if key and r.get("log_id") == key), None)
+
+    def create(self, data):
+        if self.stop:
+            raise self.stop.pop()
+        if not self.up() or self.find_one(data):
+            return None
+        self.rows.append(dict(data))
+        return {"log_id": data.get("log_id") or f"AUD-{len(self.rows)}"}
+
+
 @pytest.fixture(autouse=True)
 def audit_rows(monkeypatch) -> List[Dict[str, Any]]:
     """Capture audit writes at the accessor the services use. Autouse, so no
     test here can write an audit row into a real database."""
     rows: List[Dict[str, Any]] = []
-
-    class _Repo:
-        def create(self, data):
-            rows.append(dict(data))
-            return {"log_id": f"AUD-{len(rows)}"}
-
-    monkeypatch.setattr("api.dependencies.get_audit_repository", lambda: _Repo())
-    monkeypatch.setattr(reports_router, "get_audit_repository", lambda: _Repo())
+    monkeypatch.setattr("api.dependencies.get_audit_repository", lambda: _AuditStore(rows))
+    monkeypatch.setattr(reports_router, "get_audit_repository", lambda: _AuditStore(rows))
     return rows
 
 
@@ -3483,7 +3501,9 @@ class TestR11TillLockAndCountKeepTheirFollowUp:
         assert till.blind_submit(db, c, blind_denominations=notes, actor=CASHIER)["ok"]
         assert till.lock_session(db, c, actor=MANAGER)["ok"]
         owed = _till(db, c)["manager_followup"]
-        assert owed["pending"] is True and [t["kind"] for t in owed["tasks"]] == ["uncompared"]
+        # (beside the audit rows of the count and of the lock)
+        assert owed["pending"] is True
+        assert [t["kind"] for t in owed["tasks"] if t["kind"] != "audit"] == ["uncompared"]
         up.append(True)
         till.get_session(db, c)
         assert raised == [("raise_count_not_compared_task", till.followup_task_id("uncompared", c))]
@@ -3741,6 +3761,353 @@ def test_r11_lock_and_count_lost_ack_on_real_mongo(monkeypatch):
         assert len(alerts) == 1 and alerts[0]["payload"]["variance_paisa"] == -50000
         row = real_db.till_sessions.find_one({"_id": s})
         assert row["status"] == till.STATUS_LOCKED and row["manager_followup"]["pending"] is False
+    finally:
+        client.drop_database(name)
+        client.close()
+
+
+# ===========================================================================
+# Round 12 (review must-fix on head b83560fa)  The AUDIT ROW of a till write
+# that committed but did not carry on (lead decision D84)
+# ===========================================================================
+# Round 11 kept the manager TASK of a till write whose reply was lost. The
+# audit row was still written only when the request itself carried on: after
+# a 500 (the read-back failed too) or a stopped process the identical retry
+# and the read repair restored the task and never the till.lock /
+# till.blind_submit row. And the reopen had no read-back at all: 500, then a
+# bare 409 not_locked, and no till.reopen row for a drawer that WAS reopened.
+
+_REOPENS = lambda *a, **k: "$inc" in a[1]  # noqa: E731  the reopen's guarded write
+_AUDIT_OF = {
+    "open": "till.open", "count": "till.blind_submit", "lock": "till.lock", "reopen": "till.reopen"}
+
+
+class _Stop(BaseException):
+    """The process stopping: nothing after it in the request runs."""
+
+
+def _rows(audit_rows, action, sid=None):
+    return [r for r in audit_rows
+            if r.get("action") == action and (sid is None or r.get("entity_id") == sid)]
+
+
+class TestR12TillWritesKeepTheirAuditRow:
+    def _locked(self, db):
+        _cash_sale(db, 1000)
+        return _blind_count(db, rupees=1000, lock=True)
+
+    def _short(self, db):
+        _cash_sale(db, 1000)
+        return _blind_count(db, rupees=500, lock=False)
+
+    # -- reopen (had no read-back at all) -----------------------------------
+
+    def test_reopen_lost_ack_is_a_reopen_with_its_audit_row(self, db, monkeypatch, audit_rows):
+        sid = self._locked(db)
+        fired = _lose_ack(
+            monkeypatch, db.get_collection("till_sessions"), "find_one_and_update", _REOPENS)
+        res = till.reopen_session(db, sid, reason="recount", actor=MANAGER)
+        assert fired == [True] and res["ok"], res
+        assert res["session"]["status"] == till.STATUS_BLIND_SUBMITTED
+        rows = _rows(audit_rows, "till.reopen", sid)
+        assert len(rows) == 1 and rows[0]["user_id"] == "u-mgr" and rows[0]["severity"] == "WARNING"
+        assert rows[0]["before_state"] == {"status": till.STATUS_LOCKED}
+        assert rows[0]["after_state"] == {"status": till.STATUS_BLIND_SUBMITTED, "reason": "recount"}
+        assert rows[0]["detail"] == {"session_date": DATE, "reopen_count": 1}
+        again = till.reopen_session(db, sid, reason="recount", actor=MANAGER)
+        assert again["ok"] and again["idempotent"], again
+        stored = _till(db, sid)
+        assert (stored["reopen_count"], len(stored["history"])) == (1, 1)
+        assert len(_rows(audit_rows, "till.reopen", sid)) == 1
+
+    def test_reopen_500_then_the_retry_writes_the_audit_row_once(self, db, monkeypatch, audit_rows):
+        sid = self._locked(db)
+        coll = db.get_collection("till_sessions")
+        fired = _lose_ack(monkeypatch, coll, "find_one_and_update", _REOPENS)
+        _fail_read_back(monkeypatch, coll, fired)
+        res = till.reopen_session(db, sid, reason="recount", actor=MANAGER)
+        assert (res["ok"], res["http"], res["error"]) == (False, 500, "reopen_failed")
+        assert _rows(audit_rows, "till.reopen", sid) == []
+        assert _till(db, sid)["status"] == till.STATUS_BLIND_SUBMITTED
+        for _ in range(2):
+            again = till.reopen_session(db, sid, reason="recount", actor=MANAGER)
+            assert again["ok"] and again["idempotent"], again
+            assert again["session"]["status"] == till.STATUS_BLIND_SUBMITTED
+        # Another reason, or another person, is not that retry.
+        other = till.reopen_session(db, sid, reason="something else", actor=MANAGER)
+        assert (other["http"], other["error"]) == (409, "not_locked")
+        other = till.reopen_session(db, sid, reason="recount", actor=ADMIN)
+        assert (other["http"], other["error"]) == (409, "not_locked")
+        till.get_session(db, sid)
+        till.list_sessions(db, store_id=STORE)
+        assert len(_rows(audit_rows, "till.reopen", sid)) == 1
+        stored = _till(db, sid)
+        assert (stored["reopen_count"], len(stored["history"])) == (1, 1)
+        assert stored["manager_followup"]["pending"] is False
+
+    def test_reopen_500_no_retry_a_read_of_the_drawer_writes_the_row(self, db, monkeypatch, audit_rows):
+        sid = self._locked(db)
+        coll = db.get_collection("till_sessions")
+        fired = _lose_ack(monkeypatch, coll, "find_one_and_update", _REOPENS)
+        _fail_read_back(monkeypatch, coll, fired)
+        assert till.reopen_session(db, sid, reason="recount", actor=MANAGER)["http"] == 500
+        assert _rows(audit_rows, "till.reopen", sid) == []
+        till.list_sessions(db, store_id=STORE)
+        assert len(_rows(audit_rows, "till.reopen", sid)) == 1
+        till.list_sessions(db, store_id=STORE)
+        till.get_session(db, sid)
+        assert len(_rows(audit_rows, "till.reopen", sid)) == 1
+
+    def test_a_never_locked_count_is_not_an_earlier_reopen(self, db):
+        sid = self._short(db)
+        res = till.reopen_session(db, sid, reason="recount", actor={**MANAGER, "user_id": None})
+        assert (res["ok"], res["http"], res["error"]) == (False, 409, "not_locked")
+
+    # -- lock and blind count (the 500 / stopped-process half) ---------------
+
+    def test_lock_500_then_the_retry_writes_the_audit_row_once(self, db, monkeypatch, audit_rows):
+        sid = self._short(db)
+        _raised(monkeypatch)
+        coll = db.get_collection("till_sessions")
+        fired = _lose_ack(monkeypatch, coll, "find_one_and_update", _sets_status(till.STATUS_LOCKED))
+        _fail_read_back(monkeypatch, coll, fired)
+        res = till.lock_session(db, sid, actor=MANAGER, variance_note="Rs 500 short")
+        assert (res["ok"], res["http"]) == (False, 500)
+        assert _rows(audit_rows, "till.lock", sid) == []
+        again = till.lock_session(db, sid, actor=MANAGER, variance_note="Rs 500 short")
+        assert (again["http"], again["error"]) == (409, "already_locked")
+        rows = _rows(audit_rows, "till.lock", sid)
+        assert len(rows) == 1 and rows[0]["user_id"] == "u-mgr" and rows[0]["severity"] == "WARNING"
+        assert rows[0]["before_state"] == {"status": till.STATUS_BLIND_SUBMITTED}
+        assert rows[0]["after_state"] == {
+            "status": till.STATUS_LOCKED,
+            "zread_number": _till(db, sid)["zread_number"],
+            "expected_cash_paisa": 100000,
+            "variance_paisa": -50000,
+            "variance_status": "SHORTAGE",
+            "variance_note": "Rs 500 short",
+        }
+        till.lock_session(db, sid, actor=MANAGER, variance_note="Rs 500 short")
+        till.get_session(db, sid)
+        till.list_sessions(db, store_id=STORE)
+        assert len(_rows(audit_rows, "till.lock", sid)) == 1
+
+    def test_lock_500_no_retry_a_read_of_the_drawer_writes_the_row(self, db, monkeypatch, audit_rows):
+        sid = self._short(db)
+        _raised(monkeypatch)
+        coll = db.get_collection("till_sessions")
+        fired = _lose_ack(monkeypatch, coll, "find_one_and_update", _sets_status(till.STATUS_LOCKED))
+        _fail_read_back(monkeypatch, coll, fired)
+        assert till.lock_session(db, sid, actor=MANAGER, variance_note="short")["http"] == 500
+        assert _rows(audit_rows, "till.lock", sid) == []
+        till.list_sessions(db, store_id=STORE)
+        assert len(_rows(audit_rows, "till.lock", sid)) == 1
+        till.get_session(db, sid)
+        till.list_sessions(db, store_id=STORE)
+        assert len(_rows(audit_rows, "till.lock", sid)) == 1
+
+    def test_count_500_then_the_retry_writes_the_audit_row_once(self, db, monkeypatch, audit_rows):
+        _cash_sale(db, 1000)
+        c = _open(db)
+        coll = db.get_collection("till_sessions")
+        fired = _lose_ack(
+            monkeypatch, coll, "find_one_and_update", _sets_status(till.STATUS_BLIND_SUBMITTED))
+        _fail_read_back(monkeypatch, coll, fired)
+        notes = [{"face": 500, "kind": "note", "pieces": 1}]
+        res = till.blind_submit(db, c, blind_denominations=notes, idempotency_key="k1", actor=CASHIER)
+        assert (res["ok"], res["http"]) == (False, 500)
+        assert _rows(audit_rows, "till.blind_submit", c) == []
+        again = till.blind_submit(db, c, blind_denominations=notes, idempotency_key="k1", actor=CASHIER)
+        assert again["ok"] and again["idempotent"], again
+        # The cashier's reply never carries the owed row (it names the variance).
+        assert "manager_followup" not in till.redact_for_cashier(again["session"])
+        rows = _rows(audit_rows, "till.blind_submit", c)
+        assert len(rows) == 1 and rows[0]["user_id"] == "u-cash"
+        assert rows[0]["after_state"] == {
+            "status": till.STATUS_BLIND_SUBMITTED,
+            "blind_count_paisa": 50000,
+            "expected_cash_paisa": 100000,
+            "variance_paisa": -50000,
+        }
+        till.blind_submit(db, c, blind_denominations=notes, idempotency_key="k1", actor=CASHIER)
+        till.get_session(db, c)
+        assert len(_rows(audit_rows, "till.blind_submit", c)) == 1
+
+    # -- the open (same class, found on the way) -----------------------------
+
+    @pytest.mark.parametrize("read_back_fails", [False, True])
+    def test_open_lost_ack_keeps_its_audit_row(self, db, monkeypatch, audit_rows, read_back_fails):
+        coll = db.get_collection("till_sessions")
+        fired = _lose_ack(monkeypatch, coll, "insert_one")
+        if read_back_fails:
+            _fail_read_back(monkeypatch, coll, fired)
+        kw = dict(store_id=STORE, session_date=DATE, opening_float_paisa=0, actor=CASHIER)
+        res = till.open_session(db, **kw)
+        assert fired == [True]
+        if read_back_fails:
+            assert (res["ok"], res["http"]) == (False, 500)
+            assert _rows(audit_rows, "till.open") == []
+        else:
+            assert res["ok"] and not res.get("already_open"), res
+        again = till.open_session(db, **kw)
+        assert again["ok"] and again["already_open"], again
+        rows = _rows(audit_rows, "till.open")
+        assert len(rows) == 1 and rows[0]["entity_id"] == again["session"]["session_id"]
+        assert rows[0]["user_id"] == "u-cash" and len(coll.docs) == 1
+        till.open_session(db, **kw)
+        assert len(_rows(audit_rows, "till.open")) == 1
+
+    # -- a stopped process, an audit store that is down ----------------------
+
+    @pytest.mark.parametrize("write", ["open", "count", "lock", "reopen"])
+    def test_a_process_stopped_before_the_audit_row_a_read_writes_it(
+        self, db, monkeypatch, audit_rows, write
+    ):
+        _cash_sale(db, 1000)
+        notes = [{"face": 500, "kind": "note", "pieces": 2}]
+        steps = {
+            "open": lambda sid: till.open_session(
+                db, store_id=STORE, session_date=DATE, opening_float_paisa=0, actor=CASHIER),
+            "count": lambda sid: till.blind_submit(db, sid, blind_denominations=notes, actor=CASHIER),
+            "lock": lambda sid: till.lock_session(db, sid, actor=MANAGER),
+            "reopen": lambda sid: till.reopen_session(db, sid, reason="recount", actor=MANAGER),
+        }
+        sid = None
+        for name in ("open", "count", "lock", "reopen"):
+            if name == write:
+                store = _AuditStore(audit_rows, stop=[_Stop()])
+                monkeypatch.setattr("api.dependencies.get_audit_repository", lambda: store)
+                with pytest.raises(_Stop):
+                    steps[name](sid)
+                break
+            out = steps[name](sid)
+            assert out["ok"], out
+            sid = out["session"]["session_id"]
+        sid = sid or db.get_collection("till_sessions").docs[0]["_id"]
+        assert _rows(audit_rows, _AUDIT_OF[write], sid) == []
+        till.list_sessions(db, store_id=STORE)  # the Blind EOD Tally loads
+        assert len(_rows(audit_rows, _AUDIT_OF[write], sid)) == 1
+        till.get_session(db, sid)
+        till.list_sessions(db, store_id=STORE)
+        assert len(_rows(audit_rows, _AUDIT_OF[write], sid)) == 1
+        assert _till(db, sid)["manager_followup"]["pending"] is False
+
+    def test_audit_store_down_the_lock_stands_and_the_next_read_writes_the_row(
+        self, db, monkeypatch, audit_rows
+    ):
+        sid = self._short(db)
+        raised = _raised(monkeypatch)
+        up = []
+        store = _AuditStore(audit_rows, up=lambda: bool(up))
+        monkeypatch.setattr("api.dependencies.get_audit_repository", lambda: store)
+        res = till.lock_session(db, sid, actor=MANAGER, variance_note="Rs 500 short")
+        assert res["ok"] and res["session"]["status"] == till.STATUS_LOCKED
+        assert _rows(audit_rows, "till.lock", sid) == []
+        assert _till(db, sid)["manager_followup"]["pending"] is True
+        up.append(True)
+        till.get_session(db, sid)
+        assert len(_rows(audit_rows, "till.lock", sid)) == 1
+        assert _till(db, sid)["manager_followup"]["pending"] is False
+        till.get_session(db, sid)
+        till.list_sessions(db, store_id=STORE)
+        assert len(_rows(audit_rows, "till.lock", sid)) == 1
+        # The alert itself has a fixed id: raised again while the row was
+        # owed, stored once (TestR11OneOwedTaskIsStoredOnce).
+        assert {r[1] for r in raised} == {raised[0][1]}
+
+    def test_every_till_write_has_one_row_and_a_relock_is_a_new_row(self, db, audit_rows):
+        sid = self._locked(db)
+        assert till.reopen_session(db, sid, reason="recount", actor=MANAGER)["ok"]
+        time.sleep(0.005)  # a later lock instant, to the millisecond
+        assert till.lock_session(db, sid, actor=MANAGER)["ok"]
+        mine = [r for r in audit_rows if r.get("entity_id") == sid]
+        assert [r["action"] for r in mine] == [
+            "till.open", "till.blind_submit", "till.lock", "till.reopen", "till.lock"]
+        assert len({r["log_id"] for r in mine}) == 5
+        assert all(r["entity_type"] == "till_session" and r["source"] == "eod_tally" for r in mine)
+        assert _till(db, sid)["manager_followup"]["pending"] is False
+
+
+def test_r12_till_audit_rows_survive_a_lost_ack_on_real_mongo(monkeypatch):
+    """Native PyMongo, the REAL AuditRepository (hash chain) and the real
+    TaskRepository. Each till write commits, loses its acknowledgement AND
+    the read-back fails (500); the identical retry writes the one audit row."""
+    from pymongo.collection import Collection
+
+    from database.repositories.audit_chain import verify_chain
+    from database.repositories.audit_repository import AuditRepository
+
+    client, real_db, name = _real_till_db()
+    try:
+        till.ensure_till_indexes(real_db)
+        tasks = _real_task_repo(monkeypatch, real_db)
+        monkeypatch.setattr(
+            "api.dependencies.get_audit_repository", lambda: AuditRepository(real_db.audit_logs))
+        _cash_sale(real_db, 1000, datetime(2026, 11, 4, 5, 0))
+        real_find_one = Collection.find_one
+        state = {"fired": [], "failed": []}
+
+        def _read_back(self, *a, **k):
+            if (self.database.name == name and self.name == "till_sessions"
+                    and state["fired"] and not state["failed"]):
+                state["failed"].append(True)
+                raise AutoReconnect("native read-back fault")
+            return real_find_one(self, *a, **k)
+
+        monkeypatch.setattr(Collection, "find_one", _read_back)
+
+        def _arm(method, when):
+            state["failed"] = []
+            state["fired"] = _native_lose_ack(monkeypatch, name, "till_sessions", method, when)
+
+        def _count(action):
+            return real_db.audit_logs.count_documents({"action": action})
+
+        kw = dict(store_id=STORE, session_date=DATE, opening_float_paisa=0, actor=CASHIER)
+        _arm("insert_one", lambda *a, **k: True)
+        assert till.open_session(real_db, **kw)["http"] == 500 and _count("till.open") == 0
+        opened = till.open_session(real_db, **kw)
+        assert opened["ok"] and opened["already_open"] and _count("till.open") == 1
+        sid = opened["session"]["session_id"]
+
+        notes = [{"face": 500, "kind": "note", "pieces": 1}]
+        _arm("find_one_and_update", _sets_status(till.STATUS_BLIND_SUBMITTED))
+        count = lambda: till.blind_submit(  # noqa: E731
+            real_db, sid, blind_denominations=notes, idempotency_key="k1", actor=CASHIER)
+        assert count()["http"] == 500 and _count("till.blind_submit") == 0
+        assert count()["idempotent"] and _count("till.blind_submit") == 1
+
+        _arm("find_one_and_update", _sets_status(till.STATUS_LOCKED))
+        lock = lambda: till.lock_session(  # noqa: E731
+            real_db, sid, actor=MANAGER, variance_note="Rs 500 short")
+        assert lock()["http"] == 500 and _count("till.lock") == 0
+        assert lock()["error"] == "already_locked" and _count("till.lock") == 1
+        assert tasks.count_documents({"source_ref": f"till_variance:{STORE}:{DATE}:{sid}"}) == 1
+
+        _arm("find_one_and_update", _REOPENS)
+        reopen = lambda: till.reopen_session(real_db, sid, reason="recount", actor=MANAGER)  # noqa: E731
+        assert reopen()["http"] == 500 and _count("till.reopen") == 0
+        again = reopen()
+        assert again["ok"] and again["idempotent"] and _count("till.reopen") == 1
+        assert state["fired"] == [True] and state["failed"] == [True]
+
+        # Retries and reads after that add nothing.
+        count(), reopen()
+        till.list_sessions(real_db, store_id=STORE)
+        till.get_session(real_db, sid)
+        rows = list(real_db.audit_logs.find({"entity_id": sid}).sort("seq", 1))
+        assert [r["action"] for r in rows] == [
+            "till.open", "till.blind_submit", "till.lock", "till.reopen"]
+        assert [r["user_id"] for r in rows] == ["u-cash", "u-cash", "u-mgr", "u-mgr"]
+        assert rows[2]["after_state"]["variance_paisa"] == -50000
+        assert all(r["_id"] == r["log_id"] and r.get("entry_hash") for r in rows)
+        chain = verify_chain(real_db.audit_logs)
+        assert chain["intact"] and chain["entries_checked"] == 4, chain
+        stored = real_db.till_sessions.find_one({"_id": sid})
+        assert stored["status"] == till.STATUS_BLIND_SUBMITTED
+        assert (stored["reopen_count"], len(stored["history"])) == (1, 1)
+        assert stored["manager_followup"]["pending"] is False
+        assert tasks.count_documents({}) == 1
     finally:
         client.drop_database(name)
         client.close()
