@@ -784,14 +784,14 @@ def submit_je(db, *, je_id: str, maker_id: str, maker_roles: List[str],
     return {"ok": True, "je": _jsonable(updated), "request_id": updated.get("approval_request_id")}
 
 
-def _record_decision(db, je: Dict[str, Any], *, status: str, checker_id: str,
-                     request_id: str, note: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    """The ONE writer of a checker's decision on a journal, made on request
-    ``request_id``: SUBMITTED -> APPROVED / REJECTED, and an APPROVED journal
-    approved again (D54: it stays APPROVED, now on the approval just made,
-    under the checker who made it). A guarded single-document update (two
-    racing writers -> one wins) plus its audit row (_move). Returns the
-    journal carrying the decision, or None when it could not take it."""
+def _decision(je: Dict[str, Any], *, status: str, checker_id: str, request_id: str,
+              note: Optional[str] = None) -> Tuple[Dict[str, Any], Event]:
+    """What a checker's decision on request ``request_id`` puts on the
+    journal (the fields) and the transition it is (the event): SUBMITTED ->
+    APPROVED / REJECTED, and an APPROVED journal approved again (D54: it
+    stays APPROVED, now on the approval just made, under the checker who made
+    it). One definition: _record_decision writes it, and Post carries an
+    approval made again in its own POSTED write (post_je)."""
     fields: Dict[str, Any] = {"status": status, "checker_id": checker_id, "checked_at": _now()}
     if status == STATUS_REJECTED:
         fields["checker_note"] = (note or "")[:500] or None
@@ -801,6 +801,17 @@ def _record_decision(db, je: Dict[str, Any], *, status: str, checker_id: str,
                  f"approved again on request {request_id}")
     else:
         event = ("approved", "je_approved", checker_id, "")
+    return fields, event
+
+
+def _record_decision(db, je: Dict[str, Any], *, status: str, checker_id: str,
+                     request_id: str, note: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """The ONE writer of a checker's decision (_decision) on a journal that
+    is still SUBMITTED / APPROVED. A guarded single-document update (two
+    racing writers -> one wins) plus its audit row (_move). Returns the
+    journal carrying the decision, or None when it could not take it."""
+    fields, event = _decision(je, status=status, checker_id=checker_id,
+                              request_id=request_id, note=note)
     return _move(db, je["je_id"], fields, event, expect_status=je.get("status"),
                  expect_request_id=request_id)
 
@@ -818,6 +829,18 @@ def _reapproval_due(je: Dict[str, Any]) -> bool:
     return f"raised_again:{rid}" in events and f"reapproved:{rid}" not in events
 
 
+def _decider(je: Dict[str, Any], req: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Who decided ``req``, when the journal takes decisions from it: the
+    request is the journal's own (_is_own_request) and whoever decided it
+    held a journal checker role when they did (the engine records it as
+    reviewed_by_roles). None otherwise."""
+    checker = (req or {}).get("reviewed_by")
+    if (checker and _is_own_request(je, req)
+            and set(req.get("reviewed_by_roles") or []) & JE_CHECKER_ROLES):
+        return checker
+    return None
+
+
 def _take_request_decision(db, je: Dict[str, Any]) -> Dict[str, Any]:
     """A journal takes the decision already recorded on its approval request;
     the journal as it now stands is returned.
@@ -831,7 +854,9 @@ def _take_request_decision(db, je: Dict[str, Any]) -> Dict[str, Any]:
     approval made again (D54) was never recorded on the journal. Every
     journal door runs this first, and the inbox runs it right after its own
     approve / reject (sync_with_request), so the journal catches up from its
-    request. Safe to repeat and to race (_record_decision is guarded).
+    request. Safe to repeat and to race (_record_decision is guarded). When
+    this catch-up write does not land, or the approval is made while Post is
+    already past it, Post itself carries the approval made again (post_je).
 
     Two journals catch up: a SUBMITTED one (its decision), and an APPROVED
     one whose request was raised again and has since been approved
@@ -840,12 +865,12 @@ def _take_request_decision(db, je: Dict[str, Any]) -> Dict[str, Any]:
 
     Taken only when every one of these holds -- the rules the journal screen
     itself applies:
-      * the request is the journal's own (_is_own_request);
-      * whoever decided it held a journal checker role when they did (the
-        engine records it as reviewed_by_roles). A request decided before the
-        engine routed journals to the checker roles alone may carry a store
-        or area manager's click, or no roles at all; that is never a journal
-        decision (the checker's own Approve / Reject is: _open_request);
+      * the request is the journal's own and whoever decided it held a
+        journal checker role when they did (_decider). A request decided
+        before the engine routed journals to the checker roles alone may
+        carry a store or area manager's click, or no roles at all; that is
+        never a journal decision (the checker's own Approve / Reject is:
+        _open_request);
       * an APPROVAL was not made by the journal's maker (a maker may reject,
         that is withdraw, their own journal -- as on the journal screen);
       * a REJECTION carries the checker note (_note_ok)."""
@@ -856,9 +881,8 @@ def _take_request_decision(db, je: Dict[str, Any]) -> Dict[str, Any]:
     from .approvals import ApprovalStatus
 
     req = _request(db, rid, expire=True) or {}
-    checker = req.get("reviewed_by")
-    if (not checker or not _is_own_request(je, req)
-            or not set(req.get("reviewed_by_roles") or []) & JE_CHECKER_ROLES):
+    checker = _decider(je, req)
+    if not checker:
         return je
     decided = req.get("status")
     note = (req.get("reject_reason") or "").strip()
@@ -1259,12 +1283,28 @@ def post_je(db, *, je_id: str, poster_id: str) -> Dict[str, Any]:
                 "action_mismatch": 400, "amount_exceeded": 400, "not_found": 404}.get(err, 409)
         return {"ok": False, "http": code, "error": err or "consume_failed"}
 
-    updated = _set(
-        db, je_id,
-        {"status": STATUS_POSTED, "posted_at": _now(), "posted_by": poster_id,
-         "events.posted": _stamp(("posted", "je_posted", poster_id, ""), STATUS_POSTED)},
-        expect_status=STATUS_APPROVED,
-    )
+    fields: Dict[str, Any] = {
+        "status": STATUS_POSTED, "posted_at": _now(), "posted_by": poster_id,
+        "events.posted": _stamp(("posted", "je_posted", poster_id, ""), STATUS_POSTED)}
+    again: Optional[Event] = None
+    if _reapproval_due(je):
+        # The approval just spent was made again (D54) and the journal does
+        # not say so: the catch-up above found it undecided (it was approved
+        # a moment later) or its write did not land. Posting on it as it
+        # stands left the journal POSTED under the lapsed approval's checker
+        # with no je_reapproved row and no note of one, for good. The POSTED
+        # write carries the decision instead (_decision: checker, time and
+        # the note of the row owed), so they land together or not at all.
+        checker = _decider(je, _request(db, request_id))
+        if not checker or checker == je.get("maker_id"):
+            # Not a decision the journal takes (_take_request_decision). The
+            # engine holds a journal's request to the same rules, so this is
+            # a request altered outside the app: never posted on.
+            return {"ok": False, "http": 409, "error": "not_approved", "status": status}
+        decided, again = _decision(je, status=STATUS_APPROVED, checker_id=checker,
+                                   request_id=request_id)
+        fields = {**decided, f"events.{again[0]}": _stamp(again, STATUS_APPROVED), **fields}
+    updated = _set(db, je_id, fields, expect_status=STATUS_APPROVED)
     if updated is None:
         # The approval was consumed but the JE was already moved by a racing
         # poster, or by this very write whose reply was lost -- treat as
@@ -1275,6 +1315,8 @@ def post_je(db, *, je_id: str, poster_id: str) -> Dict[str, Any]:
         return {"ok": False, "http": 409, "error": "not_approved",
                 "status": (cur or {}).get("status")}
     updated.pop("_id", None)
+    if again:
+        _log(db, dict(updated, status=STATUS_APPROVED), again)
     _audit(db, "je_posted", updated, actor=poster_id, log_id=_posted_event_id(je_id))
     logger.info("[JE] %s POSTED by %s", je_id, poster_id)
     return {"ok": True, "je": _jsonable(updated)}
@@ -1301,7 +1343,14 @@ def reverse_je(db, *, je_id: str, actor_id: str, actor_name: Optional[str] = Non
         offers the press.
     The claim is never un-flipped: an insert whose reply was lost can still
     land after the un-flip, and the fresh reversal that followed it posted
-    the reversal twice."""
+    the reversal twice.
+
+    More than one press can reach the mirror's insert (two Finish presses; a
+    Reverse arriving between another's claim and its insert; a lost insert
+    landing late). The mirror's _id is its je_id, and _id is unique on every
+    collection whatever other indexes exist, so exactly one insert lands and
+    every other press reads that mirror back. (Each press that got that far
+    minted a journal number; the losers' numbers are skipped in the series.)"""
     coll = _je_coll(db)
     if coll is None:
         return {"ok": False, "http": 503, "error": "no_db"}
@@ -1358,9 +1407,10 @@ def reverse_je(db, *, je_id: str, actor_id: str, actor_name: Optional[str] = Non
             "narration": ("Reversal: " + (ln.get("narration") or ""))[:200],
         })
     rev = {
+        "_id": rev_id,          # one mirror per claim, with or without the je_id index
         "je_id": rev_id,
-        # The consecutive serial is minted only now, with the claim held (no
-        # burned numbers on a lost race).
+        # The consecutive serial is minted only now, with the claim held: a
+        # press that loses the claim burns no number.
         "je_number": _next_je_number(db, je.get("entity_id"), today),
         "store_id": je.get("store_id"),
         "entity_id": je.get("entity_id"),
@@ -1392,9 +1442,10 @@ def reverse_je(db, *, je_id: str, actor_id: str, actor_name: Optional[str] = Non
         coll.insert_one(rev)
     except Exception as e:  # noqa: BLE001
         logger.error("[JE] reversal mirror insert FAILED for %s (mirror %s): %s", je_id, rev_id, e)
-        # It may have landed with its reply lost: read it back by its id (a
-        # read that fails is 503). Not there: 503, the claim stands and
-        # Reverse again writes this same mirror.
+        # It may have landed with its reply lost, or another press wrote it
+        # first (refused on its _id): read it back by its id (a read that
+        # fails is 503). Not there: 503, the claim stands and Reverse again
+        # writes this same mirror.
         rev = get_je(db, rev_id)
         if rev is None:
             return {"ok": False, "http": 503, "error": "write_failed"}
@@ -1470,12 +1521,26 @@ def pnl_adjustments(db, *, store_id: Optional[str], from_dt, to_dt) -> Dict[str,
 
 
 # ============================================================================
-# Tally JOURNALVOUCHER export (POSTED JEs only)
+# Tally JOURNALVOUCHER export (POSTED JEs, and a reversal left unfinished)
 # ============================================================================
 
 
+def tally_jes(db, *, store_id: Optional[str], limit: int = 1000) -> List[Dict[str, Any]]:
+    """The journals the Tally export carries: every POSTED one, and a
+    REVERSED one whose reversal voucher was never written
+    (reversal_unfinished, with_flags). The books still carry that one in full
+    (pnl_adjustments counts it and there is no voucher to net it), so it
+    exports as posted until Reverse is pressed again and writes the voucher
+    (D113) -- left out, the export and the P&L disagreed for as long as nobody
+    finished it. A finished reversal exports its voucher alone, as before."""
+    rows = list_jes(db, store_id=store_id, status=STATUS_POSTED, limit=limit)
+    reversed_rows = with_flags(db, list_jes(db, store_id=store_id, status=STATUS_REVERSED, limit=limit))
+    return rows + [r for r in reversed_rows if r.get("reversal_unfinished")]
+
+
 def build_journal_voucher_xml(jes: List[Dict[str, Any]]) -> str:
-    """Pure function: POSTED JEs -> Tally ``<JOURNALVOUCHER>`` import XML. Debit
+    """Pure function: POSTED JEs (and a reversal left unfinished, tally_jes)
+    -> Tally ``<JOURNALVOUCHER>`` import XML. Debit
     side = ISDEEMEDPOSITIVE=Yes (Tally convention for the debited ledger),
     credit side = ISDEEMEDPOSITIVE=No. Amounts are rupees (paisa/100)."""
     from xml.sax.saxutils import escape
@@ -1488,7 +1553,7 @@ def build_journal_voucher_xml(jes: List[Dict[str, Any]]) -> str:
 
     vouchers: List[str] = []
     for je in jes:
-        if je.get("status") != STATUS_POSTED:
+        if je.get("status") != STATUS_POSTED and not je.get("reversal_unfinished"):
             continue
         vnum = escape(str(je.get("je_number") or je.get("je_id") or ""))
         vdate = _date_str(je.get("entry_date"))

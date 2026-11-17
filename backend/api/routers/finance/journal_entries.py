@@ -388,8 +388,10 @@ async def get_tally_journal_jv(
     current_user: dict = Depends(get_current_user),
 ):
     """POSTED journal vouchers as Tally ``<JOURNALVOUCHER>`` import XML. DRAFT /
-    SUBMITTED / APPROVED JEs are never exported. The same vouchers as the
-    journal list, so the same readers: the accounts roles (FU-17)."""
+    SUBMITTED / APPROVED JEs are never exported. An entry marked reversed
+    whose reversal voucher was never written still exports as posted, as the
+    P&L still counts it (D113, je_service.tally_jes). The same vouchers as
+    the journal list, so the same readers: the accounts roles (FU-17)."""
     _require_roles_for(current_user, _JE_READER_ROLES, _JE_READ_REFUSED)
     db = _get_db()
     store_id = resolve_store_scope(store_id, current_user)
@@ -398,7 +400,7 @@ async def get_tally_journal_jv(
     # it by calendar day, never by the IST-shifted created_at bounds.
     from_dt = _je_cal_day(from_date)
     to_dt = _je_cal_day(to_date, end=True)
-    rows = je_service.list_jes(db, store_id=store_id, status=je_service.STATUS_POSTED, limit=1000)
+    rows = je_service.tally_jes(db, store_id=store_id)
     je_service.repair_posted_events(db, rows)
     # Date-filter in Python (entry_date is a datetime); keeps the service query simple.
     filtered = []
