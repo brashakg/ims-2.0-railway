@@ -108,6 +108,28 @@ def _unfinished_claim(db, refund_id: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+# Decision D103(1): the order-history import (shopify_ingest) claims a refund
+# with the same returns doc a live door does, written UNFINISHED and stamped
+# finished once its credit-note ledger row is stored. While it is unfinished
+# the refund is the import's: a live door (the webhook, the status sweep, the
+# accountant's Confirm) books nothing for it, never re-claims it and never
+# answers a silent "duplicate" -- it says the import holds it. The next
+# import run finishes it.
+_IMPORT_SOURCE = "shopify_order_history"
+HELD_BY_IMPORT = "held_by_import"
+HELD_BY_IMPORT_TEXT = (
+    "The order-history import has claimed this refund and has not finished booking it, "
+    "so nothing was booked here (no credit note, no restock, no store credit). The import "
+    "must be run again to finish it (ask support); it books this refund once."
+)
+
+
+def import_holds(db, refund_id: str) -> bool:
+    """True while the order-history import's claim of this refund is
+    unfinished (_unfinished_claim, source shopify_order_history)."""
+    return (_unfinished_claim(db, refund_id) or {}).get("source") == _IMPORT_SOURCE
+
+
 def _raise_s34_task(order: Dict[str, Any], return_id: Optional[str], refund_id: Any, why: str) -> None:
     """The CA's task for a Shopify refund past the credit-note window. Fail-soft."""
     try:
@@ -273,7 +295,10 @@ def _claim_stale_refund_for_retry(returns_coll, refund_id: str, now: str):
     stale = _stale_cutoff()
     fou = getattr(returns_coll, "find_one_and_update", None)
     if callable(fou):
-        base = {"shopify_refund_id": refund_id, "credit_note_issued": {"$ne": True}}
+        # Never the order-history import's claim (decision D103(1)): it is
+        # finished by the import under its own ledger key, not re-driven here.
+        base = {"shopify_refund_id": refund_id, "credit_note_issued": {"$ne": True},
+                "source": {"$ne": _IMPORT_SOURCE}}
         try:
             for extra in (
                 # Only re-claim a FINALIZED row -- never an in-flight brand-new
@@ -300,6 +325,7 @@ def _claim_stale_refund_for_retry(returns_coll, refund_id: str, now: str):
     if (
         existing
         and existing.get("credit_note_issued") is not True
+        and existing.get("source") != _IMPORT_SOURCE
         and (existing.get("status") != "PENDING" or str(existing.get("created_at") or "") < stale)
     ):
         return existing
@@ -1218,6 +1244,17 @@ def handle_shopify_refund(
                     "refund_id": refund_id,
                     "shopify_order_id": shopify_order_id,
                 }
+            if unfinished.get("source") == _IMPORT_SOURCE:
+                # Decision D103(1): the import's claim, not finished -- left
+                # to the next import run, and said so (the inbox row fails
+                # and is retried; never a silent duplicate, never booked here).
+                return {
+                    "status": "error",
+                    "reason": HELD_BY_IMPORT,
+                    "error": HELD_BY_IMPORT_TEXT,
+                    "refund_id": refund_id,
+                    "shopify_order_id": shopify_order_id,
+                }
             if str(unfinished.get("created_at") or "") >= _stale_cutoff():
                 return {
                     "status": "error",
@@ -1530,7 +1567,7 @@ def handle_shopify_refund(
                 status=queue_status,
                 note=(
                     (result.get("store_credit_reason") or "")
-                    if result.get("reason") == "order_busy" else
+                    if result.get("reason") in ("order_busy", HELD_BY_IMPORT) else
                     "AUTO restock done but the credit note could not be issued "
                     "(no customer on the order, a ledger error, or the order could "
                     "not be read) -- an accountant must confirm it again. "
@@ -1789,6 +1826,23 @@ def _post_locked(
                 # swallowed while the GST reversal is lost).
                 existing = _claim_stale_refund_for_retry(returns_coll, refund_id, now)
                 prior_doc = existing
+                if existing is None and import_holds(db, refund_id):
+                    # Decision D103(1): held by the order-history import and
+                    # not finished. Nothing is booked here and it is not a
+                    # duplicate: the row stays open, the next import run
+                    # finishes the refund, and a Confirm after that reads it
+                    # as posted.
+                    logger.info("[SHOPIFY_REFUND] refund=%s held by the order-history import "
+                                "(unfinished) -- nothing booked", refund_id)
+                    return {
+                        "status": "credit_failed",
+                        "reason": HELD_BY_IMPORT,
+                        "refund_id": refund_id,
+                        "order_id": order_id,
+                        "customer_id": customer_id,
+                        "credit_note_issued": False,
+                        "store_credit_reason": HELD_BY_IMPORT_TEXT,
+                    }
                 if existing is None:
                     logger.info(
                         "[SHOPIFY_REFUND] refund=%s already credited -- duplicate", refund_id
