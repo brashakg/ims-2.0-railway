@@ -100,18 +100,6 @@ ALLOWED = {
         "so 5h30m is well inside it."
     ),
     (
-        "api/routers/follow_ups.py",
-        'test_date = datetime.fromisoformat(test["created_at"]).date()',
-    ): (
-        "Eye-test reminder. The day is never displayed; it feeds "
-        "`reminder_date`, which is compared against date.today() (the same "
-        "box day) AND used as the dedupe key `scheduled_date`, already "
-        "persisted on live rows. Shifting it would miss those keys and raise a "
-        "SECOND reminder for ~8 percent of tests -- a customer called twice -- "
-        "to buy a reminder one day earlier on a 365-day horizon. Exactness "
-        "needs a migration that re-keys the stored values."
-    ),
-    (
         "api/routers/payout.py",
         "if not (df <= created_at[:10] <= dt):",
     ): (

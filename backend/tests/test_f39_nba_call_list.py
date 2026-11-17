@@ -42,6 +42,8 @@ from fastapi.testclient import TestClient  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from api.routers import crm as crm_mod  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from strict_fakes import MemAuditRepo  # noqa: E402
 from api.routers import customers as cust_mod  # noqa: E402
 from api.routers import auth as auth_mod  # noqa: E402
 from api.services import nba_call_list as nba  # noqa: E402
@@ -156,6 +158,9 @@ class _FakeColl:
                     doc.setdefault(head, {})[tail] = v
                 else:
                     doc[k] = v
+        if "$push" in update:
+            for k, v in update["$push"].items():
+                doc.setdefault(k, []).append(v)
         if "$addToSet" in update:
             for k, v in update["$addToSet"].items():
                 arr = doc.setdefault(k, [])
@@ -255,7 +260,7 @@ def _seed_db_for_scoring():
     rx = [{"prescription_id": "RX1", "customer_id": "RXFAST", "store_id": STORE,
            "created_at": _rx_created_for_days_until(5)}]
     # CLDUE: a CL order 120 days ago -> reorder due (cadence 30d).
-    orders = [{"order_id": "O-CL", "customer_id": "CLDUE", "store_id": STORE,
+    orders = [{"order_id": "O-CL", "customer_id": "CLDUE", "store_id": STORE, "status": "DELIVERED",
                "created_at": NOW - timedelta(days=120),
                "items": [{"item_type": "CONTACT_LENS", "qty": 1}]}]
     return _FakeDB({
@@ -322,7 +327,7 @@ def test_t1_signal_attribution_rx_and_cl():
     ]
     rx = [{"prescription_id": "RX", "customer_id": "BOTH", "store_id": STORE,
            "created_at": _rx_created_for_days_until(5)}]
-    orders = [{"order_id": "O", "customer_id": "BOTH", "store_id": STORE,
+    orders = [{"order_id": "O", "customer_id": "BOTH", "store_id": STORE, "status": "DELIVERED",
                "created_at": NOW - timedelta(days=120),
                "items": [{"item_type": "CONTACT_LENS", "qty": 1}]}]
     db = _FakeDB({
@@ -465,9 +470,9 @@ def _persisted_nba_doc_db():
 
 def test_t5_dismiss(monkeypatch):
     db = _persisted_nba_doc_db()
-    audit_calls = []
-    monkeypatch.setattr(crm_mod, "get_audit_repository",
-                        lambda: type("A", (), {"create": staticmethod(lambda row: audit_calls.append(row))})())
+    audit = MemAuditRepo()
+    audit_calls = audit.rows.values()
+    monkeypatch.setattr(crm_mod, "get_audit_repository", audit)
     client = _crm_client(db, monkeypatch)
 
     r = client.post(f"/api/v1/crm/nba/{STORE}/dismiss",
@@ -495,7 +500,7 @@ def test_t5_dismiss(monkeypatch):
 
 def test_t6_complete_validation_and_persist(monkeypatch):
     db = _persisted_nba_doc_db()
-    monkeypatch.setattr(crm_mod, "get_audit_repository", lambda: None)
+    monkeypatch.setattr(crm_mod, "get_audit_repository", MemAuditRepo())
     client = _crm_client(db, monkeypatch)
 
     short = client.post(f"/api/v1/crm/nba/{STORE}/complete",
@@ -509,12 +514,14 @@ def test_t6_complete_validation_and_persist(monkeypatch):
     assert ok.status_code == 200
     fu = db.get_collection("follow_ups").find_one({"follow_up_id": "FU-X1"})
     assert fu["status"] == "completed"
-    assert fu["notes"] == "Called, will visit Saturday."
+    # L1-F48: the call notes are the attempt's; the card context is not erased.
+    assert fu["attempts"][-1]["notes"] == "Called, will visit Saturday."
+    assert fu.get("notes") != "Called, will visit Saturday."
 
 
 def test_t6b_complete_schedules_next_followup(monkeypatch):
     db = _persisted_nba_doc_db()
-    monkeypatch.setattr(crm_mod, "get_audit_repository", lambda: None)
+    monkeypatch.setattr(crm_mod, "get_audit_repository", MemAuditRepo())
     client = _crm_client(db, monkeypatch)
     nextd = (NOW + timedelta(days=14)).date().isoformat()
     r = client.post(f"/api/v1/crm/nba/{STORE}/complete",
@@ -759,7 +766,7 @@ def test_t14b_day_key_boundary_early_morning_ist():
 def test_no_live_send_complete_is_record_only(monkeypatch):
     db = _persisted_nba_doc_db()
     db._cols["notification_logs"] = _FakeColl([])
-    monkeypatch.setattr(crm_mod, "get_audit_repository", lambda: None)
+    monkeypatch.setattr(crm_mod, "get_audit_repository", MemAuditRepo())
 
     # Tripwire: if any code path tried to send, this would record it.
     sent = []

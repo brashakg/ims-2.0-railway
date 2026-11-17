@@ -357,6 +357,7 @@ def test_segment_cl_reorder():
                 "order_id": "O1",
                 "customer_id": "C1",
                 "store_id": "BV-PUN-01",
+                "status": "DELIVERED",  # b18: only received goods are supply
                 "created_at": (now - timedelta(days=45)).isoformat(),
                 "items": [{"item_type": "CONTACT_LENS"}],
             },
@@ -365,6 +366,7 @@ def test_segment_cl_reorder():
                 "order_id": "O2",
                 "customer_id": "C2",
                 "store_id": "BV-PUN-01",
+                "status": "DELIVERED",  # b18: only received goods are supply
                 "created_at": (now - timedelta(days=5)).isoformat(),
                 "items": [{"item_type": "CONTACT_LENS"}],
             },

@@ -16,11 +16,17 @@ import { useCallback, useEffect, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { crmApi } from '../../services/api/crm';
+import { getErrorMessage } from '../../utils/errorHandler';
 import type {
   ReactivationEntry,
   ReactivationOutcome,
   ReactivationAnalytics,
 } from '../../services/api/crm';
+
+// The server's answers when the call is saved but a later step is not: the
+// next reminder (D69, crm.py _NEXT_NOT_SET) or the audit record (D84,
+// _AUDIT_NOT_WRITTEN). Entries lock so Retry sends the SAME request.
+const CALL_SAVED = 'Call saved.';
 
 const OUTCOMES: { value: ReactivationOutcome; label: string; reached: boolean }[] = [
   { value: 'reached', label: 'Reached -- interested', reached: true },
@@ -56,6 +62,13 @@ export function LapsedReactivationPage() {
   const [notes, setNotes] = useState('');
   const [nextDate, setNextDate] = useState('');
   const [busy, setBusy] = useState(false);
+  // A refused / failed save is SHOWN (Codex PR-1428 r1); the modal stays for the retry.
+  const [saveError, setSaveError] = useState('');
+  // A failed read is shown with a Retry, never as an empty list.
+  const [loadError, setLoadError] = useState('');
+  // D69: the call is saved but its next reminder is not. The entries are
+  // locked so Retry repeats the SAME request (the server sets it once).
+  const callSaved = saveError.startsWith(CALL_SAVED);
 
   const load = useCallback(async () => {
     if (!storeId) {
@@ -71,8 +84,10 @@ export function LapsedReactivationPage() {
       setEntries(Array.isArray(list?.entries) ? list.entries : []);
       setListDate(list?.date || '');
       setAnalytics(an);
-    } catch {
+      setLoadError('');
+    } catch (error) {
       setEntries([]);
+      setLoadError(getErrorMessage(error, 'The work-list for today could not be loaded; try again.'));
     } finally {
       setIsLoading(false);
     }
@@ -87,11 +102,13 @@ export function LapsedReactivationPage() {
     setOutcome('reached');
     setNotes('');
     setNextDate('');
+    setSaveError('');
   };
 
   const submit = async () => {
     if (!actFor) return;
     setBusy(true);
+    setSaveError('');
     try {
       await crmApi.logReactivationOutcome(storeId, actFor.customer_id, outcome, {
         notes: notes.trim(),
@@ -99,8 +116,8 @@ export function LapsedReactivationPage() {
       });
       closeModal();
       await load();
-    } catch {
-      /* fail-soft: leave the entry so the associate can retry */
+    } catch (error) {
+      setSaveError(getErrorMessage(error, 'The outcome was not saved; try again.'));
     } finally {
       setBusy(false);
     }
@@ -163,6 +180,11 @@ export function LapsedReactivationPage() {
         </div>
       ) : !storeId ? (
         <p className="text-gray-500 py-8">Select a store to see its reactivation list.</p>
+      ) : loadError ? (
+        <div role="alert" className="py-8 text-sm text-red-700 space-y-3">
+          <p>{loadError}</p>
+          <button type="button" className="btn-secondary" onClick={load}>Retry</button>
+        </div>
       ) : entries.length === 0 ? (
         <p className="text-gray-500 py-8">No lapsed patients to reactivate today.</p>
       ) : (
@@ -236,6 +258,7 @@ export function LapsedReactivationPage() {
                     name="react-outcome"
                     value={o.value}
                     checked={outcome === o.value}
+                    disabled={callSaved}
                     onChange={() => setOutcome(o.value)}
                   />
                   {o.label}
@@ -244,6 +267,7 @@ export function LapsedReactivationPage() {
             </div>
             <textarea
               value={notes}
+              disabled={callSaved}
               onChange={(e) => setNotes(e.target.value)}
               placeholder="Notes (optional)"
               rows={2}
@@ -256,9 +280,13 @@ export function LapsedReactivationPage() {
               id="react-next"
               type="date"
               value={nextDate}
+              disabled={callSaved}
               onChange={(e) => setNextDate(e.target.value)}
               className="border border-gray-200 rounded px-2 py-1 text-sm"
             />
+            {saveError && (
+              <p role="alert" className="text-sm text-red-700 mt-3">{saveError}</p>
+            )}
             <div className="flex justify-end gap-2 mt-4">
               <button type="button" onClick={closeModal} className="text-gray-600 text-sm px-3 py-1.5">Cancel</button>
               <button
@@ -267,7 +295,7 @@ export function LapsedReactivationPage() {
                 disabled={busy}
                 className="bg-bv-red text-white rounded px-3 py-1.5 text-sm disabled:opacity-40"
               >
-                Save
+                {callSaved ? 'Retry' : 'Save'}
               </button>
             </div>
           </div>

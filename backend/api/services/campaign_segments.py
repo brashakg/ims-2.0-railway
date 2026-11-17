@@ -60,7 +60,6 @@ CL_REORDER_CADENCE_DAYS = 30
 # from win-back (6 months); this is the earlier lapse signal.
 CHURN_RISK_DAYS = 90
 # Item-type tokens that count as a contact-lens line on an order.
-_CL_ITEM_TYPES = {"CONTACT_LENS", "CONTACT_LENSES", "CL", "CONTACTLENS"}
 PREVIEW_SAMPLE_SIZE = 5
 # Hard ceiling on rows scanned so a segment preview/resolve can never run away
 # on a large customers/prescriptions collection.
@@ -437,16 +436,6 @@ def _resolve_by_customer_type(
     return [_audience_row(c) for c in customers]
 
 
-def _is_cl_order(order: Dict[str, Any]) -> bool:
-    """True if an order contains at least one contact-lens line. Reads
-    items[].item_type / category (item_type is authoritative at POS)."""
-    for it in order.get("items", []) or []:
-        token = str(it.get("item_type") or it.get("category") or "").strip().upper()
-        if token in _CL_ITEM_TYPES:
-            return True
-    return False
-
-
 def _resolve_cl_reorder(
     db,
     store_id: Optional[str],
@@ -456,7 +445,14 @@ def _resolve_cl_reorder(
     """Customers who bought contact lenses and whose MOST-RECENT CL order is
     older than `cadence_days` -- i.e. they are due to reorder. One row per
     customer carrying the days-since-last-CL as a template var.
+
+    "A CL order" is the refill doors' own supply rule (cl_refill.
+    supplied_cl_lines, L1-F18/F19, D50): a received sale whose CL line (coloured
+    lenses included) was not fully returned. A draft or cancelled order is not
+    a purchase and must not hide a customer who is due.
     """
+    from .cl_refill import supplied_cl_lines
+
     now = now or datetime.now()
     cutoff = now - timedelta(days=cadence_days)
     order_coll = db.get_collection("orders")
@@ -468,7 +464,7 @@ def _resolve_cl_reorder(
     latest_cl: Dict[str, datetime] = {}
     try:
         for o in order_coll.find(q).limit(_SCAN_LIMIT):
-            if not _is_cl_order(o):
+            if not supplied_cl_lines(o):
                 continue
             cid = o.get("customer_id")
             if not cid:

@@ -14,7 +14,13 @@ import { useCallback, useEffect, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { crmApi } from '../../services/api/crm';
+import { getErrorMessage } from '../../utils/errorHandler';
 import type { NbaCard, NbaDismissReason } from '../../services/api/crm';
+
+// The server's answers when the call is saved but a later step is not: the
+// next reminder (D69, crm.py _NEXT_NOT_SET) or the audit record (D84,
+// _AUDIT_NOT_WRITTEN). Entries lock so Retry sends the SAME request.
+const CALL_SAVED = 'Call saved.';
 
 const SKIP_REASONS: { value: NbaDismissReason; label: string }[] = [
   { value: 'not_interested', label: 'Not interested' },
@@ -58,6 +64,13 @@ export function NBADashboardPage() {
   const [nextDate, setNextDate] = useState('');
   const [skipReason, setSkipReason] = useState<NbaDismissReason>('no_answer');
   const [busy, setBusy] = useState(false);
+  // A refused / failed save is SHOWN (Codex PR-1428 r1); the modal stays for the retry.
+  const [saveError, setSaveError] = useState('');
+  // A failed read is shown with a Retry, never as an empty list.
+  const [loadError, setLoadError] = useState('');
+  // D69: the call is saved but its next reminder is not. The entries are
+  // locked so Retry repeats the SAME request (the server sets it once).
+  const callSaved = saveError.startsWith(CALL_SAVED);
 
   const load = useCallback(async () => {
     if (!storeId) {
@@ -69,8 +82,10 @@ export function NBADashboardPage() {
       const res = await crmApi.getNbaCallList(storeId);
       setCards(Array.isArray(res?.cards) ? res.cards : []);
       setListDate(res?.date || '');
-    } catch {
+      setLoadError('');
+    } catch (error) {
       setCards([]);
+      setLoadError(getErrorMessage(error, 'The call list for today could not be loaded; try again.'));
     } finally {
       setIsLoading(false);
     }
@@ -86,17 +101,19 @@ export function NBADashboardPage() {
     setNotes('');
     setNextDate('');
     setSkipReason('no_answer');
+    setSaveError('');
   };
 
   const submitDone = async () => {
     if (!doneFor || notes.trim().length < 10) return;
     setBusy(true);
+    setSaveError('');
     try {
       await crmApi.completeNbaCard(storeId, doneFor.customer_id, notes.trim(), nextDate || undefined);
       closeModals();
       await load();
-    } catch {
-      /* fail-soft: leave the card so the associate can retry */
+    } catch (error) {
+      setSaveError(getErrorMessage(error, 'The call was not saved; try again.'));
     } finally {
       setBusy(false);
     }
@@ -105,12 +122,13 @@ export function NBADashboardPage() {
   const submitSkip = async () => {
     if (!skipFor) return;
     setBusy(true);
+    setSaveError('');
     try {
       await crmApi.dismissNbaCard(storeId, skipFor.customer_id, skipReason);
       closeModals();
       await load();
-    } catch {
-      /* fail-soft */
+    } catch (error) {
+      setSaveError(getErrorMessage(error, 'The skip was not saved; try again.'));
     } finally {
       setBusy(false);
     }
@@ -156,6 +174,11 @@ export function NBADashboardPage() {
         </div>
       ) : !storeId ? (
         <p className="text-gray-500 py-8">Select a store to see its call list.</p>
+      ) : loadError ? (
+        <div role="alert" className="py-8 text-sm text-red-700 space-y-3">
+          <p>{loadError}</p>
+          <button type="button" className="btn-secondary" onClick={load}>Retry</button>
+        </div>
       ) : cards.length === 0 ? (
         <p className="text-gray-500 py-8">No calls scheduled for today.</p>
       ) : (
@@ -230,6 +253,7 @@ export function NBADashboardPage() {
             <p className="text-gray-500 text-xs mb-3">Record what you discussed. This stays as an in-app note; no message is sent.</p>
             <textarea
               value={notes}
+              disabled={callSaved}
               onChange={(e) => setNotes(e.target.value)}
               placeholder="What did you discuss? Min 10 characters"
               rows={3}
@@ -242,9 +266,13 @@ export function NBADashboardPage() {
               id="nba-next"
               type="date"
               value={nextDate}
+              disabled={callSaved}
               onChange={(e) => setNextDate(e.target.value)}
               className="border border-gray-200 rounded px-2 py-1 text-sm"
             />
+            {saveError && (
+              <p role="alert" className="text-sm text-red-700 mt-3">{saveError}</p>
+            )}
             <div className="flex justify-end gap-2 mt-4">
               <button type="button" onClick={closeModals} className="text-gray-600 text-sm px-3 py-1.5">Cancel</button>
               <button
@@ -253,7 +281,7 @@ export function NBADashboardPage() {
                 disabled={busy || notes.trim().length < 10}
                 className="bg-bv-red text-white rounded px-3 py-1.5 text-sm disabled:opacity-40"
               >
-                Confirm
+                {callSaved ? 'Retry' : 'Confirm'}
               </button>
             </div>
           </div>
@@ -279,6 +307,9 @@ export function NBADashboardPage() {
                 </label>
               ))}
             </div>
+            {saveError && (
+              <p role="alert" className="text-sm text-red-700 mt-3">{saveError}</p>
+            )}
             <div className="flex justify-end gap-2 mt-4">
               <button type="button" onClick={closeModals} className="text-gray-600 text-sm px-3 py-1.5">Cancel</button>
               <button
