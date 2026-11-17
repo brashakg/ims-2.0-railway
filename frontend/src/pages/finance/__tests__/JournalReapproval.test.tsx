@@ -96,6 +96,23 @@ describe('journal re-approval (D54)', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Post to ledger' }));
     await waitFor(() => expect(api.postJournalEntry).toHaveBeenCalledTimes(2));
   });
+
+  // Codex round 3 (R3-A): a Post the server could not read its way through
+  // now answers 503 "try again" (it used to answer 404 not found). Nothing
+  // was posted or spent, so the drawer keeps the entry and "Post to ledger"
+  // -- also when the re-read fails the same way -- and the next press posts.
+  it('a Post answered 503 keeps the entry open with Post, and the next press posts', async () => {
+    const unreadable = { response: { status: 503, data: { detail: 'Journal entries could not be read just now - please try again' } } };
+    api.postJournalEntry.mockRejectedValueOnce(unreadable);
+    api.getJournalEntry.mockRejectedValueOnce(unreadable);
+    await open({ needs_reapproval: false });
+    fireEvent.click(screen.getByRole('button', { name: 'Post to ledger' }));
+    await waitFor(() => expect(api.getJournalEntry).toHaveBeenCalledWith('JE-1'));
+    expect(screen.queryByRole('button', { name: 'Approve again' })).toBeNull();
+    api.postJournalEntry.mockResolvedValueOnce({ ok: true });
+    fireEvent.click(await screen.findByRole('button', { name: 'Post to ledger' }));
+    await waitFor(() => expect(api.postJournalEntry).toHaveBeenCalledTimes(2));
+  });
 });
 
 describe('a journal list that could not be read (D84)', () => {
