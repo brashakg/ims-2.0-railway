@@ -6318,3 +6318,270 @@ def test_r20_an_unlocked_short_count_and_a_new_sheet_on_real_mongo(monkeypatch):
     finally:
         client.drop_database(name)
         client.close()
+
+
+# ---------------------------------------------------------------------------
+# Round 21 (D120): the session AFTER a close stored on a new sheet.
+# A close that made the drawer's first count, was refused, and was stored on
+# ANOTHER sheet holds the drawer's latest count. The next session started
+# from the till's FIRST count instead and was charged again (or let off) with
+# the difference between the two sheets.
+# ---------------------------------------------------------------------------
+
+
+def _first_count_then_a_new_sheet(db, monkeypatch, *, first, second, note, between=0, bank=0.0,
+                                  at=lambda clock: f"{DATE}T{clock}", register_db=None):
+    """Rs 3,000 cash taken. CR-R21-1 is the drawer's first count (``first``
+    x Rs 500) at 12:00 and is refused for its note; ``between`` rupees more
+    cash; the same close is then stored at 12:30 on a new sheet of ``second``
+    x Rs 500. ``at`` / ``register_db``: a native database takes datetimes and
+    is reached through the app's handle."""
+    rdb = register_db or db
+    sid = _open(db)
+    _cash_sale(db, 3000, at("05:00:00"))
+    with pytest.raises(HTTPException) as exc:
+        _register(rdb, monkeypatch, "CR-R21-1", opened="04:00:00", closed="12:00:00", pieces=first)
+    assert _refused_for_the_note(exc)
+    _counted_at(db, sid, "12:00:00")
+    if between:
+        _cash_sale(db, between, at("12:10:00"))
+    out = _register(rdb, monkeypatch, "CR-R21-1", opened="04:00:00", closed="12:30:00",
+                    pieces=second, note=note, insert=False, bank=bank)
+    assert (out["till_counted_earlier"], out["till_count_differs"]) == (False, True)
+    return sid, out
+
+
+class TestR21TheSessionAfterACloseStoredOnANewSheet:
+    def test_a_miscount_corrected_then_the_next_sessions_balance(self, db, monkeypatch):
+        """The reviewers' steps. First sheet Rs 2,500 (a miscount), refused;
+        recounted Rs 3,000 and stored with its note. Rs 500 more is taken and
+        the next session counts Rs 3,500: it read Rs 500 OVER, was refused for
+        a note and alerted the manager a second time."""
+        alerts = _alerts(monkeypatch)
+        sid, first = _first_count_then_a_new_sheet(
+            db, monkeypatch, first=5, second=6, note="Rs 500 found after the first count")
+        assert _judged(first) == _balanced(3000.0) and first["till_count_variance"] == -500.0
+        _cash_sale(db, 500, f"{DATE}T12:45:00")
+        second = _register(db, monkeypatch, "CR-R21-2", opened="12:40:00", closed="13:00:00",
+                           opening=3000.0, pieces=7)
+        assert _judged(second) == _balanced(3500.0)
+        assert (second["till_counted_earlier"], second["till_standing_count"],
+                second["cash_sales"], _owed(second)) == (True, 3000.0, 500.0, [])
+        _cash_sale(db, 500, f"{DATE}T13:20:00")
+        third = _register(db, monkeypatch, "CR-R21-3", opened="13:10:00", closed="14:00:00",
+                          opening=3500.0, pieces=8)
+        assert _judged(third) == _balanced(4000.0) and third["till_standing_count"] == 3500.0
+        # The till's first count is not replaced (L3-12); one alert in all.
+        assert (_till(db, sid)["blind_count_paisa"], _till(db, sid)["blind_count_origin"]) == (
+            250000, "CR-R21-1")
+        assert [(a["session_id"], a["variance_paisa"]) for a in alerts] == [(sid, -50000)]
+
+    def test_cash_missing_after_the_new_sheet_is_the_next_sessions_shortage(self, db, monkeypatch):
+        """The stored close says Rs 3,000. Rs 500 more is taken and the next
+        session finds Rs 3,000: Rs 500 is missing against the stored close.
+        It read BALANCED with no note and no alert (judged from the first
+        sheet of Rs 2,500). Whether the Rs 500 went in the second shift or
+        the new sheet was typed to balance over a true shortage cannot be
+        told apart, and either way this is the alert that carries the loss:
+        under the next session's own key, once. The first count's own
+        difference was noted and alerted at the earlier close (drawer key)."""
+        alerts = _alerts(monkeypatch)
+        sid, _first = _first_count_then_a_new_sheet(
+            db, monkeypatch, first=5, second=6, note="Rs 500 found after the first count")
+        _cash_sale(db, 500, f"{DATE}T12:45:00")
+        with pytest.raises(HTTPException) as exc:
+            _register(db, monkeypatch, "CR-R21-2", opened="12:40:00", closed="13:00:00",
+                      opening=3000.0, pieces=6)
+        assert _refused_for_the_note(exc) and len(alerts) == 1
+        out = _register(db, monkeypatch, "CR-R21-2", opened="12:40:00", closed="13:00:00",
+                        pieces=6, note="Rs 500 short", insert=False)
+        assert _judged(out) == {
+            "counted": 3000.0, "expected": 3500.0, "variance": -500.0, "variance_status": "SHORT"}
+        assert _owed(out) == [("CR-R21-2", -50000)]
+        assert [(a["session_id"], a["variance_paisa"]) for a in alerts] == [
+            (sid, -50000), ("CR-R21-2", -50000)]
+
+    def test_a_larger_shortage_noted_on_the_new_sheet_is_not_demanded_again(self, db, monkeypatch):
+        """First sheet Rs 500 short, refused. Rs 1,000 more is taken, a
+        further Rs 500 goes missing, the new sheet is stored Rs 1,000 short
+        with its note and alert. The next session, all its cash present, was
+        asked for Rs 500 of it again."""
+        alerts = _alerts(monkeypatch)
+        sid, first = _first_count_then_a_new_sheet(
+            db, monkeypatch, first=5, between=1000, second=6, note="Rs 1,000 short")
+        assert _judged(first) == {
+            "counted": 3000.0, "expected": 4000.0, "variance": -1000.0, "variance_status": "SHORT"}
+        _cash_sale(db, 500, f"{DATE}T12:45:00")
+        second = _register(db, monkeypatch, "CR-R21-2", opened="12:40:00", closed="13:00:00",
+                           opening=3000.0, pieces=7)
+        assert _judged(second) == _balanced(3500.0) and _owed(second) == []
+        assert [(a["session_id"], a["variance_paisa"]) for a in alerts] == [(sid, -100000)]
+
+    def test_a_bank_deposit_on_the_new_sheet_is_not_charged_to_the_next_session(self, db, monkeypatch):
+        """The new sheet is stored after Rs 1,000 was banked (Rs 2,000 left).
+        The next session read short by the first sheet's difference."""
+        alerts = _alerts(monkeypatch)
+        _sid, first = _first_count_then_a_new_sheet(
+            db, monkeypatch, first=5, second=4, bank=1000.0, note="Rs 500 found, Rs 1,000 banked")
+        assert _judged(first) == _balanced(2000.0)
+        _cash_sale(db, 500, f"{DATE}T12:45:00")
+        second = _register(db, monkeypatch, "CR-R21-2", opened="12:40:00", closed="13:00:00",
+                           opening=2000.0, pieces=5)
+        assert _judged(second) == _balanced(2500.0) and len(alerts) == 1
+
+    def test_the_new_sheet_stored_with_its_reply_lost_then_the_next_session(self, db, monkeypatch):
+        """D110: the closing write of the new sheet lands, its reply and the
+        read-back are lost (500), the identical retry answers the saved close
+        (409). The next session still starts from that stored sheet."""
+        alerts = _alerts(monkeypatch)
+        sid = _open(db)
+        _cash_sale(db, 3000)
+        with pytest.raises(HTTPException) as exc:
+            _register(db, monkeypatch, "CR-R21-1", opened="04:00:00", closed="12:00:00", pieces=5)
+        assert _refused_for_the_note(exc)
+        _counted_at(db, sid, "12:00:00")
+        cr = db.get_collection("cash_register_sessions")
+        with monkeypatch.context() as m:
+            fired = _lose_ack(m, cr, "update_one", _sets_status("CLOSED"))
+            _fail_read_back(m, cr, fired)
+            with pytest.raises(HTTPException) as exc:
+                _register(db, m, "CR-R21-1", opened="04:00:00", closed="12:30:00",
+                          pieces=6, note="Rs 500 found", insert=False)
+            assert exc.value.status_code == 500 and fired == [True]
+        with pytest.raises(HTTPException) as exc:
+            _register(db, monkeypatch, "CR-R21-1", opened="04:00:00", closed="12:30:00",
+                      pieces=6, note="Rs 500 found", insert=False)
+        assert exc.value.status_code == 409
+        assert exc.value.detail["session"]["till_since_count"]["cash_sales_paisa"] == 0
+        _cash_sale(db, 500, f"{DATE}T12:45:00")
+        second = _register(db, monkeypatch, "CR-R21-2", opened="12:40:00", closed="13:00:00",
+                           opening=3000.0, pieces=7)
+        assert _judged(second) == _balanced(3500.0)
+        assert [(a["session_id"], a["variance_paisa"]) for a in alerts] == [(sid, -50000)]
+
+    def test_the_cash_since_the_count_unreadable_refuses_the_new_sheet(self, db, monkeypatch):
+        """The new sheet's cash since the till's count is what the next
+        session takes off. If it cannot be read the close is refused (503)
+        and stays OPEN -- never stored without it."""
+        _alerts(monkeypatch)
+        sid = _open(db)
+        _cash_sale(db, 3000)
+        with pytest.raises(HTTPException):
+            _register(db, monkeypatch, "CR-R21-1", opened="04:00:00", closed="12:00:00", pieces=5)
+        _counted_at(db, sid, "12:00:00")
+        with monkeypatch.context() as m:
+            m.setattr(till, "moved_since_count", _raise_read_fault)
+            with pytest.raises(HTTPException) as exc:
+                _register(db, m, "CR-R21-1", opened="04:00:00", closed="12:30:00",
+                          pieces=6, note="Rs 500 found", insert=False)
+            assert exc.value.status_code == 503
+        cr = db.get_collection("cash_register_sessions")
+        assert cr.find_one({"session_id": "CR-R21-1"})["status"] == "OPEN"
+        out = _register(db, monkeypatch, "CR-R21-1", opened="04:00:00", closed="12:30:00",
+                        pieces=6, note="Rs 500 found", insert=False)
+        assert out["till_since_count"]["cash_sales_paisa"] == 0
+
+
+def test_r21_the_session_after_a_new_sheet_on_real_mongo(monkeypatch):
+    """Native PyMongo with the real till indexes and TaskRepository: stored
+    rows, the HTTP answer and the task count. (1) a miscount corrected, then
+    two more sessions with all cash present; (2) the same, the next session
+    Rs 500 short; (3) a bank deposit on the new sheet; (4) the new sheet's
+    closing write landed with its reply and read-back lost, the identical
+    retry twice, then the next session."""
+    client, real_db, name = _real_till_db()
+    try:
+        till.ensure_till_indexes(real_db)
+        tasks = _real_task_repo(monkeypatch, real_db)
+        ndb = _NativeDB(real_db)
+        registers = real_db.cash_register_sessions
+        day_rows = ("till_sessions", "cash_register_sessions", "orders", "tasks", "day_end_closes")
+
+        def _fresh(**kw):
+            for coll in day_rows:
+                real_db[coll].delete_many({})
+            return _first_count_then_a_new_sheet(
+                real_db, monkeypatch, register_db=ndb,
+                at=lambda clock: datetime.fromisoformat(f"{DATE}T{clock}"), **kw)
+
+        def _task_rows():
+            return sorted((t["source_ref"], t["payload"]["variance_paisa"]) for t in tasks.find({}))
+
+        # (1)
+        drawer, _first = _fresh(first=5, second=6, note="Rs 500 found after the first count")
+        key = f"till_variance:{STORE}:{DATE}:{drawer}"
+        stored = registers.find_one({"session_id": "CR-R21-1"})
+        assert (stored["counted"], stored["expected"], stored["variance_status"],
+                stored["till_count_variance"], stored["till_since_count"]["cash_sales_paisa"]) == (
+            3000.0, 3000.0, "BALANCED", -500.0, 0)
+        assert _task_rows() == [(key, -50000)]
+        _cash_sale(real_db, 500, datetime(2026, 11, 4, 12, 45))
+        second = _register(ndb, monkeypatch, "CR-R21-2", opened="12:40:00", closed="13:00:00",
+                           opening=3000.0, pieces=7)
+        assert _judged(second) == _balanced(3500.0)
+        _cash_sale(real_db, 500, datetime(2026, 11, 4, 13, 20))
+        third = _register(ndb, monkeypatch, "CR-R21-3", opened="13:10:00", closed="14:00:00",
+                          opening=3500.0, pieces=8)
+        assert _judged(third) == _balanced(4000.0)
+        assert [(r["session_id"], r["variance"], r["manager_followup"]["tasks"])
+                for r in registers.find({"session_id": {"$ne": "CR-R21-1"}}).sort("session_id")] == [
+            ("CR-R21-2", 0.0, []), ("CR-R21-3", 0.0, [])]
+        row = real_db.till_sessions.find_one({"_id": drawer})
+        assert (row["blind_count_paisa"], row["blind_count_origin"]) == (250000, "CR-R21-1")
+        assert _task_rows() == [(key, -50000)]
+
+        # (2)
+        drawer, _first = _fresh(first=5, second=6, note="Rs 500 found after the first count")
+        key = f"till_variance:{STORE}:{DATE}:{drawer}"
+        _cash_sale(real_db, 500, datetime(2026, 11, 4, 12, 45))
+        with pytest.raises(HTTPException) as exc:
+            _register(ndb, monkeypatch, "CR-R21-2", opened="12:40:00", closed="13:00:00",
+                      opening=3000.0, pieces=6)
+        assert _refused_for_the_note(exc)
+        assert registers.find_one({"session_id": "CR-R21-2"})["status"] == "OPEN"
+        assert _task_rows() == [(key, -50000)]
+        out = _register(ndb, monkeypatch, "CR-R21-2", opened="12:40:00", closed="13:00:00",
+                        pieces=6, note="Rs 500 short", insert=False)
+        assert _judged(out) == {
+            "counted": 3000.0, "expected": 3500.0, "variance": -500.0, "variance_status": "SHORT"}
+        assert _task_rows() == sorted([
+            (key, -50000), (f"till_variance:{STORE}:{DATE}:CR-R21-2", -50000)])
+
+        # (3)
+        _fresh(first=5, second=4, bank=1000.0, note="Rs 500 found, Rs 1,000 banked")
+        _cash_sale(real_db, 500, datetime(2026, 11, 4, 12, 45))
+        second = _register(ndb, monkeypatch, "CR-R21-2", opened="12:40:00", closed="13:00:00",
+                           opening=2000.0, pieces=5)
+        assert _judged(second) == _balanced(2500.0) and tasks.count_documents({}) == 1
+
+        # (4)
+        for coll in day_rows:
+            real_db[coll].delete_many({})
+        drawer = _open(real_db)
+        _cash_sale(real_db, 3000, datetime(2026, 11, 4, 5, 0))
+        with pytest.raises(HTTPException) as exc:
+            _register(ndb, monkeypatch, "CR-R21-1", opened="04:00:00", closed="12:00:00", pieces=5)
+        assert _refused_for_the_note(exc)
+        _counted_at(real_db, drawer, "12:00:00")
+        with monkeypatch.context() as m:
+            fired = _native_lose_ack(m, name, "cash_register_sessions", "update_one", _sets_status("CLOSED"))
+            _native_fail_read_back(m, name, "cash_register_sessions", fired)
+            with pytest.raises(HTTPException) as exc:
+                _register(ndb, m, "CR-R21-1", opened="04:00:00", closed="12:30:00",
+                          pieces=6, note="Rs 500 found", insert=False)
+            assert exc.value.status_code == 500 and fired == [True] and tasks.count_documents({}) == 0
+        for _ in range(2):
+            with pytest.raises(HTTPException) as exc:
+                _register(ndb, monkeypatch, "CR-R21-1", opened="04:00:00", closed="12:30:00",
+                          pieces=6, note="Rs 500 found", insert=False)
+            code, body = _through_the_app_handler(exc.value)
+            assert code == 409 and body["detail"]["session"]["counted"] == 3000.0
+        assert tasks.count_documents({}) == 1
+        _cash_sale(real_db, 500, datetime(2026, 11, 4, 12, 45))
+        second = _register(ndb, monkeypatch, "CR-R21-2", opened="12:40:00", closed="13:00:00",
+                           opening=3000.0, pieces=7)
+        assert _judged(second) == _balanced(3500.0)
+        assert (registers.count_documents({}), tasks.count_documents({})) == (2, 1)
+    finally:
+        client.drop_database(name)
+        client.close()

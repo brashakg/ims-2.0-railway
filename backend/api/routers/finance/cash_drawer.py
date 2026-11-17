@@ -210,7 +210,12 @@ def _later_closes(coll, till_session_id, own_id):
     ``sheets``: the sessions judged on their OWN sheet, oldest first, in the
     shape ``eod_tally.moved_since_count`` takes. Each is a later count of the
     same drawer (a drawer's till count is made once, so every one of them is
-    later than it); the last is where the next session starts. Its counted
+    later than it); the last is where the next session starts. That is a
+    session that started from a count it did not make (D120), and also the
+    session that MADE the till's count and was then stored on another sheet
+    (``till_since_count``): its new sheet is the later count. Left out, the
+    next session started from the first sheet and was charged again, or let
+    off, with the difference between the two. Its counted
     cash is what was left AFTER the bank deposit recorded on it -- its own
     expected figure was already net of that deposit -- so it is the starting
     figure as stored.
@@ -224,11 +229,17 @@ def _later_closes(coll, till_session_id, own_id):
     RAISES when the read fails: read as "none", a deposit or a shortage an
     earlier session already accounted for is charged again."""
     sheets, banked, count_noted = [], [], False
-    for s in coll.find(
-        {"till_session_id": till_session_id, "status": "CLOSED", "till_counted_earlier": True}
-    ):
+    for s in coll.find({"till_session_id": till_session_id, "status": "CLOSED"}):
         at = _to_dt(s.get("closed_at"))
-        if s.get("session_id") == own_id or at is None:
+        # The cash a new sheet was charged with AFTER the till's count. Its
+        # stored cash_sales / refunds / expenses cover its whole window, most
+        # of which the till's count already holds.
+        since = s.get("till_since_count")
+        if (
+            s.get("session_id") == own_id
+            or at is None
+            or not (s.get("till_counted_earlier") or since)
+        ):
             continue
         count_noted = count_noted or s.get("till_count_variance") is not None
         if (
@@ -242,10 +253,15 @@ def _later_closes(coll, till_session_id, own_id):
             {
                 "at": at,
                 "counted_paisa": cash_denom.rupees_to_paisa(s["counted"]),
-                "cash_sales_paisa": cash_denom.rupees_to_paisa(s.get("cash_sales") or 0),
-                "cash_refunds_paisa": cash_denom.rupees_to_paisa(s.get("cash_refunds") or 0),
-                "cash_payouts_paisa": cash_denom.rupees_to_paisa(s.get("cash_expenses") or 0),
-                "by_mode": s.get("by_mode_breakdown") or {},
+                **(
+                    since
+                    or {
+                        "cash_sales_paisa": cash_denom.rupees_to_paisa(s.get("cash_sales") or 0),
+                        "cash_refunds_paisa": cash_denom.rupees_to_paisa(s.get("cash_refunds") or 0),
+                        "cash_payouts_paisa": cash_denom.rupees_to_paisa(s.get("cash_expenses") or 0),
+                        "by_mode": s.get("by_mode_breakdown") or {},
+                    }
+                ),
             }
         )
     sheets.sort(key=lambda c: c["at"])
@@ -466,10 +482,23 @@ async def close_cash_register(
         and shared_paisa is not None
         and shared_paisa != cash_denom.rupees_to_paisa(sheet)
     )
+    since_count = None
     if resheeted:
         # The figure this sheet would have put on the till: the notes when
         # there are notes (as on the first attempt).
         counted = sheet
+        # This sheet is now the drawer's LATEST count, so the next session
+        # starts from it (D120) and must take off the cash it holds beyond
+        # the till's count: the day so far minus what the counted drawers
+        # and any later sheet were charged with. Stored with the close
+        # (``_later_closes`` reads it). Unreadable = refused, nothing stored.
+        since_count = _strict(
+            lambda: till_service.moved_since_count(
+                db,
+                till_link["session"],
+                _later_closes(coll, till_link.get("session_id"), body.session_id)[0],
+            )
+        )
 
     summary = cash_register.build_close_summary(
         opening_float=opening_float,
@@ -693,6 +722,16 @@ async def close_cash_register(
         "till_count_variance": (
             cash_denom.paisa_to_rupees(count_owed["variance_paisa"])
             if count_owed is not None
+            else None
+        ),
+        # A new sheet stored over this session's own first count: the cash it
+        # was charged with after that count, for the next session (D120).
+        "till_since_count": (
+            {
+                k: since_count[k]
+                for k in ("cash_sales_paisa", "cash_refunds_paisa", "cash_payouts_paisa", "by_mode")
+            }
+            if since_count is not None
             else None
         ),
         "cash_sales": cash_sales,
