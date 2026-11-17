@@ -1052,3 +1052,243 @@ def test_d58_insert_whose_ack_is_lost_and_lands_after_the_lock_is_taken_back(rig
     assert rig.stranded()
     assert rig.run().status_code == 423  # the next payroll touch
     assert rig.rows() == [] and not rig.stranded() and rig.pnl() == 0
+
+
+# ===========================================================================
+# Codex round 4, R4-A -- a failed read is not an empty read
+# ===========================================================================
+# Reproduced on native Mongo with a real login before the fix
+# (C:/ims-wt/evidence-1410-r5/pnl-before.json): with the payroll read failing,
+# GET /finance/pnl answered 200 payroll_cost 0 net_profit 0 and
+# GET /finance/pnl/by-store answered 200 stores [] although two posted rows
+# (cost 45,200) were stored. The same class on the other read paths of this
+# PR: the staff payslip door said "no payslip", and a payroll run / approve /
+# mark-paid went through in a locked month whose lock could not be read.
+
+RANGE = f"from_date={YEAR}-{MONTH:02d}-01&to_date={YEAR}-{MONTH:02d}-28"
+PNL = f"/api/v1/finance/pnl?store_id={STORE}&{RANGE}"
+PNL_ALL = f"/api/v1/finance/pnl?{RANGE}"
+BY_STORE = f"/api/v1/finance/pnl/by-store?{RANGE}"
+MANAGER = {"user_id": "mgr-b09-n", "username": "mgr", "roles": ["STORE_MANAGER"],
+           "store_ids": [STORE], "active_store_id": STORE}
+ACCOUNTANT = {"user_id": "acc-b09-n", "username": "acc", "roles": ["ACCOUNTANT"],
+              "store_ids": [STORE], "active_store_id": STORE}
+
+
+def _finance_on(rig, monkeypatch):
+    """The P&L routes read the same database as the rig (the fixture wires
+    payroll, My Work and the period lock only)."""
+    from api.routers.finance import pnl, pnl_breakdown
+
+    monkeypatch.setattr(pnl, "_get_db", lambda: rig.db)
+    monkeypatch.setattr(pnl_breakdown, "_get_db", lambda: rig.db)
+
+
+class _Unreadable:
+    """While open, reads of ONE collection fail, the way a dropped connection
+    does: ``find`` raises ("call"), or the cursor raises on its first row
+    ("cursor"). ``find_one`` always raises."""
+
+    def __init__(self, monkeypatch, rig, collection, how="call"):
+        self.ctx = monkeypatch.context()
+        self.rig, self.collection, self.how = rig, collection, how
+        self.reads = 0
+
+    def __enter__(self):
+        m = self.ctx.__enter__()
+        original_find, original_one = self.rig.coll_cls.find, self.rig.coll_cls.find_one
+        outer = self
+
+        def boom():
+            raise pymongo.errors.AutoReconnect(f"{outer.collection} read failed")
+
+        def find(self, *a, **k):
+            if self.name != outer.collection:
+                return original_find(self, *a, **k)
+            outer.reads += 1
+            if outer.how == "call":
+                boom()
+
+            def cursor():
+                boom()
+                yield  # pragma: no cover
+
+            return cursor()
+
+        def find_one(self, *a, **k):
+            if self.name != outer.collection:
+                return original_one(self, *a, **k)
+            outer.reads += 1
+            boom()
+
+        m.setattr(self.rig.coll_cls, "find", find)
+        m.setattr(self.rig.coll_cls, "find_one", find_one)
+        return self
+
+    def __exit__(self, *exc):
+        return self.ctx.__exit__(*exc)
+
+
+def _posted_cost(rig):
+    return round(
+        sum(r["breakdown"]["ctc_cost"] for r in rig.rows() if r["status"] in ("APPROVED", "PAID")), 2)
+
+
+@pytest.mark.parametrize("how", ["call", "cursor"])
+def test_r4a_unreadable_posted_payroll_answers_503_on_both_pnl_routes(rig, monkeypatch, how):
+    _finance_on(rig, monkeypatch)
+    assert rig.run().status_code == 200 and rig.approve().status_code == 200
+    stored, cost = _saved_figures(rig), _posted_cost(rig)
+    assert cost > 0
+    c = rig.client()
+    first, last = f"{YEAR}-{MONTH:02d}-01", f"{YEAR}-{MONTH:02d}-28"
+
+    def healthy():
+        one, every, table = c.get(PNL), c.get(PNL_ALL), c.get(BY_STORE)
+        assert (one.status_code, every.status_code, table.status_code) == (200, 200, 200), table.text
+        for body in (one.json(), every.json()):
+            assert body["payroll_cost"] == cost and body["net_profit"] == -cost
+        assert [(s["store_id"], s["payroll"], s["net_profit"]) for s in table.json()["stores"]] == [
+            (STORE, cost, -cost)]
+        assert table.json()["total_net"] == -cost
+
+    healthy()
+    with _Unreadable(monkeypatch, rig, "payroll", how) as failing:
+        for path in (PNL, PNL_ALL, BY_STORE):
+            reply = c.get(path)
+            # Never a P&L without the payroll: no 200, no figure of any kind.
+            assert reply.status_code == 503, (path, reply.status_code, reply.text)
+            assert reply.json() == {"detail": finance_shared.PAYROLL_UNREADABLE}
+        # The two shared readers themselves refuse; neither answers 0 / {}.
+        for read in (
+            lambda: finance_shared._payroll_cost(rig.db, STORE, first, last),
+            lambda: finance_shared._payroll_by_store(rig.db, first, last),
+        ):
+            with pytest.raises(Exception) as refused:
+                read()
+            assert getattr(refused.value, "status_code", None) == 503
+        assert failing.reads >= 5
+    assert _saved_figures(rig) == stored  # nothing stored moved
+    healthy()  # the identical request once the read works again
+
+
+@pytest.mark.parametrize("user", [MANAGER, ACCOUNTANT], ids=["store-manager", "accountant"])
+def test_r4a_a_reader_who_is_not_shown_payroll_never_reads_it(rig, monkeypatch, user):
+    """Salary stays ADMIN/SUPERADMIN only. The P&L of a manager or an
+    accountant carries no payroll-derived figure, so the payroll is not read
+    for them and an unreadable payroll changes nothing in their answer."""
+    _finance_on(rig, monkeypatch)
+    assert rig.run().status_code == 200 and rig.approve().status_code == 200
+    c = rig.client(user)
+    before = c.get(PNL)
+    assert before.status_code == 200, before.text
+    for field in ("payroll_cost", "net_profit", "net_margin"):
+        assert field not in before.json()
+    assert str(_posted_cost(rig)) not in before.text
+    with _Unreadable(monkeypatch, rig, "payroll") as failing:
+        during = c.get(PNL)
+        assert during.status_code == 200 and during.json() == before.json()
+        assert failing.reads == 0
+        assert c.get(BY_STORE).status_code == 403  # the by-store table stays closed
+    assert c.get(BY_STORE).status_code == 403
+
+
+def test_r4a_by_store_company_filter_applies_to_payroll_and_an_unreadable_shop_list_refuses(
+    rig, monkeypatch
+):
+    """The company filter of the by-store table took the sales, cost and
+    expenses of that company and EVERY shop's payroll, so another company's
+    wage bill showed under it. And with the shop list unreadable the filter
+    matched no shop at all (an empty table) instead of refusing."""
+    _finance_on(rig, monkeypatch)
+    rig.db.get_collection("stores").insert_many(
+        [{"store_id": STORE, "entity_id": ENTITY},
+         {"store_id": "ST-B09-OTHER", "entity_id": "ENT-B09-OTHER"}])
+    assert rig.run().status_code == 200 and rig.approve().status_code == 200
+    cost = _posted_cost(rig)
+    rig.db.get_collection("payroll").insert_one(
+        {"payroll_id": "PAY-B09-OTHER", "employee_id": "EMP-OTHER", "store_id": "ST-B09-OTHER",
+         "entity_id": "ENT-B09-OTHER", "year": YEAR, "month": MONTH, "status": "PAID",
+         "net_salary": 9000, "breakdown": {"ctc_cost": 11000.0}})
+    c = rig.client()
+
+    def table(entity=None):
+        reply = c.get(BY_STORE + (f"&entity_id={entity}" if entity else ""))
+        assert reply.status_code == 200, reply.text
+        return sorted((s["store_id"], s["payroll"]) for s in reply.json()["stores"])
+
+    assert table() == [(STORE, cost), ("ST-B09-OTHER", 11000.0)]
+    assert table(ENTITY) == [(STORE, cost)]
+    assert table("ENT-B09-OTHER") == [("ST-B09-OTHER", 11000.0)]
+    assert table("ENT-B09-NO-SHOP") == []
+    with _Unreadable(monkeypatch, rig, "stores"):
+        for path in (BY_STORE, BY_STORE + f"&entity_id={ENTITY}"):
+            reply = c.get(path)
+            assert reply.status_code >= 500, (path, reply.status_code, reply.text)
+            assert "stores" not in reply.text
+
+
+@pytest.mark.parametrize("collection", ["payroll", "payslips"])
+def test_staff_payslip_that_cannot_be_read_answers_503_not_no_payslip(rig, monkeypatch, collection):
+    assert rig.run().status_code == 200 and rig.approve().status_code == 200
+    c = rig.client(STAFF)
+    shown = c.get(MINE)
+    assert shown.status_code == 200 and shown.json()["payslip"]["status"] == "APPROVED"
+    with _Unreadable(monkeypatch, rig, collection):
+        reply = c.get(MINE)
+        assert reply.status_code == 503, reply.text  # was 200 {"payslip": null}
+        assert "could not be loaded" in _detail(reply) and "payslip" not in reply.json()
+    assert c.get(MINE).json() == shown.json()
+    # Someone with no payslip at all still gets the plain "none" answer.
+    nobody = {**STAFF, "user_id": "EMP-B09-NOBODY"}
+    assert rig.client(nobody).get(MINE).json() == {"payslip": None}
+
+
+@pytest.mark.parametrize(
+    "action, status_before",
+    [("run", "DRAFT"), ("approve", "DRAFT"), ("pay", "APPROVED")],
+    ids=["save-run", "approve", "mark-paid"],
+)
+def test_lock_that_cannot_be_read_refuses_payroll_writes_in_that_month(
+    rig, monkeypatch, action, status_before
+):
+    """A month locked before the run/lock guard existed has a period_locks row
+    and no guard document. With that row unreadable the check read as "not
+    locked": a run saved rows, an approval posted the wages into the locked
+    month and mark-paid went through. They now answer 503 and write nothing;
+    the healthy request answers 423 as before."""
+    rig.db.get_collection("period_locks").insert_one(
+        {"month": MONTH, "year": YEAR, "locked_by": "before-the-guard"})
+    rig.db.get_collection("payroll").insert_one(
+        {"payroll_id": "PAY-B09-LEGACY", "employee_id": EMP, "store_id": STORE, "entity_id": ENTITY,
+         "year": YEAR, "month": MONTH, "status": status_before, "net_salary": 17750.0,
+         "breakdown": {"ctc_cost": 22600.0}})
+    stored = _saved_figures(rig)
+    cost_before = rig.pnl()
+    press = {"run": rig.run, "approve": rig.approve, "pay": rig.pay}[action]
+    assert press().status_code == 423
+    with _Unreadable(monkeypatch, rig, "period_locks"):
+        reply = press()
+        assert reply.status_code == 503, reply.text  # was 200
+        assert "could not be read" in _detail(reply) and "nothing was saved" in _detail(reply)
+        # A preview writes nothing and is not gated, as before.
+        assert rig.run(dry_run=True).status_code == 200
+    assert _saved_figures(rig) == stored and rig.statuses() == [status_before]
+    assert rig.guard() is None and rig.pnl() == cost_before
+    assert press().status_code == 423  # the identical retry, lock readable again
+    assert _saved_figures(rig) == stored
+
+
+def test_other_postings_keep_their_fail_soft_lock_check():
+    """Only payroll asks for the strict check: a till sale or a supplier bill
+    is not stopped by a lock that cannot be read (unchanged)."""
+
+    class _Down:
+        def get_collection(self, name):
+            raise pymongo.errors.AutoReconnect("down")
+
+    finance_shared.check_period_locked(_Down(), "2026-09-10")  # no raise
+    assert finance_shared.is_period_locked(_Down(), 9, 2026) is False
+    with pytest.raises(Exception) as refused:
+        finance_shared.check_period_locked(_Down(), "2026-09-10", strict=True)
+    assert getattr(refused.value, "status_code", None) == 503

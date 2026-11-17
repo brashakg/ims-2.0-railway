@@ -285,37 +285,58 @@ def _months_in_range(from_date, to_date):
     return months
 
 
-def _posted_payroll_costs(db, from_date, to_date, store_id=None):
+# What a P&L reader is told when the posted payroll could not be read. No
+# figure and no name: only that the report was not worked out.
+PAYROLL_UNREADABLE = (
+    "The salary cost for this period could not be read, so the profit and "
+    "loss was not worked out. Nothing was changed. Try again."
+)
+
+
+def _posted_payroll_costs(db, from_date, to_date, store_id=None) -> list:
     """(store_id, cost-to-company) of every POSTED payroll row in the months
     overlapping the range. The ONE payroll read behind the P&L.
 
     Only APPROVED and PAID rows are a cost. A DRAFT is a working calculation
     that can be rerun at will: counting it let an unapproved figure move the
     P&L, including the P&L of a month that had since been locked.
+
+    A failed read is not "no payroll" (Codex round 4, R4-A): both P&L readers
+    used to swallow it, so posted wages left the P&L and the report answered
+    200 with payroll 0 (or dropped a payroll-only shop from the by-store
+    table). The read is taken whole here and a failure answers 503; neither
+    reader below catches anything.
     """
     months = _months_in_range(from_date, to_date)
     if not months:
-        return
+        return []
     q: dict = {
         "$or": [{"year": y, "month": m} for (y, m) in months],
         "status": {"$in": list(POSTED_PAYROLL_STATUSES)},
     }
     if store_id:
         q["store_id"] = store_id
-    for r in db.get_collection("payroll").find(q):
-        bd = r.get("breakdown") or {}
-        yield r.get("store_id"), bd.get("ctc_cost", r.get("net_salary", 0)) or 0
+    try:
+        rows = list(db.get_collection("payroll").find(q))
+    except Exception as exc:
+        logger.error("Posted payroll read failed: %s", exc)
+        raise HTTPException(status_code=503, detail=PAYROLL_UNREADABLE) from exc
+    return [
+        (
+            r.get("store_id"),
+            (r.get("breakdown") or {}).get("ctc_cost", r.get("net_salary", 0)) or 0,
+        )
+        for r in rows
+    ]
 
 
 def _payroll_cost(db, store_id, from_date, to_date) -> float:
-    """Cost-to-company payroll for the months overlapping the P&L range."""
-    try:
-        return round(
-            sum(c for _sid, c in _posted_payroll_costs(db, from_date, to_date, store_id)),
-            2,
-        )
-    except Exception:
-        return 0.0
+    """Cost-to-company payroll for the months overlapping the P&L range.
+    Raises 503 when the payroll cannot be read (_posted_payroll_costs)."""
+    return round(
+        sum(c for _sid, c in _posted_payroll_costs(db, from_date, to_date, store_id)),
+        2,
+    )
 
 
 def gst_reconciliation(
@@ -450,8 +471,10 @@ def _split_output_tax(orders, store_state_by_id: dict, customer_state_by_id: dic
     return cgst, sgst, igst
 
 
-def _store_maps(db):
-    """Return (store_id -> entity_id, entity_id -> entity_name)."""
+def _store_maps(db, *, strict: bool = False):
+    """Return (store_id -> entity_id, entity_id -> entity_name). ``strict``:
+    a failed read raises instead of answering empty maps (a company filter
+    built on an empty map matches no shop at all)."""
     s2e, enames = {}, {}
     try:
         for s in db.get_collection("stores").find(
@@ -464,7 +487,8 @@ def _store_maps(db):
         ):
             enames[e.get("entity_id")] = e.get("name")
     except Exception:
-        pass
+        if strict:
+            raise
     return s2e, enames
 
 
@@ -547,8 +571,9 @@ def pnl_by_category(orders, cost_by_product: dict, variance_by_category: Optiona
     return sorted(rows, key=lambda x: -x["revenue"])
 
 
-def is_period_locked(db, month, year) -> bool:
-    """True if the accounting period has been locked (closed)."""
+def is_period_locked(db, month, year, *, strict: bool = False) -> bool:
+    """True if the accounting period has been locked (closed). ``strict``: a
+    failed read raises instead of reading as "not locked"."""
     try:
         return (
             db.get_collection("period_locks").find_one(
@@ -557,14 +582,20 @@ def is_period_locked(db, month, year) -> bool:
             is not None
         )
     except Exception:
+        if strict:
+            raise
         return False
 
 
-def check_period_locked(db, posting_date) -> None:
+def check_period_locked(db, posting_date, *, strict: bool = False) -> None:
     """Raise HTTPException(423) if the posting_date's month/year is locked.
 
     Fail-soft: if db is None or period_locks lookup fails, does not raise.
     Used by orders/returns/vendor-bills/payments to guard financial-period closure.
+
+    ``strict`` (payroll run / approve / mark paid): a lock that cannot be read
+    refuses with 503 instead. Those writes can wait for a retry, and letting
+    them through saved and approved payroll inside a locked month.
     """
     if db is None:
         return
@@ -574,25 +605,33 @@ def check_period_locked(db, posting_date) -> None:
         if isinstance(posting_date, str):
             posting_date = date.fromisoformat(posting_date)
         month, year = posting_date.month, posting_date.year
-        if is_period_locked(db, month, year):
+        if is_period_locked(db, month, year, strict=strict):
             raise HTTPException(
                 status_code=423,
                 detail=f"Accounting period {month:02d}/{year} is locked; cannot post to a closed month.",
             )
     except HTTPException:
         raise
-    except Exception:
-        pass  # fail-soft: period check errors do not block posting
+    except Exception as exc:
+        if strict:
+            logger.error("Period lock read failed: %s", exc)
+            raise HTTPException(
+                status_code=503,
+                detail="Whether this accounting period is locked could not be "
+                "read, so nothing was saved. Try again.",
+            ) from exc
+        # fail-soft: period check errors do not block posting
 
 
-def _payroll_by_store(db, from_date, to_date) -> dict:
-    """store_id -> payroll cost-to-company over the months in the range."""
+def _payroll_by_store(db, from_date, to_date, store_ids=None) -> dict:
+    """store_id -> payroll cost-to-company over the months in the range.
+    ``store_ids`` (the by-store report's company filter): only those shops,
+    as its sales, cost of goods and expenses are. Raises 503 when the payroll
+    cannot be read (_posted_payroll_costs)."""
     out: dict = {}
-    try:
-        for sid, cost in _posted_payroll_costs(db, from_date, to_date):
+    for sid, cost in _posted_payroll_costs(db, from_date, to_date):
+        if store_ids is None or sid in store_ids:
             out[sid] = out.get(sid, 0) + cost
-    except Exception:
-        pass
     return out
 
 

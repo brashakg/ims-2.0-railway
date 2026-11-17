@@ -296,8 +296,17 @@ async def get_pnl(
     revenue = round(sum(order_revenue_ex_gst(o) for o in period_orders), 2)
     gross_profit = revenue - cogs
 
-    # Payroll cost-to-company for the period's months.
-    payroll_cost = _payroll_cost(db, store_id, from_date, to_date)
+    # Payroll cost-to-company for the period's months. Read only for a reader
+    # who is shown it: everyone else's answer carries no payroll-derived
+    # figure (PAYROLL_DERIVED_PNL_FIELDS are stripped below by this same
+    # test), so their sales and expenses never wait on the payroll read. For
+    # an administrator an unreadable payroll answers 503 (_payroll_cost):
+    # never a P&L that leaves posted wages out.
+    payroll_cost = (
+        _payroll_cost(db, store_id, from_date, to_date)
+        if is_salary_admin(current_user)
+        else 0.0
+    )
 
     # F17/#25: POSTED manual journal entries adjust the P&L (depreciation, bank
     # charges, prior-period corrections). EXPENSE-type debits raise cost;

@@ -1791,7 +1791,9 @@ def _refuse_if_month_locked(db, year: int, month: int) -> None:
     from .finance import check_period_locked
 
     try:
-        check_period_locked(db, date(year, month, 1))
+        # strict: a lock that cannot be read refuses (503). Read as "not
+        # locked", a run saved and an approval posted inside a locked month.
+        check_period_locked(db, date(year, month, 1), strict=True)
     except HTTPException:
         payroll_period_guard.sweep_stranded(db, year, month)
         raise

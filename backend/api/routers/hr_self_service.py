@@ -341,7 +341,8 @@ async def my_latest_payslip(current_user: dict = Depends(get_current_user)):
 
     The SAME read as GET /payroll/payslip/{id} (payroll._latest_payslip), so
     the shape and the figures always match the payroll run. Self-only.
-    Fail-soft.
+    A payslip that cannot be read answers 503: answering "no payslip" told
+    staff "No payslip generated yet" while an approved one was on file.
 
     This is the STAFF door, for every role: a payslip is shown once payroll is
     APPROVED or PAID. While the newest run is a draft the answer carries
@@ -358,7 +359,10 @@ async def my_latest_payslip(current_user: dict = Depends(get_current_user)):
         return _latest_payslip(db, caller, include_draft=False)
     except Exception as e:
         logger.error("Self payslip read failed: %s", e)
-        return {"payslip": None}
+        raise HTTPException(
+            status_code=503,
+            detail="Your payslip could not be loaded just now. Try again.",
+        )
 
 
 # ============================================================================

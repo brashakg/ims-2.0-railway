@@ -62,7 +62,9 @@ async def get_pnl_by_store(
     if not is_salary_admin(current_user):
         raise HTTPException(status_code=403, detail=SALARY_RESTRICTED_MESSAGE)
     db = _get_db()
-    s2e, _ = _store_maps(db)
+    # strict: an unreadable shop list must not read as "this company has no
+    # shop" (an empty table) -- the request fails instead.
+    s2e, _ = _store_maps(db, strict=True)
     store_ids = (
         [sid for sid, eid in s2e.items() if eid == entity_id] if entity_id else None
     )
@@ -115,7 +117,9 @@ async def get_pnl_by_store(
     )
     exp_by_store = {e["_id"]: e["amt"] for e in exp}
 
-    pay_by_store = _payroll_by_store(db, from_date, to_date)
+    # The company filter applies to payroll as to every other column; an
+    # unreadable payroll answers 503 (never a table without it).
+    pay_by_store = _payroll_by_store(db, from_date, to_date, store_ids)
 
     # backlog #4: show the store NAME, not the raw store id, on the P&L table.
     store_names = _store_name_map(db)
