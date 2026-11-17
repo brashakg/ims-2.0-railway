@@ -31,6 +31,7 @@ import {
   type InboxItem,
 } from '../../services/api/handoffs';
 import RecipientPicker from './RecipientPicker';
+import { IST_TZ, formatDateTimeIST, toDate } from '../../utils/datetime';
 
 interface HandoffResponseModalProps {
   isOpen: boolean;
@@ -156,8 +157,11 @@ export function HandoffResponseModal({
   const expiresHuman = useMemo(() => {
     if (!card?.expires_at) return '';
     try {
-      const d = new Date(card.expires_at);
+      // Audit R06: a zone-less server instant is UTC; shown in shop time.
+      const d = toDate(card.expires_at);
+      if (!d) return card.expires_at;
       return d.toLocaleString('en-GB', {
+        timeZone: IST_TZ,
         weekday: 'short',
         day: '2-digit',
         month: 'short',
@@ -294,13 +298,7 @@ export function HandoffResponseModal({
                   <>
                     {' '}
                     on{' '}
-                    {(() => {
-                      try {
-                        return new Date(card.my_responded_at).toLocaleString('en-GB');
-                      } catch {
-                        return card.my_responded_at;
-                      }
-                    })()}
+                    {formatDateTimeIST(card.my_responded_at)}
                   </>
                 )}
                 .

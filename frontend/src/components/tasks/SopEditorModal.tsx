@@ -20,6 +20,8 @@ import { useStoreStaff } from '../../pages/tasks/tasksQueries';
 import { getErrorMessage } from '../../utils/errorHandler';
 
 export interface SopStep {
+  /** Stable identity (audit R28): a stored tick follows the step, not its number. */
+  step_id?: string;
   step_number: number;
   instruction: string;
   warning?: string;
@@ -83,6 +85,9 @@ export function SopEditorModal({ isOpen, onClose, initial, onSaved }: SopEditorM
   if (!isOpen) return null;
 
   const isEdit = !!form.template_id;
+  // Audit R42: archiving is ADMIN / SUPERADMIN only on the server; offer it
+  // only to them, and tell anyone else who can do it.
+  const canArchive = (user?.roles ?? []).some((r) => r === 'ADMIN' || r === 'SUPERADMIN');
 
   const update = <K extends keyof SopTemplateForm>(key: K, value: SopTemplateForm[K]) =>
     setForm(prev => ({ ...prev, [key]: value }));
@@ -152,11 +157,14 @@ export function SopEditorModal({ isOpen, onClose, initial, onSaved }: SopEditorM
     try {
       const payload = {
         title: form.title.trim(),
-        description: form.description?.trim() || undefined,
+        // Audit R12: send a cleared description as '' so the save clears it;
+        // leaving it out told the server "unchanged" and the old text came back.
+        description: (form.description ?? '').trim(),
         category: form.category,
         frequency: form.frequency,
         estimated_time: form.estimated_time,
         steps: form.steps.map((s, i) => ({
+          ...(s.step_id ? { step_id: s.step_id } : {}),
           step_number: i + 1,
           instruction: s.instruction.trim(),
           warning: s.warning?.trim() || undefined,
@@ -195,7 +203,8 @@ export function SopEditorModal({ isOpen, onClose, initial, onSaved }: SopEditorM
     } catch (e) {
       // eslint-disable-next-line no-console
       console.error('[SOP] delete failed:', e);
-      toast.error('Could not archive SOP');
+      const msg = getErrorMessage(e, 'Could not archive SOP');
+      toast.error(typeof msg === 'string' ? msg : 'Could not archive SOP');
     } finally {
       setIsDeleting(false);
     }
@@ -417,7 +426,7 @@ export function SopEditorModal({ isOpen, onClose, initial, onSaved }: SopEditorM
 
         {/* Footer */}
         <div className="flex items-center justify-between px-5 py-3 border-t border-gray-200 bg-gray-50">
-          {isEdit ? (
+          {isEdit && canArchive ? (
             <button
               onClick={handleDelete}
               disabled={isDeleting || isSaving}
@@ -426,6 +435,8 @@ export function SopEditorModal({ isOpen, onClose, initial, onSaved }: SopEditorM
               {isDeleting ? <Loader2 className="w-4 h-4 animate-spin" /> : <AlertTriangle className="w-4 h-4" />}
               Archive
             </button>
+          ) : isEdit ? (
+            <span className="text-xs text-gray-500">Only an Admin can archive an SOP.</span>
           ) : <span />}
           <div className="flex items-center gap-2">
             <button

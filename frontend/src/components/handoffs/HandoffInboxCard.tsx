@@ -18,6 +18,7 @@ import {
   CornerDownRight,
 } from 'lucide-react';
 import { useNow } from '../../hooks/useNow';
+import { toDate } from '../../utils/datetime';
 import {
   handoffsApi,
   type HandoffResponseValue,
@@ -25,6 +26,7 @@ import {
 } from '../../services/api/handoffs';
 import HandoffResponseModal from './HandoffResponseModal';
 import HandoffDismissModal from './HandoffDismissModal';
+import HandoffsUnavailable from './HandoffsUnavailable';
 
 // 30 s tick — fine enough for "2 m ago" / "in 1 d" without being chatty.
 const TICK_MS = 30 * 1000;
@@ -33,13 +35,11 @@ const TICK_MS = 30 * 1000;
 // Helpers — pure presentation
 // ============================================================================
 
+// Audit R06: one reading rule -- a zone-less server instant is UTC (toDate),
+// never the browser's local clock.
 function timeAgo(then: string, now: Date): string {
-  let date: Date;
-  try {
-    date = new Date(then);
-  } catch {
-    return '';
-  }
+  const date = toDate(then);
+  if (!date) return '';
   const seconds = Math.max(0, Math.floor((now.getTime() - date.getTime()) / 1000));
   if (seconds < 30) return 'just now';
   if (seconds < 60) return `${seconds}s ago`;
@@ -54,13 +54,9 @@ function timeAgo(then: string, now: Date): string {
 }
 
 function daysUntilExpiry(expiresAt: string, now: Date): number {
-  try {
-    const exp = new Date(expiresAt).getTime();
-    const diff = exp - now.getTime();
-    return diff / (1000 * 60 * 60 * 24);
-  } catch {
-    return 999;
-  }
+  const exp = toDate(expiresAt);
+  if (!exp) return 999;
+  return (exp.getTime() - now.getTime()) / (1000 * 60 * 60 * 24);
 }
 
 interface ExpiryPillProps {
@@ -169,7 +165,8 @@ export function HandoffInboxCard({ refreshKey }: HandoffInboxCardProps) {
   // Hide the entire section when there's nothing to show (loading state
   // is silent — the user shouldn't see a "loading" hub block).
   if (loading) return null;
-  if (error) return null;
+  // Review R23 follow-up: a failed read is never shown as an empty inbox.
+  if (error) return <HandoffsUnavailable what="Handoffs" onRetry={refetch} />;
   if (total === 0 || items.length === 0) return null;
 
   const handleResponded = (
