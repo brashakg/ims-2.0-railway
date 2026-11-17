@@ -10,7 +10,7 @@ import { LabelPreviewModal } from '../../components/labels/LabelPreviewModal';
 import { LensFittingFormModal } from '../../components/pos/LensFittingFormModal';
 import type { LensFittingFormValue } from '../../components/pos/LensFittingFormModal';
 import { useWorkshopPage } from './useWorkshopPage';
-import { STATUS_CONFIG } from './shared';
+import { jobCardPrintData } from './shared';
 import { WorkshopHeader } from './WorkshopHeader';
 import { WorkshopKpiStrip } from './WorkshopKpiStrip';
 import { WorkshopBoards } from './WorkshopBoards';
@@ -41,21 +41,7 @@ export function WorkshopPage() {
       {/* Print Job Card Modal */}
       {printJob && storeInfo && (
         <WorkshopJobCardPrint
-          job={{
-            jobNumber: printJob.jobNumber,
-            orderNumber: printJob.orderNumber,
-            customerName: printJob.customerName,
-            customerPhone: printJob.customerPhone,
-            frameBrand: (printJob.frameName || '').split(' ')[0],
-            frameModel: (printJob.frameName || '').replace(/^[^ ]+ /, ''),
-            frameColor: '',
-            lensType: printJob.lensType,
-            priority: printJob.priority,
-            dueDate: printJob.promisedDate,
-            assignedTechnician: printJob.assignedToName || printJob.assignedTo,
-            status: STATUS_CONFIG[printJob.status].label,
-            createdDate: printJob.createdAt,
-          }}
+          job={jobCardPrintData(printJob)}
           store={storeInfo}
           entity={storeEntity}
           onClose={() => setPrintJob(null)}
