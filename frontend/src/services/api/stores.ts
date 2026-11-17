@@ -390,11 +390,9 @@ export const adminSystemApi = {
     return response.data;
   },
 
-  createBackup: async () => {
-    const response = await api.post('/admin/system/backups');
-    return response.data;
-  },
-
+  // createBackup removed (audit L1-F14): POST /admin/system/backups never
+  // made a backup - it stored a timestamp - and now answers 501. The app
+  // cannot back up the database; do not re-add a button for it.
   // restoreBackup / downloadBackup / exportData / importData removed —
   // the backend routes are either missing (404) or hardcoded 501 stubs, and
   // nothing renders these. The Settings Import/Export buttons were removed

@@ -32,6 +32,8 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
+from .shopify_lookup import find_by_shopify_id
+
 logger = logging.getLogger(__name__)
 
 # Shopify fulfillment.status -> canonical IMS fulfillment_status.
@@ -182,16 +184,11 @@ def _tracking_fields(payload: Dict[str, Any]) -> Dict[str, str]:
 
 
 def _find_ims_order(db, shopify_order_id: str) -> Optional[Dict[str, Any]]:
-    if db is None or not shopify_order_id:
-        return None
-    try:
-        coll = db.get_collection("orders")
-        if coll is None:
-            return None
-        return coll.find_one({"shopify_order_id": shopify_order_id})
-    except Exception:  # noqa: BLE001
-        logger.debug("[SHOPIFY_FULFILL] order lookup failed", exc_info=True)
-        return None
+    """The canonical IMS order minted for this Shopify order (shopify_ingest),
+    or None when there is none. A lookup that FAILS raises (L1-F29: an
+    outage is not "order not found") - the handler's own except turns it
+    into a failed, retried inbox row."""
+    return find_by_shopify_id(db, "orders", "shopify_order_id", shopify_order_id)
 
 
 def reconcile_fulfillment(

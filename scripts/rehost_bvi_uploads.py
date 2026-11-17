@@ -412,27 +412,6 @@ def _fetch_bytes(fetch_url: str, *, timeout: float = 30.0) -> bytes:
     return data
 
 
-def _guess_content_type(url: str) -> str:
-    u = (url or "").split("?", 1)[0].lower()
-    if u.endswith(".png"):
-        return "image/png"
-    if u.endswith(".webp"):
-        return "image/webp"
-    if u.endswith(".gif"):
-        return "image/gif"
-    if u.endswith(".svg"):
-        return "image/svg+xml"
-    return "image/jpeg"
-
-
-def _ext_from_url(url: str) -> str:
-    u = (url or "").split("?", 1)[0].lower()
-    for ext in (".png", ".webp", ".gif", ".svg", ".jpeg", ".jpg"):
-        if u.endswith(ext):
-            return ext
-    return ".jpg"
-
-
 def _get_object_storage():
     """Resolve the configured durable object-storage backend (reuses the backend
     seam). Adds backend/ to sys.path so the script runs from a stripped checkout
@@ -605,12 +584,19 @@ def run_rehost(
 
         try:
             data = _fetch_bytes(fetch_url)
+            # The url's file name is only a label (audit L1-F41): the BYTES
+            # must be an image, and the copy is stored as the type they are.
+            # Same gate as the app's image doors (backend/ is on sys.path once
+            # _get_object_storage has run).
+            from api.services.image_content import image_mime_of  # noqa: PLC0415
+
+            mime = image_mime_of(data)
+            if mime is None:
+                raise RuntimeError("the fetched bytes are not an image")
             image_id = str(row.get("image_id") or uuid.uuid4().hex)
             product_id = str(row.get("product_id") or "misc")
-            key = f"bvi-rehost/{product_id}/{image_id}{_ext_from_url(str(url))}"
-            new_url = storage.put(
-                key, data, _guess_content_type(str(url))
-            )
+            key = f"bvi-rehost/{product_id}/{image_id}.{mime.split('/')[1]}"
+            new_url = storage.put(key, data, mime)
             patch = plan_rewrite(row, new_url)
             coll.update_one({"image_id": image_id}, {"$set": patch})
             _audit_rehost(

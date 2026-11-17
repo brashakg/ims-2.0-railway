@@ -1738,8 +1738,17 @@ def _book_historical_refund_credit_notes(
 
         # Idempotency: the ONE "is this refund booked" rule (a re-run of the
         # import, a webhook, the status sweep or a queued review row booked it).
-        if shopify_refund._refund_already_processed(db, refund_id):
-            return "duplicate"
+        # The rule raises when it could not READ (decision D13): that is a
+        # failed booking the next run heals, never "not booked yet".
+        try:
+            if shopify_refund._refund_already_processed(db, refund_id):
+                return "duplicate"
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[SHOPIFY_INGEST] could not check whether refund %s is already "
+                "booked -- not booked this run: %s", refund_id, exc,
+            )
+            return "skipped"
 
         # Build return lines: ALL order lines for a whole-order full-refund reversal,
         # else the refund's own refund_line_items (reusing the live refund mapper).

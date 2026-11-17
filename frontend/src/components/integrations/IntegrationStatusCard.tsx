@@ -27,6 +27,19 @@ const STATE_META: Record<string, { label: string; cls: string }> = {
   not_wired: { label: 'Not wired', cls: 'bg-gray-100 text-gray-500' },
 };
 
+// A live Shopify gate with IMS_SHOPIFY_WRITES off is live for ORDER INTAKE
+// only (state 'intake_live'): the badge itself says both halves, never a
+// plain "Live". Every other state is one badge.
+const INTAKE_LIVE_BADGES = [
+  { label: 'Order intake: live', cls: STATE_META.live.cls },
+  { label: 'Catalogue/stock pushes: simulated', cls: STATE_META.simulated.cls },
+];
+
+function stateBadges(state: string): { label: string; cls: string }[] {
+  if (state === 'intake_live') return INTAKE_LIVE_BADGES;
+  return [STATE_META[state] ?? { label: state, cls: 'bg-gray-100 text-gray-600' }];
+}
+
 function dispatchBadgeCls(mode: string): string {
   if (mode === 'live') return 'bg-green-100 text-green-800';
   if (mode === 'test') return 'bg-blue-100 text-blue-800';
@@ -34,17 +47,34 @@ function dispatchBadgeCls(mode: string): string {
 }
 
 function IntegrationRow({ item }: { item: IntegrationStatusItem }) {
-  const meta = STATE_META[item.state] ?? { label: item.state, cls: 'bg-gray-100 text-gray-600' };
   return (
-    <div className="py-3 border-t border-gray-100 first:border-t-0">
+    <div className="py-3 border-t border-gray-100 first:border-t-0" data-testid={`integration-row-${item.id}`}>
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="font-medium text-gray-900">{item.label}</div>
           <div className="text-xs text-gray-500">{item.powers}</div>
         </div>
-        <span className={clsx('px-2.5 py-0.5 rounded-full text-xs font-medium whitespace-nowrap', meta.cls)}>
-          {meta.label}
-        </span>
+        <div className="flex flex-wrap items-center justify-end gap-1.5">
+          {/* A row with its own send gate (Shopify) shows the value it is
+              using: the header badge is the global gate and can differ. */}
+          {item.gate && (
+            <span
+              className={clsx('px-2.5 py-0.5 rounded-full text-xs font-medium whitespace-nowrap', dispatchBadgeCls(item.gate.mode))}
+              title={item.gate.rule}
+            >
+              {item.gate.label}: {item.gate.mode}
+            </span>
+          )}
+          {stateBadges(item.state).map((badge) => (
+            <span
+              key={badge.label}
+              data-testid={`integration-state-${item.id}`}
+              className={clsx('px-2.5 py-0.5 rounded-full text-xs font-medium whitespace-nowrap', badge.cls)}
+            >
+              {badge.label}
+            </span>
+          ))}
+        </div>
       </div>
 
       {/* Env-var KEY presence (names + booleans only, never values) */}
@@ -208,7 +238,7 @@ export function IntegrationStatusCard() {
           {report && (
             <span
               className={clsx('px-2.5 py-0.5 rounded-full text-xs font-medium', dispatchBadgeCls(report.dispatch_mode))}
-              title="DISPATCH_MODE gates outbound sends, bookings and pushes"
+              title="DISPATCH_MODE gates outbound sends and bookings. Shopify has its own gate, shown on its row."
             >
               DISPATCH_MODE: {report.dispatch_mode}
             </span>
@@ -227,7 +257,9 @@ export function IntegrationStatusCard() {
 
       <p className="text-xs text-gray-500 mb-3">
         Read-only. Shows which integrations have credentials set (KEY presence only - never values).
-        Outbound sends, bookings and pushes only go live when DISPATCH_MODE=live.
+        Outbound sends and bookings only go live when DISPATCH_MODE=live. Shopify follows its
+        own switch (SHOPIFY_DISPATCH_MODE when it is set, otherwise DISPATCH_MODE): its row
+        shows the gate it is using.
         {report && (
           <>
             {' '}

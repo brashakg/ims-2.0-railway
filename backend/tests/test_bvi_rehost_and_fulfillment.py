@@ -10,6 +10,7 @@ style of test_bvi_drift_and_parity.py.
 
 from __future__ import annotations
 
+import base64
 import os
 import sys
 from typing import Any, Dict, List, Optional
@@ -22,6 +23,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from api.services import online_sync_health as sh  # noqa: E402
+
+# A real 1x1 PNG: the doors under test store bytes only when they ARE an image
+# (audit L1-F41), so a made-up byte string is refused.
+_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jF90A"
+    "AAAASUVORK5CYII="
+)
 
 # The filter evaluator that RAISES on an operator it does not implement, rather
 # than silently matching nothing. The hand-rolled one this file used to carry
@@ -271,7 +279,7 @@ def test_rehost_live_rewrites_url(monkeypatch):
     monkeypatch.setattr(
         "api.services.object_storage.get_object_storage", lambda: _FakeStorage()
     )
-    monkeypatch.setattr(sh, "_fetch_bytes", lambda url: b"imgbytes")
+    monkeypatch.setattr(sh, "_fetch_bytes", lambda url: _PNG)
     monkeypatch.setenv("BVI_UPLOADS_BASE_URL", "https://uniparallel.com")
 
     coll = _FakeColl([{"image_id": "img1", "sku": "SKU001", "url": "/uploads/a.jpg"}])

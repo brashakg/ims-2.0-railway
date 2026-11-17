@@ -21,6 +21,7 @@ Run: JWT_SECRET_KEY=test python -m pytest \
        backend/tests/test_product_image_edit.py -q
 """
 
+import base64
 import os
 import sys
 
@@ -38,7 +39,11 @@ _EDIT_PATH_TMPL = "/api/v1/products/image/{file_id}/edit"
 _CATALOG_SET = {"ADMIN", "CATALOG_MANAGER"}
 
 _PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
-_EDITED_BYTES = b"PNGBYTES"
+# A REAL (1x1) PNG: the edit door stores only what is a real image (L1-F41).
+_EDITED_BYTES = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jF90A"
+    "AAAASUVORK5CYII="
+)
 
 
 # ---------------------------------------------------------------------------
