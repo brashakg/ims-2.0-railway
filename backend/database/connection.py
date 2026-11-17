@@ -352,6 +352,16 @@ class DatabaseConnection:
         # (product_id, store_id, status) covers both filtering + grouping in the
         # aggregation for per-product rolled-up stock lookups across the catalog.
         _idx("stock_units", [("store_id", 1), ("status", 1)], background=True)
+        # The pieces a bill holds: every release, count and edit-op sweep asks
+        # {order_id, status: "SOLD", ...}. PARTIAL on SOLD, so only sold pieces
+        # are indexed (#1393: the edit sweep looks every tick, with no window).
+        _idx("stock_units", [("order_id", 1)], partialFilterExpression={"status": "SOLD"},
+             name="stock_units_sold_by_order", background=True)
+        # A bill edit's stock work (orders/edit_ops): each runner finds its row
+        # by op_id, the sweep by state and age.
+        _idx("order_edit_ops", "op_id", unique=True, background=True)
+        _idx("order_edit_ops", [("state", 1), ("created_at", 1)], background=True)
+        _idx("order_edit_ops", [("state", 1), ("tried_at", 1)], background=True)
         _idx(
             "stock_units",
             [("product_id", 1), ("store_id", 1), ("status", 1)],
@@ -1184,6 +1194,15 @@ def _mock_type_comparable(a, b) -> bool:
     return False
 
 
+def _mock_add_to_set(doc: Dict, update: Dict) -> None:
+    """$addToSet for the mock (single values): the exactly-once loyalty move
+    records its id this way, and a mock that dropped it moved the money again."""
+    for field, value in (update.get("$addToSet") or {}).items():
+        arr = doc.setdefault(field, [])
+        if value not in arr:
+            arr.append(value)
+
+
 class MockCollection:
     """Mock collection for testing without MongoDB"""
 
@@ -1296,7 +1315,10 @@ class MockCollection:
                         if doc_value in op_value:
                             return False
                     elif op == "$ne":
-                        if doc_value == op_value:
+                        # Mongo: an array field "equals" any of its elements.
+                        if doc_value == op_value or (
+                            isinstance(doc_value, list) and op_value in doc_value
+                        ):
                             return False
                     elif op == "$exists":
                         if bool(op_value) != (key in doc):
@@ -1347,6 +1369,7 @@ class MockCollection:
                     if field not in doc:
                         doc[field] = []
                     doc[field].append(value)
+            _mock_add_to_set(doc, update)
             return type("obj", (object,), {"modified_count": 1})()
         return type("obj", (object,), {"modified_count": 0})()
 
@@ -1406,6 +1429,7 @@ class MockCollection:
         if "$push" in update:
             for field, value in update["$push"].items():
                 doc.setdefault(field, []).append(value)
+        _mock_add_to_set(doc, update)
         return dict(doc) if return_document else before
 
     def update_many(self, filter: Dict, update: Dict) -> Any:

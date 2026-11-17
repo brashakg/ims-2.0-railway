@@ -176,6 +176,10 @@ class SuperadminEditLine(BaseModel):
     unit_price: float = Field(..., ge=0, le=10_000_000)
     discount_percent: float = Field(default=0, ge=0, le=100)
     cost_at_sale: Optional[float] = None
+    # The unit a NEW line takes, checked and claimed like a till scan (a new line
+    # that takes no unit may not name one); omitted on an existing line, which
+    # keeps the unit it already holds.
+    stock_id: Optional[str] = None
     prescription_id: Optional[str] = None
     lens_options: Optional[dict] = None
     lens_details: Optional[dict] = None
