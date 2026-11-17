@@ -224,14 +224,16 @@ def _iter_voice_acks(payload: Any) -> list:
     return out
 
 
-def apply_voice_acks(payload: Any, db=None) -> int:
+def apply_voice_acks(payload: Any, db=None, *, strict: bool = False) -> int:
     """Acknowledge tasks whose voice-escalation call reported a pressed "1".
 
     Mirrors POST /tasks/{id}/acknowledge exactly (status -> IN_PROGRESS +
     acknowledged_at/by) and adds the audit trail naming the channel: a task
     `history` entry with channel="voice_ivr" plus acknowledged_via on the
     doc. Idempotent - an already-acknowledged / terminal task is left alone.
-    Returns how many tasks were acknowledged. Never raises.
+    Returns how many tasks were acknowledged. Never raises -- unless
+    ``strict=True``, where a STORAGE failure raises so the msg91 inbox drain
+    leaves its row retryable (audit L1-F26); the ack itself is idempotent.
     """
     acked = 0
     pids = _iter_voice_acks(payload)
@@ -240,10 +242,14 @@ def apply_voice_acks(payload: Any, db=None) -> int:
     if db is None:
         db = _get_db()
     if db is None:
+        if strict:
+            raise RuntimeError("voice ack: storage unavailable")
         return 0
     try:
         tasks = db.get_collection("tasks")
     except Exception:  # noqa: BLE001
+        if strict:
+            raise
         return 0
     for pid in pids:
         try:
@@ -290,4 +296,6 @@ def apply_voice_acks(payload: Any, db=None) -> int:
                 )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[VOICE_ESC] voice ack failed for %s: %s", pid, exc)
+            if strict:
+                raise
     return acked
