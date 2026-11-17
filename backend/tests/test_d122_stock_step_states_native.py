@@ -288,7 +288,7 @@ def test_s3_the_sweep_finishes_a_stopped_step_nobody_presses(native, monkeypatch
     rid = _press(_mixed(db)).json()["return_id"]  # P1 back, the damaged P2 unit still SOLD
     _worker_died_holding_the_claim(db, rid)
     assert _rows(db) == {"p1": ["AVAILABLE", "SOLD"], "p2": "SOLD", "rows": 3}
-    assert returns_router.finish_stopped_stock_steps() == 1
+    assert returns_router.sweep_stuck_return_holds() == 1  # the scheduler's own entry point
     assert _rows(db) == DONE and _marks(db, rid) == (True, False, False)
     rec = _rec(db, rid)
     assert rec["quarantined_stock_ids"] == ["U3"] and len(rec["restock_stock_ids"]) == 1
@@ -399,7 +399,7 @@ def test_d123_a_stored_payout_settles_the_return_whoever_reads_it(native, monkey
     if reader == "owed list":
         assert _owed_list() == []
     elif reader == "sweep":
-        assert returns_router.settle_paid_owed_returns() == 1
+        assert returns_router.sweep_stuck_return_holds() >= 1  # the scheduler's own entry point
     else:
         from api.routers import tasks as tasks_router
         from database.repositories.task_repository import TaskRepository

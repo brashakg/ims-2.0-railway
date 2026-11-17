@@ -2094,6 +2094,8 @@ def sweep_stuck_return_holds() -> int:
                 continue  # final: its own task
             found += 1
             _task_return_hold_stuck(order, rid, hold, line)
+    # D122(3): first, the stock steps that stopped part way are finished here.
+    found += finish_stopped_stock_steps()
     # D95(2)/(4): a record whose stock step is still open long after it was
     # written (its press stopped after the record landed): ONE task, naming
     # the button that places the units.
@@ -2106,7 +2108,8 @@ def sweep_stuck_return_holds() -> int:
     for doc in unplaced:
         if _step_stale(doc.get("restock_started_at") or doc.get("created_at")) and _task_units_not_placed(doc):
             found += 1
-    return found + finish_stopped_stock_steps() + settle_paid_owed_returns()
+    # D123: an owed return whose payout row is stored is settled as paid.
+    return found + settle_paid_owed_returns()
 
 
 def settle_paid_owed_returns() -> int:
