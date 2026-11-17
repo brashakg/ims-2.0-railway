@@ -209,16 +209,23 @@ def _is_dup_key(exc: Exception) -> bool:
     return "e11000" in msg or "duplicate key" in msg
 
 
-def _ensure_unique_refund_index(db, collection: str) -> None:
+def _ensure_unique_refund_index(db, collection: str, strict: bool = False) -> None:
     """Lazily create a UNIQUE PARTIAL index on `<collection>.shopify_refund_id`
     (only over docs that carry a string refund id -- legacy / in-store rows with
     no refund id are unaffected). Built the same idempotent way webhooks.py builds
-    uniq_webhook_event_id. Fail-soft: never raises."""
+    uniq_webhook_event_id. Fail-soft: never raises -- unless ``strict`` (the
+    order-history import, PR #1423 review F-1423-G): its claim of a refund is
+    only a claim while this index holds, so an index that cannot be confirmed
+    RAISES and the import books nothing."""
     if db is None:
+        if strict:
+            raise RuntimeError("no database")
         return
     try:
         coll = db.get_collection(collection)
         if coll is None:
+            if strict:
+                raise RuntimeError(f"no {collection} collection")
             return
         coll.create_index(
             "shopify_refund_id",
@@ -227,6 +234,8 @@ def _ensure_unique_refund_index(db, collection: str) -> None:
             name="uniq_shopify_refund_id",
         )
     except Exception:  # noqa: BLE001 -- index build must never break the drain
+        if strict:
+            raise
         logger.debug("[SHOPIFY_REFUND] index build skipped for %s", collection, exc_info=True)
 
 
