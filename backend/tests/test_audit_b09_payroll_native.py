@@ -1289,6 +1289,22 @@ def test_staff_payslip_that_cannot_be_read_answers_503_not_no_payslip(rig, monke
     assert rig.client(nobody).get(MINE).json() == {"payslip": None}
 
 
+def test_staff_payslip_with_no_database_handle_answers_503_not_no_payslip(rig, monkeypatch):
+    """The same door when a failed connect leaves no handle at all: it
+    answered 200 {"payslip": null} ("No payslip generated yet.") with an
+    approved payslip on file (C:/ims-wt/evidence-1410-r6)."""
+    assert rig.run().status_code == 200 and rig.approve().status_code == 200
+    c = rig.client(STAFF)
+    shown = c.get(MINE)
+    assert shown.status_code == 200 and shown.json()["payslip"]["status"] == "APPROVED"
+    with monkeypatch.context() as m:
+        m.setattr(hr_self_service, "_get_db", lambda: None)
+        reply = c.get(MINE)
+        assert reply.status_code == 503, reply.text  # was 200 {"payslip": null}
+        assert "could not be loaded" in _detail(reply) and "payslip" not in reply.json()
+    assert c.get(MINE).json() == shown.json()
+
+
 @pytest.mark.parametrize(
     "action, status_before",
     [("run", "DRAFT"), ("approve", "DRAFT"), ("pay", "APPROVED")],

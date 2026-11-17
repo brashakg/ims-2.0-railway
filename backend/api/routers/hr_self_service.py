@@ -349,13 +349,17 @@ async def my_latest_payslip(current_user: dict = Depends(get_current_user)):
     ``not_ready`` (which month) and the newest approved payslip, if any.
     """
     caller = _caller_id(current_user)
-    db = _get_db()
-    if db is None or not caller:
+    if not caller:
         return {"payslip": None}
 
     try:
         from .payroll import _latest_payslip
 
+        db = _get_db()
+        if db is None:
+            # No database handle (a failed connect) is a payslip that cannot
+            # be read, not "no payslip": the same 503 as any failed read.
+            raise RuntimeError("no database handle")
         return _latest_payslip(db, caller, include_draft=False)
     except Exception as e:
         logger.error("Self payslip read failed: %s", e)
