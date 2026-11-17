@@ -1434,6 +1434,24 @@ def test_d106_tally_doors_refuse_when_a_record_the_gst_head_needs_cannot_be_read
     assert _tally_mark(rig) == "IN_TALLY"
 
 
+def test_d106_tally_doors_with_no_database_handle_answer_503(rig, monkeypatch):
+    """A failed Mongo connect leaves no handle. The B2B invoice book then
+    answered 200 with no invoice in it (each lenient reader swallowed the
+    missing handle); the other doors answered a bare 500 or "not found"."""
+    from api.routers.finance import tally
+
+    _inter_state_sale(rig, monkeypatch)
+    doors = _tally_doors(rig.client())
+    with monkeypatch.context() as m:
+        m.setattr(tally, "_get_db", lambda: None)
+        for name, call in doors.items():
+            reply = call()
+            assert reply.status_code == 503, (name, reply.status_code, reply.text)
+            assert "could not be reached" in _detail(reply) and "invoices" not in reply.text
+    assert _tally_mark(rig) is None
+    _every_door_books_igst(doors)
+
+
 def test_d106_tally_marks_refuse_when_the_orders_cannot_be_read(rig, monkeypatch):
     """The three Tally worklist writes first read which of the chosen orders
     the caller may touch. With that read failing they answered "marked 0
