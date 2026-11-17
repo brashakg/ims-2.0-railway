@@ -928,6 +928,39 @@ def is_post_dated(doc: dict, as_of_iso: Optional[str] = None) -> bool:
     return ledger_day(doc) > as_of_day(as_of_iso)
 
 
+def split_row(adv: dict, entry: dict) -> dict:
+    """The payment row of one part-application of an advance, from the advance
+    and the entry its `applications` log holds for it -- the row the apply
+    door stores, and the row every reader counts while it is not stored yet
+    (with_logged_applications). Not the advance's applications log, nor its
+    form's request_id (unique -- the copy would be refused)."""
+    return {
+        **{k: v for k, v in adv.items() if k not in ("_id", "applications", "request_id")},
+        "bill_id": entry["bill_id"], "store_id": entry.get("store_id") or adv.get("store_id"),
+        "applied_at": entry.get("at"), "applied_by": entry.get("by"),
+        "payment_id": entry["payment_id"], "amount": entry["amount"], "applied_from": adv["payment_id"],
+    }
+
+
+def with_logged_applications(payments: List[dict]) -> List[dict]:
+    """`payments` plus the row of every part-application an advance among
+    them LOGS whose own row is not among them. A part-application is two
+    writes -- the advance is reduced and logs it, then the row naming the bill
+    is stored -- and one cut off in between has moved the money already: the
+    advance is smaller. THE rule every reader of supplier money shares
+    (supplier_rows; supplier_credit_reads.payments_on_bills), so the bill is
+    never read as untouched, nor paid a second time, while the row is owed
+    (PR #1423 review). `payments` must hold every stored row the log could
+    name: all of one supplier's, or all naming the bills asked about."""
+    have = {p.get("payment_id") for p in payments}
+    return payments + [
+        split_row(adv, entry)
+        for adv in payments
+        for entry in (adv.get("applications") or [])
+        if isinstance(entry, dict) and entry.get("payment_id") and entry["payment_id"] not in have
+    ]
+
+
 def supplier_rows(
     bills: List[dict],
     payments: List[dict],
@@ -961,6 +994,8 @@ def supplier_rows(
         [d for d in docs or [] if isinstance(d, dict)]
         for docs in (bills, payments, debit_notes)
     )
+    # A part-application whose row is not stored yet counts as its row.
+    payments = with_logged_applications(payments)
     mirror = {b.get("bill_id") for b in bills if b.get("source_transfer_id")}
     mirror.discard(None)  # a mirror bill with no id must not swallow on-account money
     bills = [b for b in bills if not b.get("source_transfer_id")]

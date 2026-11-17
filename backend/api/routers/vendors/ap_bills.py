@@ -244,10 +244,8 @@ def _recompute_bill_status(db, bill_id: Optional[str]) -> None:
         )
         if not bill:
             return
-        payments = list(
-            db.get_collection("vendor_payments").find({"bill_id": bill_id}, {"_id": 0})
-        )
-        from ...services.supplier_credit_reads import payable_credit_rows
+        from ...services.supplier_credit_reads import payable_credit_rows, payments_on_bills
+        payments = payments_on_bills(db, [bill_id])
         debit_notes = payable_credit_rows(db, bill_id=bill_id)
         st = ap_engine.bill_settlement(bill, payments, debit_notes)
         db.get_collection("vendor_bills").update_one(

@@ -413,6 +413,45 @@ def test_a_read_that_finishes_the_application_first_leaves_one_row(ap, monkeypat
     assert _recorded(memory, adv) == (400, 1)
 
 
+def test_a_half_done_application_counts_for_every_reader_of_supplier_money(ap, monkeypatch):
+    """PR #1423 review (1423-R15-advance-apply): the advance was reduced and
+    logged, its row naming the bill not stored, and nobody has opened the
+    supplier's ledger. Aging, the bill's left-to-pay, the dashboard and the
+    Purchases report read the bill as untouched (Rs 400 too much owed), and a
+    Rs 1,000 payment naming the bill was accepted -- Rs 1,400 on a Rs 1,000
+    bill for good once the ledger was read. The logged application now counts
+    in the shared row rule, written or not."""
+    memory, world = ap
+    memory.vendors.insert_one({"vendor_id": "V1"})
+    adv = _pay(world, {"amount": 1000}).json()["payment_id"]
+    _faulty(memory, monkeypatch, "insert_one", lands=False)
+    assert _apply(world, adv, "B1", 400, left=1000).status_code == 503
+    half_done = (600, 0)  # the advance is reduced, no row names the bill
+    assert _recorded(memory, adv) == half_done
+    assert _owed_and_advances(world) == (600, 600)
+    listed = world.ok("/vendors/V1/bills", ACCT_PUNE)["bills"][0]
+    assert (listed["status"], listed["outstanding"]) == ("PARTIAL", 600)
+    dash = world.ok("/finance/owner-dashboard", ACCT_PUNE)["payables"]
+    assert (dash["total"], dash["advances"]) == (600, 600)
+    report = world.ok("/vendors/purchases-this-month", ACCT_PUNE, month="2026-10")
+    # The report nets every payment against the supplier: all Rs 1,000 paid.
+    assert (report["totals"]["paid"], report["totals"]["owed"]) == (1000, 0)
+    # The over-pay guard (A12-2): a payment naming the bill, and a second
+    # advance applied to it, are held to the Rs 600 really left.
+    over = _pay(world, {"amount": 1000, "bill_id": "B1"})
+    assert over.status_code == 422 and over.json()["detail"]["left"] == 600
+    other = _pay(world, {"amount": 700}).json()["payment_id"]
+    assert _apply(world, other, "B1", 700, left=700).json()["detail"]["left"] == 600
+    assert _recorded(memory, adv) == half_done  # no reader above wrote anything
+    assert _pay(world, {"amount": 600, "bill_id": "B1"}).status_code == 201
+    # The ledger read stores the row: the same figures, the bill never over 1,000.
+    world.ok("/vendors/V1/ledger", ACCT_PUNE)
+    assert _recorded(memory, adv) == (1000, 1)
+    assert sum(r["amount"] for r in memory.vendor_payments.find({"bill_id": "B1"})) == 1000
+    assert _owed_and_advances(world) == (0, 1300)
+    assert world.ok("/vendors/V1/bills", ACCT_PUNE)["bills"][0]["status"] == "PAID"
+
+
 def test_a_whole_apply_whose_reply_was_lost_says_so_and_is_applied_once(ap, monkeypatch):
     memory, world = ap
     adv = _pay(world, {"amount": 400}).json()["payment_id"]

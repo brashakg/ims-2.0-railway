@@ -445,20 +445,6 @@ def _landed(db, collection: str, id_field: str, doc: dict) -> Optional[dict]:
     return _clean(row) if row else None
 
 
-def _split_row(adv: dict, entry: dict) -> dict:
-    """The payment row of one part-application of an advance, from the advance
-    and the entry its `applications` log holds for it -- the row the apply
-    door writes and a later read finishes (_finish_half_applied). Not the
-    advance's applications log, nor its form's request_id (unique -- the copy
-    would be refused)."""
-    return {
-        **{k: v for k, v in adv.items() if k not in ("_id", "applications", "request_id")},
-        "bill_id": entry["bill_id"], "store_id": entry.get("store_id") or adv.get("store_id"),
-        "applied_at": entry.get("at"), "applied_by": entry.get("by"),
-        "payment_id": entry["payment_id"], "amount": entry["amount"], "applied_from": adv["payment_id"],
-    }
-
-
 def _store_split_row(db, row: dict) -> None:
     """Insert-once under its own _id (its payment_id): the apply door and a
     read finishing it can both write it and one row is stored. An insert that
@@ -475,15 +461,17 @@ def _finish_half_applied(db, advances: list, stored: Optional[set] = None) -> li
     """A part-application is two writes: the advance is reduced and logs the
     application, then the row naming the bill is inserted. One cut off in
     between (a crash, a lost reply) is finished here, never undone: every
-    logged application whose row is not stored gets its row. Returns the rows
-    it stored. `stored`: the payment ids known to exist (else read)."""
+    logged application whose row is not stored gets its row. Until then every
+    reader counts the logged application as that row all the same
+    (ap_engine.with_logged_applications), so this only stores what the figures
+    already show. Returns the rows it stored. `stored`: the payment ids known to exist (else read)."""
     owed = [(a, e) for a in advances for e in (a.get("applications") or []) if e.get("payment_id")]
     if not owed:
         return []
     if stored is None:
         stored = {r.get("payment_id") for r in db.get_collection("vendor_payments").find(
             {"payment_id": {"$in": [e["payment_id"] for _, e in owed]}}, {"_id": 0, "payment_id": 1})}
-    rows = [_split_row(a, e) for a, e in owed if e["payment_id"] not in stored]
+    rows = [ap_engine.split_row(a, e) for a, e in owed if e["payment_id"] not in stored]
     for row in rows:
         _store_split_row(db, row)
         _recompute_bill_status(db, row["bill_id"])
@@ -638,12 +626,12 @@ async def apply_advance_to_bill(
     unchanged = {"payment_id": payment_id, "amount": adv.get("amount"), "bill_id": adv.get("bill_id")}
     stamp = {"bill_id": body.bill_id, "store_id": bill.get("store_id"), "applied_at": now, "applied_by": actor}
     # A part-application: the advance logs it and keeps the rest; the applied
-    # part becomes a new payment row naming the bill (_split_row). The log
+    # part becomes a new payment row naming the bill (ap_engine.split_row). The log
     # entry is written with the reduction, so a call cut off before its row
     # is stored is finished by _finish_half_applied -- never given back.
     entry = {"payment_id": str(uuid.uuid4()), "bill_id": body.bill_id, "store_id": bill.get("store_id"),
              "amount": applied, "at": now, "by": actor}
-    row = {**adv, **stamp} if applied == gross else _split_row(adv, entry)
+    row = {**adv, **stamp} if applied == gross else ap_engine.split_row(adv, entry)
     try:
         moved = coll.update_one(unchanged, {"$set": stamp} if applied == gross else {
             "$set": {"amount": round(cash - applied, 2)}, "$push": {"applications": entry}})
