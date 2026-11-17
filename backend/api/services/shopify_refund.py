@@ -3078,7 +3078,9 @@ def raise_stock_in_task(order: Dict[str, Any], units: float, items: Any, source:
     if not task:
         return {**out, "applied": False, "reason": "stock_in_task_not_saved"}
     _close_blocked_task(tasks, refund_id, return_id)
-    return {**out, "stock_in_task": task.get("task_id"), "stock_in_store_id": shop}
+    return {**out, "stock_in_task": task.get("task_id"), "stock_in_store_id": shop,
+            # Found already done or cancelled: the answer never reads as a new task.
+            "stock_in_task_closed": str(task.get("status") or "").upper() in ("COMPLETED", "CANCELLED")}
 
 
 def _booked_for(order: Dict[str, Any], refund_id: str) -> bool:

@@ -285,7 +285,8 @@ def test_a_counter_return_on_a_historical_order_raises_its_stock_in_task_once_ev
                                    "status": "AVAILABLE", "quantity": 1})
     native.tasks.update_one({"source_ref": ref}, {"$set": {"status": "COMPLETED"}})
     if finisher == "press":
-        assert R._retry_restock(RID, USER, STORE)["restock_applied"] is True
+        again = R._retry_restock(RID, USER, STORE)
+        assert again["restock_applied"] is True and "already closed - add nothing more" in again["message"]
     else:
         native.returns.update_one({"return_id": RID}, {"$set": {"restock_started_at": OLD}})
         assert R.finish_stopped_stock_steps() == 1

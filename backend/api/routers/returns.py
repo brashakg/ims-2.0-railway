@@ -8873,7 +8873,10 @@ def _retry_claimed(coll: Any, mine: Dict[str, Any], claim: Dict[str, Any], curre
         # in stock -- by this retry (its task) or by the Shopify door that
         # booked it first (its task, its booking on the line).
         "message": (
-            "Booked. This order predates IMS stock: a task asks the shop's store "
+            "Booked. This order predates IMS stock: its stock-in task was raised earlier and is "
+            "already closed - add nothing more"
+            if restock_result.get("stock_in_task_closed")
+            else "Booked. This order predates IMS stock: a task asks the shop's store "
             "manager to add the frame(s) through stock-in"
             if restock_result.get("stock_in_task") or (update["restock_applied"] and booked_earlier)
             else "Restock applied"
