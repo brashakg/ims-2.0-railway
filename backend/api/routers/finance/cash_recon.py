@@ -452,12 +452,22 @@ async def cash_reconciliation_summary(
         if drawer_id in drawers_seen:
             repeat_ids.add(cr_id)
         drawers_seen.add(drawer_id)
+    # A close holding a till drawer's count is a till count of its day too:
+    # a close whose count did NOT reach the till, beside one that did, would
+    # add the same drawer twice before any Z-Read locks (close 1 fails to
+    # link, the drawer is counted on the Blind EOD Tally, close 2 counts it).
+    linked_ids = {cr_id for _closed, cr_id, _drawer in linked_closes}
+    counted_days = zread_days | {
+        (r.get("store_id"), r.get("session_date"))
+        for r in rows
+        if r.get("source") == "CASH_REGISTER" and r.get("session_id") in linked_ids
+    }
     for r in rows:
         r["also_counted_on_till"] = r.get("source") == "CASH_REGISTER" and (
             r.get("session_id") in repeat_ids
             or (
                 r.get("session_id") in unattributed_ids
-                and (r.get("store_id"), r.get("session_date")) in zread_days
+                and (r.get("store_id"), r.get("session_date")) in counted_days
             )
             # A D111 session beside its drawer's own Z-Read row (see 2b).
             or (
@@ -583,9 +593,11 @@ async def cash_reconciliation_signoff(
         raise HTTPException(status_code=404, detail="Reconciliation session not found")
 
     validate_store_access(session.get("store_id") or "", current_user)
+    # D110: signing a row off reads its till drawer too; pay what it owes.
+    till_service.settle_drawers(db, [body.session_id, session.get("till_session_id")])
 
     now = _iso_now()
-    reviewer = current_user.get("name") or current_user.get("full_name")
+    reviewer =current_user.get("name") or current_user.get("full_name")
     record = {
         "session_id": body.session_id,
         "source": body.source,
