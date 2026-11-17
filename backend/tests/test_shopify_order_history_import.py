@@ -936,10 +936,10 @@ def test_cn_failed_gates_fallback_so_heal_never_stacks(wired):
 
 
 def test_stamp_failure_healed_on_rerun_via_duplicate_fallback(wired):
-    # ROUND-4 rider: run 1 books the whole-order CN but the covered-stamp
-    # inserts silently fail (fail-soft). The heal re-run's fallback returns
-    # 'duplicate' (CN already booked) -- the stamp block must STILL run so the
-    # missing dedupe stamps are healed and the phantom residual clears.
+    # ROUND-4 rider, restated for PR #1423 review F-1423-G: the returns docs
+    # are the refunds' CLAIMS, written before the whole-order CN. While they
+    # cannot be written run 1 books NOTHING and reports it failed; the re-run
+    # claims, books the one CN and clears the residual.
     returns_coll = wired["db"].get_collection("returns")
     orig_insert = returns_coll.insert_one
 
@@ -965,25 +965,30 @@ def test_stamp_failure_healed_on_rerun_via_duplicate_fallback(wired):
     finally:
         returns_coll.insert_one = orig_insert
     rcn1 = res1["refund_credit_notes"]
-    # PR #1423 review D: its ledger row landed, its return record did not --
-    # reported FAILED (healed by the re-run), never as a booked credit note.
+    # Its return records could not be written -- reported FAILED (booked by
+    # the re-run), never as a booked credit note, and no ledger row without
+    # its claim.
     assert rcn1["credit_notes"] == 0
     assert rcn1["cn_failed"] == 1
+    assert not wired["db"].get_collection("credit_note_ledger").docs
     assert not any(
         r.get("shopify_refund_id") == "88050" for r in returns_coll.docs
     ), "stamp silently failed on run 1"
 
-    # Heal re-run: fallback synthetic dedupes on the existing orderfull CN, but
-    # the covered-stamp block still runs and repairs the missing stamp.
+    # Re-run: the claims land, then the one whole-order CN.
     res2 = online_order_mapper.map_shopify_order(
         dict(payload), wired["db"], topic="orders/create", historical=True
     )
     assert res2["status"] == "duplicate"
     rcn2 = res2["refund_credit_notes"]
-    assert rcn2["credit_notes"] == 0, "no second whole-order CN"
-    assert "whole_order_fallback" not in rcn2, "flag only set on a fresh booking"
-    assert rcn2["unmapped_refunds"] == 0, "covered residual clears on the heal"
-    assert rcn2.get("healed") == 1 and rcn2["cn_failed"] == 0, "the missing return record is completed"
+    assert rcn2["credit_notes"] == 1 and rcn2.get("whole_order_fallback") is True
+    assert rcn2["unmapped_refunds"] == 0, "covered residual clears on the re-run"
+    assert rcn2["cn_failed"] == 0
+    # And a third run is a healthy duplicate: nothing more.
+    rcn3 = online_order_mapper.map_shopify_order(
+        dict(payload), wired["db"], topic="orders/create", historical=True
+    )["refund_credit_notes"]
+    assert (rcn3["credit_notes"], rcn3["cn_failed"], rcn3["unmapped_refunds"]) == (0, 0, 0)
     assert any(r.get("return_id") == "RET-HIST-orderfull:21048" for r in returns_coll.docs)
     assert any(
         r.get("shopify_refund_id") == "88050" for r in returns_coll.docs

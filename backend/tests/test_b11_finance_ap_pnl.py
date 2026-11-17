@@ -1417,10 +1417,11 @@ def _failing_returns_insert(monkeypatch, lost_ack):
 def test_review_d_an_imported_note_whose_return_record_did_not_land_is_failed_and_healed(db, monkeypatch, lost_ack):
     """Codex D: the RET-HIST insert failed (or landed with its reply lost),
     the importer released the booking anyway and said 'booked', and every
-    re-run said 'duplicate' without repairing it. Now the booking stays (it is
-    the real Shopify return), a record that did not land is reported failed,
-    and the next run completes it from the line's mark: one note, one
-    booking, each piece's cost once."""
+    re-run said 'duplicate' without repairing it. The record is now the
+    refund's CLAIM, written first (PR #1423 review F-1423-G): one that did
+    not land books nothing and is reported failed, and the next run books it
+    whole; one that landed with its reply lost is read back and the run goes
+    on. Either way one note, one booking, each piece's cost once."""
     from api.routers import returns as rr
     from api.services import shopify_ingest
 
@@ -1436,10 +1437,13 @@ def test_review_d_an_imported_note_whose_return_record_did_not_land_is_failed_an
     assert seen
     assert (first["credit_notes"], first["cn_failed"]) == ((1, 0) if lost_ack else (0, 1))
     line = db.orders.find_one({"order_id": "RD"})["items"][0]
-    assert line["returned_qty"] == 1.0 and line["restocked_refunds"]["RF-RD"] == 1.0  # the booking stays
+    # Nothing is half-booked: the claim, the piece and the ledger row, or none.
+    booked = 1 if lost_ack else 0
+    assert line.get("returned_qty", 0) == booked and bool(line.get("restocked_refunds")) == bool(booked)
+    assert db.credit_note_ledger.count_documents({"shopify_refund_id": "RF-RD"}) == booked
     again = shopify_ingest._book_historical_refund_credit_notes(db, payload, order)
-    assert again["cn_failed"] == 0 and again["duplicate_refunds"] == 1
-    assert again.get("healed", 0) == (0 if lost_ack else 1)
+    assert (again["credit_notes"], again["cn_failed"], again["duplicate_refunds"]) == (
+        (0, 0, 1) if lost_ack else (1, 0, 0))
     shopify_ingest._book_historical_refund_credit_notes(db, payload, order)  # healthy: nothing more
     notes = list(db.returns.find({"shopify_refund_id": "RF-RD"}))
     assert len(notes) == 1 and notes[0]["goods_lines"][0]["return_qty"] == 1.0
@@ -1545,7 +1549,11 @@ def test_r2_a_an_unreadable_booked_check_is_failed_never_a_second_note(db, monke
     shopify_ingest = _importer(db, monkeypatch)
 
     def no_index(self, *a, **k):
-        raise RuntimeError("unique index cannot be built")
+        # The ledger's index only: without the returns claim index the import
+        # books nothing at all (test_import_refund_one_claim.py).
+        if self.name == "credit_note_ledger":
+            raise RuntimeError("unique index cannot be built")
+        return None
 
     monkeypatch.setattr(mongomock.collection.Collection, "create_index", no_index)
     order = _imported_two_piece(db, "RD")
