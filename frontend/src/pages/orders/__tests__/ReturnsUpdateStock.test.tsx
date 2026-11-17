@@ -56,4 +56,31 @@ describe('Recent returns: units not back in stock', () => {
     expect(screen.queryByRole('button', { name: 'Update stock' })).toBeNull();
     expect(screen.queryByText('Units not back in stock')).toBeNull();
   });
+
+  // D109(2): a stock step that stopped part way may have placed some units.
+  it('says to check by hand on a return whose stock step stopped part way', async () => {
+    list.mockResolvedValue({ returns: [
+      row({ stock_pending: true, stock_step_stopped: true }),
+      row({ return_id: 'RET-2', stock_pending: true, stock_step_stopped: false, restock_applied: true }),
+    ] });
+    await openHistory();
+    expect(screen.getByText('Stock step stopped: check these units by hand')).toBeTruthy();
+    expect(screen.getByText('Damaged unit not set aside in stock')).toBeTruthy();
+    expect(screen.queryByText('Units not back in stock')).toBeNull();
+    expect(screen.getAllByRole('button', { name: 'Update stock' })).toHaveLength(2); // no button added or removed
+  });
+
+  // D109(1): a read that failed is never an empty history.
+  it('says the history could not be loaded and retries', async () => {
+    list.mockReset();
+    list.mockRejectedValueOnce(new Error('503'));
+    render(<ReturnsPage />);
+    fireEvent.click(screen.getByRole('button', { name: /history/i }));
+    expect((await screen.findByRole('alert')).textContent).toContain('Could not load returns.');
+    expect(screen.queryByText('No returns recorded yet.')).toBeNull();
+    list.mockResolvedValue({ returns: [row({})] });
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await screen.findByText('RET-1');
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
 });

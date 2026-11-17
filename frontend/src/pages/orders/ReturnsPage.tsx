@@ -225,6 +225,9 @@ function ReturnsDesk({ canComplete }: { canComplete: boolean }) {
   const [mode, setMode] = useState<'new' | 'history'>('new');
   const [history, setHistory] = useState<any[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
+  // D109(1): a History read that failed is said, never shown as "no returns"
+  // (staff are sent here to press 'Update stock').
+  const [historyFailed, setHistoryFailed] = useState(false);
 
   // F27 refund-approval gate: when the server demands a tiered sign-off this
   // holds the context for the request+poll modal.
@@ -710,8 +713,10 @@ function ReturnsDesk({ canComplete }: { canComplete: boolean }) {
     try {
       const res = await returnsApi.list({ store_id: user?.activeStoreId, limit: 100 });
       setHistory(res?.returns || res || []);
+      setHistoryFailed(false);
     } catch {
       setHistory([]);
+      setHistoryFailed(true);
     } finally {
       setHistoryLoading(false);
     }
@@ -1239,6 +1244,14 @@ function ReturnsDesk({ canComplete }: { canComplete: boolean }) {
           </div>
           {historyLoading ? (
             <div className="py-10 text-center text-gray-500">Loading...</div>
+          ) : historyFailed ? (
+            <div role="alert" className="py-10 text-center text-red-700">
+              <p>Could not load returns.</p>
+              <button type="button" onClick={loadHistory}
+                className="mt-2 px-4 min-h-[44px] text-sm rounded-md border border-gray-300 bg-white text-gray-800 hover:bg-gray-50">
+                Retry
+              </button>
+            </div>
           ) : history.length === 0 ? (
             <div className="py-10 text-center text-gray-500">
               <RotateCcw className="w-9 h-9 mx-auto mb-2 opacity-40" />
@@ -1270,7 +1283,13 @@ function ReturnsDesk({ canComplete }: { canComplete: boolean }) {
                           {r.return_id}
                           {r.stock_pending === true && r.status === 'COMPLETED' && (
                             <div className="mt-1 font-sans">
-                              <div className="text-xs text-amber-700">Units not back in stock</div>
+                              {/* D109(2): a step that stopped part way may have placed some
+                                  units -- a person checks; closing its task clears this. */}
+                              <div className="text-xs text-amber-700">
+                                {r.stock_step_stopped === true ? 'Stock step stopped: check these units by hand'
+                                  : r.restock_applied === true ? 'Damaged unit not set aside in stock'
+                                    : 'Units not back in stock'}
+                              </div>
                               <button type="button" onClick={() => updateStock(r.return_id)} disabled={stockBusy === r.return_id}
                                 className="mt-1 px-3 min-h-[36px] text-xs rounded-md border border-gray-300 bg-white text-gray-800 hover:bg-gray-50 disabled:opacity-50">
                                 {stockBusy === r.return_id ? 'Updating...' : 'Update stock'}
