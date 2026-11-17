@@ -8,6 +8,7 @@ or default was changed.
 from api.utils.event_time import utc_now_iso
 
 import csv
+import hashlib
 import io
 import uuid
 from datetime import datetime
@@ -160,6 +161,49 @@ _LEG_DATE_FIELDS = ("received_at", "recorded_at", "paid_at", "created_at", "paym
 
 
 _BOOKS_UNREADABLE = "The books could not be read to match this statement. Nothing was saved; upload it again."
+_STATEMENTS_UNREADABLE = "Bank statements could not be read right now. Try again."
+_NOT_SAVED = "The statement was not saved. Nothing was imported; upload it again."
+_SAVE_UNKNOWN = (
+    "Could not confirm the statement was saved. Check the imported statements "
+    "list before uploading it again."
+)
+_STATEMENT_NS = uuid.UUID("6f0f3b0e-2f0a-5d1c-9a53-1423b11b11b1")
+
+
+def _statement_answer(doc: dict) -> dict:
+    """What the import answers with: the SAVED statement, nothing else."""
+    return {
+        "statement_id": doc.get("statement_id"),
+        "summary": doc.get("summary"),
+        "rows": doc.get("rows"),
+    }
+
+
+def _saved_statement(db, statement_id: str) -> Optional[dict]:
+    """The stored statement of this id, or None. A read that fails is a 503
+    (_SAVE_UNKNOWN), never "not saved": the caller cannot tell."""
+    try:
+        return db.get_collection("bank_statements").find_one({"_id": statement_id})
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=_SAVE_UNKNOWN) from exc
+
+
+def _replayed_statement(db, statement_id: str, sent: dict, current_user: dict) -> Optional[dict]:
+    """The statement this request_id already saved, answered again -- only to
+    a caller who can see it and only when it is the same upload (file, shop,
+    account). The same id with anything else is a 409, never the earlier
+    statement passed off as this one (the rule of the supplier-payment door,
+    ap_payments._replayed_payment). None when the id saved nothing."""
+    row = _saved_statement(db, statement_id)
+    if row is None:
+        return None
+    in_reach_or_404(row, current_user, "Statement not found")
+    if any((row.get(k) or "") != (v or "") for k, v in sent.items()):
+        raise HTTPException(
+            status_code=409,
+            detail="This upload was already saved with a different file, shop or account - refresh.",
+        )
+    return _statement_answer(row)
 
 
 def bank_receipt_legs(db, min_date: str, max_date: str, store_id: Optional[str]) -> List[dict]:
@@ -333,6 +377,10 @@ async def import_bank_statement(
     file: UploadFile = File(..., description="Bank statement CSV file"),
     store_id: Optional[str] = Form(None),
     account_name: Optional[str] = Form(None, description="Bank account name/label"),
+    request_id: Optional[str] = Form(
+        None, max_length=100,
+        description="The client's own id for this upload: a retry with it never saves twice",
+    ),
     current_user: dict = Depends(get_current_user),
 ):
     """FIND-5: Import a bank statement CSV and auto-match against recorded
@@ -349,6 +397,12 @@ async def import_bank_statement(
     The statement is the shop's it is imported at: a named shop must be the
     caller's, else his own -- an accountant's shop only (owner 2026-10-18), an
     admin's top-bar shop.
+
+    The answer is a SAVED statement or an error (PR #1423 review R2-B): a save
+    that did not land is a 503, never a 200 carrying an id nothing is stored
+    under. ``request_id`` (optional) makes a retry safe: the same id with the
+    same file, shop and account answers with the statement already saved; with
+    anything else it is a 409.
     """
     _require_org_finance(current_user, store_id)
     if not file.filename or not file.filename.lower().endswith(".csv"):
@@ -374,7 +428,25 @@ async def import_bank_statement(
         )
 
     db = _get_db()
+    if db is None:
+        # Nowhere to save: never a 200 with an id nothing is stored under.
+        raise HTTPException(status_code=503, detail="Database unavailable")
     effective_store = store_in_view(store_id, current_user, writing=True) or ""
+
+    # One statement per request_id: its own _id, so a retry (or the same
+    # request racing itself) can save only once -- Mongo's _id index always
+    # exists, no index of ours to be missing.
+    key = request_id.strip() if isinstance(request_id, str) else ""
+    statement_id = str(uuid.uuid5(_STATEMENT_NS, key)) if key else str(uuid.uuid4())
+    sent = {
+        "file_sha256": hashlib.sha256(content_bytes).hexdigest(),
+        "store_id": effective_store,
+        "account_name": account_name or "",
+    }
+    if key:
+        done = _replayed_statement(db, statement_id, sent, current_user)
+        if done is not None:
+            return done
 
     # Fetch recorded receipts and vendor payments for the date range in the statement
     dates = [r["date"] for r in rows if r.get("date")]
@@ -427,34 +499,37 @@ async def import_bank_statement(
         "total_debits": round(sum(r["debit"] for r in matched_rows), 2),
     }
 
-    # Persist the import for later confirmation (best-effort; fail-soft).
-    statement_id = str(uuid.uuid4())
-    if db is not None:
-        try:
-            db.get_collection("bank_statements").insert_one(
-                {
-                    "statement_id": statement_id,
-                    "store_id": effective_store,
-                    "account_name": account_name or "",
-                    "filename": file.filename,
-                    "uploaded_by": current_user.get("id")
-                    or current_user.get("user_id")
-                    or "",
-                    "uploaded_at": utc_now_iso(),
-                    "row_count": len(matched_rows),
-                    "summary": summary,
-                    "rows": matched_rows,
-                    "status": "PENDING_REVIEW",
-                }
-            )
-        except Exception:
-            pass  # non-fatal; data returned in response regardless
-
-    return {
+    # Persist the import for later confirmation. The answer is the SAVED
+    # statement: a save that did not land is never a 200.
+    doc = {
+        "_id": statement_id,
         "statement_id": statement_id,
+        **sent,
+        "filename": file.filename,
+        "uploaded_by": current_user.get("id")
+        or current_user.get("user_id")
+        or "",
+        "uploaded_at": utc_now_iso(),
+        "row_count": len(matched_rows),
         "summary": summary,
         "rows": matched_rows,
+        "status": "PENDING_REVIEW",
+        **({"request_id": key} if key else {}),
     }
+    try:
+        db.get_collection("bank_statements").insert_one(dict(doc))
+    except Exception as exc:  # noqa: BLE001
+        # Refused, or it landed and the reply was lost, or (with a request_id)
+        # the same request racing itself saved it first: read what is stored.
+        if key:
+            done = _replayed_statement(db, statement_id, sent, current_user)
+            if done is not None:
+                return done
+        elif _saved_statement(db, statement_id) is not None:
+            return _statement_answer(doc)
+        raise HTTPException(status_code=503, detail=_NOT_SAVED) from exc
+
+    return _statement_answer(doc)
 
 
 @router.get("/bank-statement")
@@ -469,7 +544,8 @@ async def list_bank_statements(
     shop = _require_org_finance(current_user, store_id)
     db = _get_db()
     if db is None:
-        return {"statements": []}
+        # No answer is never "no statements imported".
+        raise HTTPException(status_code=503, detail=_STATEMENTS_UNREADABLE)
     flt = {"store_id": shop} if shop else {}
     try:
         docs = list(
@@ -489,8 +565,8 @@ async def list_bank_statements(
                 limit=limit,
             )
         )
-    except Exception:
-        docs = []
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=_STATEMENTS_UNREADABLE) from exc
     return {"statements": docs}
 
 
@@ -509,7 +585,8 @@ async def get_bank_statement(
         doc = db.get_collection("bank_statements").find_one(
             {"statement_id": statement_id}, {"_id": 0}
         )
-    except Exception:
-        doc = None
+    except Exception as exc:  # noqa: BLE001
+        # No answer is never "Statement not found".
+        raise HTTPException(status_code=503, detail=_STATEMENTS_UNREADABLE) from exc
     # Another shop's statement reads as one that does not exist.
     return in_reach_or_404(doc, current_user, "Statement not found")
