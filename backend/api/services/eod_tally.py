@@ -411,7 +411,7 @@ FOLLOWUP_FIELD = "manager_followup"
 def followup_task_id(kind: str, *key: Any) -> str:
     """The fixed id of ONE owed task (same shape as a generated task id)."""
     raw = ":".join([kind, *(str(k) for k in key)])
-    return "TSK-" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:10].upper()
+    return "TSK-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:10].upper()
 
 
 def owed_followup(*tasks: Optional[Dict[str, Any]]) -> Dict[str, Any]:
