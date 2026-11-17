@@ -2979,3 +2979,463 @@ def test_r4_an_inbox_decision_on_a_request_that_cannot_be_read_is_503_not_404(
     assert _request(db, request_id)["status"] == decided
     if je_id:
         assert _je(db, je_id)["status"] == decided
+
+
+# ===========================================================================
+# Internal review of fbc62adc (round 5): an approval made again is never spent
+# by Post unrecorded; two presses meeting on one reversal write one voucher
+# whatever indexes the collection has; the approval engine's own audit rows
+# (approved / rejected / consumed) survive a lost reply (D84)
+# ===========================================================================
+
+
+def _raised_again(db) -> Dict[str, str]:
+    """A lapsed APPROVED journal whose request a second checker ('boss') has
+    raised again and not yet decided (a wrong PIN). Adds "new_id"."""
+    j = _lapsed_approved_journal(db)
+    res = je_service.approve_je(db, je_id=j["je_id"], approver_id="boss",
+                                approver_roles=["SUPERADMIN"], pin="0000")
+    assert (res["http"], res["error"]) == (403, "wrong_pin")
+    return dict(j, new_id=_je(db, j["je_id"])["approval_request_id"])
+
+
+@pytest.mark.parametrize("how", ["journal_write_refused", "decided_during_post"])
+def test_r5_post_never_spends_an_approval_made_again_without_recording_it(db, monkeypatch, how):
+    """1411-R4-REAPPROVAL on Post. The request raised again (D54) is approved
+    and the journal does not say so yet: the inbox could not reach the journal
+    and Post's own catch-up write is then refused, or the approval lands while
+    Post is already past its catch-up. Post spent that approval and answered
+    200 with the journal POSTED under the LAPSED approval's checker, no
+    je_reapproved row and no note of one, so nothing could ever repair it.
+    The POSTED write itself now carries the approval made again."""
+    checker = _user(db, "checker", ["ADMIN"])
+    boss = _user(db, "boss", ["SUPERADMIN"])
+    j = _raised_again(db)
+
+    def undo():
+        return None
+
+    if how == "journal_write_refused":
+        down = _db_faults(monkeypatch, db, "journal_entries", find_one=_every_call)
+        assert _inbox_approve(db, monkeypatch, j["new_id"], boss)[0] == 200    # stands on the request
+        down()
+        assert _je(db, j["je_id"])["checker_id"] == "checker"
+        seen = []
+
+        def _first_catch_up(n, flt, upd, *a, **k):
+            if _records_again(n, flt, upd) and not seen:
+                seen.append(n)
+                return True
+            return False
+        undo = _db_faults(monkeypatch, db, "journal_entries", find_one_and_update=_first_catch_up)
+    else:
+        real = appr.ApprovalEngine.consume_approval
+
+        def _decided_first(self, **k):
+            # the approval lands between Post's catch-up and its spend
+            monkeypatch.setattr(appr.ApprovalEngine, "consume_approval", real)
+            res = _engine(db).approve(j["new_id"], approver_user_id="boss",
+                                      approver_roles=["SUPERADMIN"], pin=PIN)
+            assert res.get("ok") is True, res
+            return real(self, **k)
+        monkeypatch.setattr(appr.ApprovalEngine, "consume_approval", _decided_first)
+
+    code, body = _door(db, monkeypatch, "post", j["je_id"], checker)
+    undo()
+    assert code == 200, body
+    je = _je(db, j["je_id"])
+    assert (je["status"], je["checker_id"]) == ("POSTED", "boss")     # was the lapsed approval's checker
+    assert [r["user_id"] for r in _rows(db, j["je_id"], "je_reapproved")] == ["boss"]   # was no row, for good
+    assert f"reapproved:{j['new_id']}" in je["events"]
+    # the inbox's late sync, a read and a Post retry add nothing
+    je_service.sync_with_request(db, _request(db, j["new_id"]))
+    assert _read_journal(db, monkeypatch, "detail", j["je_id"], checker) == 200
+    code, body = _door(db, monkeypatch, "post", j["je_id"], checker)
+    assert (code, body["error"]) == (409, "already_posted")
+    assert len(_rows(db, j["je_id"], "je_reapproved")) == 1
+    assert len(_posted_rows(db, j["je_id"])) == 1
+    assert verify_chain(db.get_collection("audit_logs"))["intact"] is True
+
+
+def _unfinished_reversal(db) -> str:
+    """A journal left REVERSED naming a voucher that was never written."""
+    je_id = _posted_journal(db)
+    db.get_collection("journal_entries").update_one(
+        {"je_id": je_id},
+        {"$set": {"status": "REVERSED", "reversed_by": f"JE-{uuid.uuid4().hex[:12]}"}})
+    return je_id
+
+
+@pytest.mark.parametrize("first", ["finish", "reverse_in_flight"])
+def test_r5_two_presses_meeting_on_one_reversal_write_one_voucher(db, monkeypatch, first):
+    """1411-R4-REVERSE-DOUBLE. Since Reverse finishes an unfinished reversal,
+    a second press can reach the voucher's insert too: two Finish presses, or
+    a Reverse arriving while the first is between its claim and its insert.
+    Only a secondary unique index on je_id (created best-effort at startup)
+    kept them to one voucher; without it both landed and the books carried
+    the reversal twice. The voucher's _id is now its je_id, which Mongo keeps
+    unique on every collection: the second insert is refused and reads the
+    first back. Neither database here has the secondary index."""
+    _user(db, "checker", ["ADMIN"])
+    je_id = _posted_journal(db) if first == "reverse_in_flight" else _unfinished_reversal(db)
+    real_number = je_service._next_je_number
+    other = []
+
+    def _other_press_first(*a, **k):
+        # this press has read "no voucher yet" and is about to write it
+        monkeypatch.setattr(je_service, "_next_je_number", real_number)
+        other.append(je_service.reverse_je(db, je_id=je_id, actor_id="boss"))
+        return real_number(*a, **k)
+    monkeypatch.setattr(je_service, "_next_je_number", _other_press_first)
+    one = je_service.reverse_je(db, je_id=je_id, actor_id="checker")
+    assert other[0].get("ok") is True, other
+    assert one.get("ok") is True, one
+    assert one["reversal_je_id"] == other[0]["reversal_je_id"] == _reversed_once(db, je_id)   # was 2 vouchers
+
+
+@pytest.mark.parametrize("index", ["no_je_id_index", "je_id_index"])
+@pytest.mark.parametrize("start", ["unfinished", "posted"])
+def test_r5_simultaneous_reverse_presses_write_one_voucher_on_real_mongo(mongo_db, start, index):
+    """Real MongoDB, four presses at once, five journals: four Finish presses
+    on an unfinished reversal, and four Reverse presses on a POSTED journal.
+    One voucher, one je_reversed, one je_posted each, expenses net 0 -- with
+    the secondary je_id index and without it."""
+    db = mongo_db
+    if index == "je_id_index":
+        je_service.ensure_indexes(db)
+    _user(db, "checker", ["ADMIN"])
+    for _ in range(5):
+        je_id = _unfinished_reversal(db) if start == "unfinished" else _posted_journal(db)
+        gate, got = threading.Barrier(4), []
+
+        def _go(je_id=je_id, gate=gate, got=got):
+            gate.wait(timeout=20)
+            got.append(je_service.reverse_je(db, je_id=je_id, actor_id="checker"))
+        threads = [threading.Thread(target=_go) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=60)
+        assert len(got) == 4
+        mirror = _reversed_once(db, je_id)
+        assert any(r.get("ok") for r in got), got
+        for r in got:
+            if r.get("ok"):
+                assert r["reversal_je_id"] == mirror, got
+            else:
+                assert r["error"] == "already_reversed", got
+
+
+def _request_rows(db, request_id: str, action: str):
+    """The approval engine's own audit rows of one request."""
+    return [r for r in db.get_collection("audit_logs").find(
+        {"action": action, "entity_type": "approval_request"}) if r.get("entity_id") == request_id]
+
+
+@pytest.mark.parametrize("decision", ["approve", "reject"])
+@pytest.mark.parametrize("kind", ["journal", "petty_cash"])
+def test_r5_an_inbox_decision_whose_reply_was_lost_keeps_the_request_audit_row(
+        db, monkeypatch, kind, decision):
+    """1411-R4-ENGINE-TRAIL. The engine's decision landed and its reply was
+    lost: the inbox answers 503 'try again', the request is decided, and its
+    'approved' / 'rejected' audit row was never written -- the retry answered
+    409 already_reviewed and wrote nothing, for every request type. The
+    decision's write now names the audit row it owes, and whichever engine
+    call next reads the request writes it, once, naming who decided."""
+    checker = _user(db, "checker", ["ADMIN"])
+    if kind == "journal":
+        j = _submitted_journal(db, "maker")
+        request_id, je_id = j["request_id"], j["je_id"]
+    else:
+        request_id, je_id = _petty_cash_request(db), None
+    decided, action = ("APPROVED", "approved") if decision == "approve" else ("REJECTED", "rejected")
+
+    def press():
+        if decision == "approve":
+            return _inbox_approve(db, monkeypatch, request_id, checker)
+        return _inbox_reject(db, monkeypatch, request_id, checker, _NOTE)
+
+    undo = _db_faults(monkeypatch, db, "approval_requests",
+                      find_one_and_update=(_sets_status(decided), "landed"))
+    code, body = press()
+    undo()
+    assert code == 503, body
+    assert _request(db, request_id)["status"] == decided
+    code, body = press()                                        # the identical retry
+    assert (code, body["error"]) == (409, "already_reviewed")
+    rows = _request_rows(db, request_id, action)
+    assert [r["user_id"] for r in rows] == ["checker"], rows    # was no row, for good
+    if decision == "reject":
+        assert rows[0]["reason"] == _NOTE
+    press()
+    assert _get_by_id(db, monkeypatch, request_id, checker)[0] == 200
+    _inbox_ids(db, monkeypatch, checker, status="ALL")
+    assert len(_request_rows(db, request_id, action)) == 1
+    if je_id:
+        assert _je(db, je_id)["status"] == decided
+        assert len(_rows(db, je_id, f"je_{action}")) == 1
+    assert verify_chain(db.get_collection("audit_logs"))["intact"] is True
+
+
+@pytest.mark.parametrize("door", ["approve", "reject", "post"])
+def test_r5_a_journal_door_whose_engine_reply_was_lost_keeps_the_request_audit_row(db, monkeypatch, door):
+    """The same loss through the journal screen: Approve / Reject (the
+    engine's decision) and Post (the engine's spend) answer 503 when the
+    engine's write landed with its reply lost. The retry now also writes the
+    request's own 'approved' / 'rejected' / 'consumed' row, once."""
+    checker = _user(db, "checker", ["ADMIN"])
+    j = _submitted_journal(db, "maker")
+    if door == "post":
+        assert _journal_approve(db, j["je_id"]).get("ok") is True
+    status, action = {"approve": ("APPROVED", "approved"), "reject": ("REJECTED", "rejected"),
+                      "post": ("CONSUMED", "consumed")}[door]
+    undo = _db_faults(monkeypatch, db, "approval_requests",
+                      find_one_and_update=(_sets_status(status), "landed"))
+    code, body = _door(db, monkeypatch, door, j["je_id"], checker)
+    undo()
+    assert code == 503, body
+    assert _request_rows(db, j["request_id"], action) == []
+    code, body = _door(db, monkeypatch, door, j["je_id"], checker)
+    assert code == (200 if door == "post" else 409), body
+    rows = _request_rows(db, j["request_id"], action)
+    assert [r["user_id"] for r in rows] == ["checker"], rows    # was no row, for good
+    _door(db, monkeypatch, door, j["je_id"], checker)
+    assert _read_journal(db, monkeypatch, "detail", j["je_id"], checker) == 200
+    assert len(_request_rows(db, j["request_id"], action)) == 1
+    assert len(_request_rows(db, j["request_id"], "approved")) == (0 if door == "reject" else 1)
+    assert verify_chain(db.get_collection("audit_logs"))["intact"] is True
+
+
+def test_r5_the_generic_consume_door_reads_strictly_and_keeps_its_audit_row(db, monkeypatch):
+    """POST /approvals/requests/{id}/consume, the last door that still read
+    leniently: with the request unreadable it skipped the reach check and
+    spent the approval by id (200); with the spend landed and its reply lost
+    the error went out unhandled and 'consumed' was never written. Both are
+    503 now; nothing is spent blind, and the retry writes the row once."""
+    cashier = _user(db, "cashier", ["CASHIER"])
+    checker = _user(db, "checker", ["ADMIN"])
+    request_id = _petty_cash_request(db)
+    assert _inbox_approve(db, monkeypatch, request_id, checker)[0] == 200
+
+    def press():
+        monkeypatch.setattr(approvals_router, "_get_db", lambda: db)
+        return _call(approvals_router.consume_request(
+            request_id, approvals_router.ConsumeAction(action_type="petty_cash", amount=250.0),
+            current_user=cashier))
+
+    undo = _db_faults(monkeypatch, db, "approval_requests", find_one=_every_call)
+    code, body = press()
+    undo()
+    assert code == 503, body                                    # was 200, spent without the reach check
+    assert _request(db, request_id)["consumed"] is False
+
+    undo = _db_faults(monkeypatch, db, "approval_requests",
+                      find_one_and_update=(_sets_status("CONSUMED"), "landed"))
+    code, body = press()
+    undo()
+    assert code == 503, body                                    # was an unhandled AutoReconnect
+    assert _request(db, request_id)["status"] == "CONSUMED"
+    code, body = press()
+    assert (code, body) == (409, "already_consumed")
+    assert [r["user_id"] for r in _request_rows(db, request_id, "consumed")] == ["cashier"]   # was no row
+    press()
+    assert len(_request_rows(db, request_id, "consumed")) == 1
+    assert len(_request_rows(db, request_id, "approved")) == 1
+
+
+@pytest.mark.parametrize("read", ["inbox", "by_id", "mine"])
+def test_r5_a_request_decision_whose_audit_insert_failed_is_recorded_by_the_next_read(db, monkeypatch, read):
+    """The engine's audit write is fail-soft: the decision stands when the
+    insert is refused, and nothing wrote the row later. The next read of the
+    request (the inbox history, by id, the maker's own list) writes it once."""
+    checker = _user(db, "checker", ["ADMIN"])
+    request_id = _petty_cash_request(db)
+    real_get = db.get_collection
+    monkeypatch.setattr(db, "get_collection",
+                        lambda n: _AuditInsertsFail(real_get(n)) if n == "audit_logs" else real_get(n))
+    assert _inbox_approve(db, monkeypatch, request_id, checker)[0] == 200
+    monkeypatch.setattr(db, "get_collection", real_get)
+    assert _request_rows(db, request_id, "approved") == []
+    for _ in range(2):
+        if read == "inbox":
+            assert request_id in _inbox_ids(db, monkeypatch, checker, status="ALL")
+        elif read == "by_id":
+            assert _get_by_id(db, monkeypatch, request_id, checker)[0] == 200
+        else:
+            assert _engine(db).list_mine("cashier")
+        assert [r["user_id"] for r in _request_rows(db, request_id, "approved")] == ["checker"]   # was no row
+    assert verify_chain(db.get_collection("audit_logs"))["intact"] is True
+
+
+def test_r5_the_request_trail_repair_writes_only_what_is_owed(db, monkeypatch):
+    """What the repair must NOT do: double a row on a healthy path, write
+    'consumed' for a spend that was rolled back, or add a second row beside a
+    previous-version worker's (it leaves no note, and writes its own row)."""
+    checker = _user(db, "checker", ["ADMIN"])
+    eng = _engine(db)
+    request_id = _petty_cash_request(db)
+    assert _inbox_approve(db, monkeypatch, request_id, checker)[0] == 200
+
+    def spend(amount):
+        return eng.consume_approval(consumed_by="cashier", action_type="petty_cash",
+                                    request_id=request_id, amount=amount)
+
+    assert spend(999.0)["error"] == "amount_exceeded"           # rolled back
+    assert eng.get(request_id)["status"] == "APPROVED"
+    assert _request_rows(db, request_id, "consumed") == []
+    assert spend(250.0).get("ok") is True
+    for _ in range(2):
+        eng.get(request_id)
+        _inbox_ids(db, monkeypatch, checker, status="ALL")
+    assert len(_request_rows(db, request_id, "approved")) == 1
+    assert len(_request_rows(db, request_id, "consumed")) == 1
+    # given back and spent again: a second spend, its own row
+    assert eng.release_consumption(request_id, consumed_by="cashier") is True
+    eng.get(request_id)
+    assert len(_request_rows(db, request_id, "consumed")) == 1
+    assert spend(250.0).get("ok") is True
+    eng.get(request_id)
+    assert len(_request_rows(db, request_id, "consumed")) == 2
+
+    # as a previous-version worker leaves a decision: no note, its own row
+    old = _petty_cash_request(db)
+    assert _inbox_approve(db, monkeypatch, old, checker)[0] == 200
+    db.get_collection("approval_requests").update_one({"request_id": old}, {"$unset": {"audit_rows": ""}})
+    eng.get(old)
+    _inbox_ids(db, monkeypatch, checker, status="ALL")
+    assert len(_request_rows(db, old, "approved")) == 1
+    assert verify_chain(db.get_collection("audit_logs"))["intact"] is True
+
+
+@pytest.mark.parametrize("down", ["read_fails", "no_store"])
+@pytest.mark.parametrize("read", ["inbox", "mine", "by_id"])
+def test_r5_an_approvals_read_that_fails_is_503_not_an_empty_list_or_404(db, monkeypatch, read, down):
+    """D112 (3). The inbox, the maker's own list and GET by id read leniently:
+    a read that failed at the database (or no approval store) answered 200
+    with no rows -- "nothing is waiting" -- and 404 for a request that was
+    there. Each is 503 now, and the same read afterwards answers as before."""
+    checker = _user(db, "checker", ["ADMIN"])
+    cashier = {"user_id": "cashier", "roles": ["CASHIER"], "store_ids": ["S1"], "active_store_id": "S1"}
+    request_id = _petty_cash_request(db)
+
+    def ask():
+        monkeypatch.setattr(approvals_router, "_get_db", lambda: db)
+        if read == "inbox":
+            return _call(approvals_router.get_inbox(store_id=None, status=None, current_user=checker))
+        if read == "mine":
+            return _call(approvals_router.get_my_requests(current_user=cashier))
+        return _call(approvals_router.get_request(request_id, current_user=checker))
+
+    if down == "read_fails":
+        undo = _db_faults(monkeypatch, db, "approval_requests", find=_every_call, find_one=_every_call)
+    else:
+        real_coll = appr.ApprovalEngine._coll
+        monkeypatch.setattr(appr.ApprovalEngine, "_coll", lambda self: None)
+
+        def undo():
+            monkeypatch.setattr(appr.ApprovalEngine, "_coll", real_coll)
+    code, body = ask()
+    undo()
+    assert code == 503, body                                    # was 200 with no rows / 404
+    code, body = ask()
+    assert code == 200, body
+    found = [body["request_id"]] if read == "by_id" else [r["request_id"] for r in body["requests"]]
+    assert found == [request_id]
+
+
+def _tally_numbers(db, monkeypatch, user: Dict[str, Any]) -> set:
+    """The voucher numbers in the Tally journal export."""
+    import re
+
+    monkeypatch.setattr(je_router, "_get_db", lambda: db)
+    code, resp = _call(je_router.get_tally_journal_jv(
+        from_date=None, to_date=None, store_id=None, current_user=user))
+    assert code == 200, resp
+    return set(re.findall(r"<VOUCHERNUMBER>(.*?)</VOUCHERNUMBER>", resp.body.decode()))
+
+
+def test_r5_an_unfinished_reversal_still_exports_to_tally_as_posted(db, monkeypatch):
+    """D113 (2). An entry marked reversed whose reversal voucher was never
+    written is still carried in full by the P&L, but the Tally export (POSTED
+    only) dropped it for as long as nobody pressed Finish: the two disagreed.
+    It exports as posted until the voucher exists; a finished reversal exports
+    its voucher alone, as before."""
+    checker = _user(db, "checker", ["ADMIN"])
+    je_id = _unfinished_reversal(db)
+    number = _je(db, je_id)["je_number"]
+    assert _expense_net(db) == 100.0                            # the books carry it
+    assert _tally_numbers(db, monkeypatch, checker) == {number}     # was nothing exported
+    code, body = _door(db, monkeypatch, "reverse", je_id, checker)  # Finish the reversal
+    assert code == 200, body
+    mirror = _je(db, _reversed_once(db, je_id))
+    assert _tally_numbers(db, monkeypatch, checker) == {mirror["je_number"]}
+
+
+@pytest.mark.parametrize("lost", ["release_reply", "spend_audit_insert"])
+def test_r5_an_approval_given_back_keeps_both_its_audit_rows(db, monkeypatch, lost):
+    """release_consumption (an approval given back because the action it was
+    spent on was never saved): a release that landed with its reply lost wrote
+    no 'consume_released' row, and nothing wrote it later; and a release wiped
+    the note of a spend whose own audit insert had failed, so that 'consumed'
+    row was never repaired. Both rows are named on the request and written
+    once by the next read, each naming the spender."""
+    checker = _user(db, "checker", ["ADMIN"])
+    eng = _engine(db)
+    request_id = _petty_cash_request(db)
+    assert _inbox_approve(db, monkeypatch, request_id, checker)[0] == 200
+    real_get = db.get_collection
+    if lost == "spend_audit_insert":
+        monkeypatch.setattr(db, "get_collection",
+                            lambda n: _AuditInsertsFail(real_get(n)) if n == "audit_logs" else real_get(n))
+    assert eng.consume_approval(consumed_by="cashier", action_type="petty_cash",
+                                request_id=request_id, amount=250.0).get("ok") is True
+    monkeypatch.setattr(db, "get_collection", real_get)
+    if lost == "release_reply":
+        undo = _db_faults(monkeypatch, db, "approval_requests",
+                          find_one_and_update=(_sets_status("APPROVED"), "landed"))
+        assert eng.release_consumption(request_id, consumed_by="cashier") is False   # reply lost
+        undo()
+        assert _request(db, request_id)["consumed"] is False                     # it was given back
+        assert _request_rows(db, request_id, "consume_released") == []
+    else:
+        assert _request_rows(db, request_id, "consumed") == []
+        assert eng.release_consumption(request_id, consumed_by="cashier") is True
+    for _ in range(2):
+        eng.get(request_id)
+        assert [r["user_id"] for r in _request_rows(db, request_id, "consumed")] == ["cashier"]
+        assert [r["user_id"] for r in _request_rows(db, request_id, "consume_released")] == ["cashier"]
+    assert verify_chain(db.get_collection("audit_logs"))["intact"] is True
+
+
+def test_r5_simultaneous_reads_write_an_owed_request_row_once_on_real_mongo(mongo_db, monkeypatch):
+    """Real MongoDB, six readers at once (by id, the inbox, the retry's
+    already_reviewed) on a request whose 'approved' row is owed: one row,
+    naming the checker, and the chain intact."""
+    db = mongo_db
+    checker = _user(db, "checker", ["ADMIN"])
+    request_id = _petty_cash_request(db)
+    real_get = db.get_collection
+    monkeypatch.setattr(db, "get_collection",
+                        lambda n: _AuditInsertsFail(real_get(n)) if n == "audit_logs" else real_get(n))
+    assert _engine(db).approve(request_id, approver_user_id="checker", approver_roles=["ADMIN"],
+                               pin=PIN).get("ok") is True
+    monkeypatch.setattr(db, "get_collection", real_get)
+    assert _request_rows(db, request_id, "approved") == []
+    gate = threading.Barrier(6)
+
+    def _go(n):
+        eng = appr.ApprovalEngine(db=db, strict=True)
+        gate.wait(timeout=20)
+        if n % 3 == 0:
+            eng.get(request_id)
+        elif n % 3 == 1:
+            eng.list_inbox(["ADMIN"], ["S1"], status="ALL")
+        else:
+            eng.approve(request_id, approver_user_id="checker", approver_roles=["ADMIN"], pin=PIN)
+    threads = [threading.Thread(target=_go, args=(n,)) for n in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
+    assert [r["user_id"] for r in _request_rows(db, request_id, "approved")] == ["checker"]
+    assert verify_chain(db.get_collection("audit_logs"))["intact"] is True
