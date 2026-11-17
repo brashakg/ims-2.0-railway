@@ -1890,7 +1890,7 @@ def test_one_frame_of_a_historical_order_is_one_stock_in_task_goods_back_and_ret
     oid, rid = 60182 + goods_first, 700382 + goods_first
     row = _historical_refund(swept, monkeypatch, oid, rid, status="DELIVERED")
     real = returns_router._returns_coll
-    blip = _ScanFailsOnce(real())
+    blip = _ScanFailsOnce(real(), skip=1)
     monkeypatch.setattr(returns_router, "_returns_coll", lambda: blip)
     res = _confirm(row)["result"]
     assert (res["restock_applied"], res["historical"]) == (False, True), "its returns could not be read"
@@ -2557,15 +2557,20 @@ def test_a_partly_landed_goods_back_keeps_its_mark_at_the_units_that_landed(swep
 
 
 class _ScanFailsOnce:
-    """The returns collection; its first find raises (a blip)."""
+    """The returns collection; its first find raises (a blip). ``skip``:
+    finds let through first (the confirm's already-returned check reads the
+    returns before the restock does, #1397 round 8)."""
 
-    def __init__(self, real):
-        self.real, self.failed = real, False
+    def __init__(self, real, skip=0):
+        self.real, self.failed, self.skip = real, False, skip
 
     def __getattr__(self, name):
         return getattr(self.real, name)
 
     def find(self, *a, **kw):
+        if self.skip:
+            self.skip -= 1
+            return self.real.find(*a, **kw)
         if not self.failed:
             self.failed = True
             raise RuntimeError("returns scan timed out")
@@ -2739,7 +2744,7 @@ def test_a_stampless_historical_frame_goes_to_the_retrying_shops_manager(swept, 
     oid, rid = 60210, 700410
     row = _historical_refund(swept, monkeypatch, oid, rid, status="DELIVERED")
     _set(swept, oid, fulfillment_stores=None)
-    blip = _ScanFailsOnce(returns_router._returns_coll())
+    blip = _ScanFailsOnce(returns_router._returns_coll(), skip=1)
     monkeypatch.setattr(returns_router, "_returns_coll", lambda: blip)
     assert _confirm(row)["result"]["restock_applied"] is False
     out = _retry(swept["returns"].find_one({"shopify_refund_id": str(rid)}))

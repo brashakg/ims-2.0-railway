@@ -197,6 +197,9 @@ function ReturnsDesk({ canComplete }: { canComplete: boolean }) {
   const [resultCreditAmount, setResultCreditAmount] = useState(0);
   const [resultCollectAmount, setResultCollectAmount] = useState(0);
   const [resultCollectMethod, setResultCollectMethod] = useState('');
+  // What the server says about the returned stock (a piece that went back
+  // under a NEW barcode needs its label printed).
+  const [resultStockNote, setResultStockNote] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Refund-tender capture (drawer-truth): how the money is actually handed back.
@@ -601,6 +604,7 @@ function ReturnsDesk({ canComplete }: { canComplete: boolean }) {
     setResultCreditAmount(Number(result?.credit_amount) || 0);
     setResultCollectAmount(Number(result?.collect_amount) || 0);
     setResultCollectMethod(String(result?.collect_method || ''));
+    setResultStockNote(String(result?.stock_note || ''));
     setStep('complete');
     return true;
   };
@@ -1003,6 +1007,14 @@ function ReturnsDesk({ canComplete }: { canComplete: boolean }) {
                       {quoteLoading && !quote ? 'Calculating…' : fp(netRefund)}
                     </span>
                   </div>
+                  {(quote?.points_paid_share ?? 0) > 0 && (
+                    <p className="mt-1 text-xs text-gray-500">
+                      {/* D28: an admin closed this bill's points -- no promise that points go back. */}
+                      {quote?.points_waived
+                        ? `${fp(quote?.points_paid_share ?? 0)} was paid with loyalty points: points for this bill are settled by head office and are not returned automatically. It is not paid as money or store credit.`
+                        : `${fp(quote?.points_paid_share ?? 0)} was paid with loyalty points: it goes back to the customer's points by itself, not as money or store credit.`}
+                    </p>
+                  )}
 
                   {/* Refund-tender capture (RETURN only): how the cash is returned. */}
                   {returnType === 'RETURN' && roundedNet > 0 && (
@@ -1186,8 +1198,13 @@ function ReturnsDesk({ canComplete }: { canComplete: boolean }) {
               If you took cash, record it at day-end — otherwise the till will read over.
             </p>
           )}
+          {resultStockNote && (
+            <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mt-3 max-w-md mx-auto">
+              {resultStockNote}
+            </p>
+          )}
           <div className="flex gap-3 justify-center mt-6">
-            <button onClick={() => { setStep('search'); setSelectedOrder(null); setReturnItems([]); setResultId(null); setReplacementItems([]); setProductResults([]); setProductQuery(''); setRestockingFee(0); setRefundTenders([]); setCollectMethod(''); setQuote(null); setQuoteError(null); setResultDrawerNetted(null); setResultCashRefunded(0); setResultCreditAmount(0); setResultCollectAmount(0); setResultCollectMethod(''); }}
+            <button onClick={() => { setStep('search'); setSelectedOrder(null); setReturnItems([]); setResultId(null); setResultStockNote(''); setReplacementItems([]); setProductResults([]); setProductQuery(''); setRestockingFee(0); setRefundTenders([]); setCollectMethod(''); setQuote(null); setQuoteError(null); setResultDrawerNetted(null); setResultCashRefunded(0); setResultCreditAmount(0); setResultCollectAmount(0); setResultCollectMethod(''); }}
               className="px-6 py-2.5 bg-bv-red-600 text-white rounded-lg text-sm font-semibold">New Return</button>
           </div>
         </div>

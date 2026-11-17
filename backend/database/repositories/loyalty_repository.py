@@ -9,7 +9,8 @@ Two collections:
   loyalty_settings        -- single-doc rule config
 
 Fail-soft: every helper returns a sensible default on any DB error so a
-loyalty failure can NEVER block POS.
+loyalty failure can NEVER block POS. The one exception is read_or_raise, for
+the money doors that must tell "no account" from "could not read it".
 """
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -105,6 +106,8 @@ class LoyaltyAccountRepository(BaseRepository):
         delta_lifetime_redeemed: int = 0,
         delta_lifetime_earned: int = 0,
         new_tier: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+        ledger_extra: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         """Atomically debit `points` from a customer's balance, guard-in-the-
         filter (mirrors the voucher redeem). The decrement happens ONLY when the
@@ -119,6 +122,13 @@ class LoyaltyAccountRepository(BaseRepository):
 
         Optional lifetime counters / tier are applied in the SAME write so the
         debit and its bookkeeping are indivisible.
+
+        `idempotency_key` (one bill's redemption): the key rides IN the
+        guarded write (money_guard's money_ledger marker), so a second debit
+        under it -- an overlapping or later press -- never decrements again;
+        it returns the current account doc instead. The same key with a
+        different amount returns None (refused). `ledger_extra` rides on that
+        marker: the result this debit authorised, kept with the debit.
         """
         points = int(points)
         if points <= 0:
@@ -149,10 +159,12 @@ class LoyaltyAccountRepository(BaseRepository):
         res = money_guard.debit(
             self.collection, "LOYALTY", customer_id, points,
             reason="redeem", inc_extra=inc_extra, set_extra=set_extra,
-            record_ledger=False,
+            record_ledger=False, idempotency_key=idempotency_key,
+            ledger_extra=ledger_extra,
         )
         if res.ok:
-            return (res.detail or {}).get("post_doc")
+            # A replayed key moved nothing: answer with the account as it is.
+            return (res.detail or {}).get("post_doc") or self.find_by_id(customer_id)
         # insufficient OR no_atomic both map to None (existing contract: the
         # caller surfaces a 400/409 or fails closed).
         return None

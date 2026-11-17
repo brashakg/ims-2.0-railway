@@ -83,6 +83,11 @@ class TokenLines:
         return True
 
     def _hit(self, match):
+        # A condition on the bill's refund holds (the counter's claim needs its
+        # own live hold, D85) is read on the stored bill: ONE document in Mongo.
+        holds = {k: v for k, v in match.items() if k.startswith("refund_holds.")}
+        if holds and self.real.find_one({"order_id": match.get("order_id"), **holds}) is None:
+            return None
         elem = (match.get("items") or {}).get("$elemMatch") or {}
         return next((ln for ln in self.lines if self._match(ln, elem)), None)
 
