@@ -17,9 +17,12 @@ is created WITHOUT any index on returns.return_id: nothing here may depend on
 that backstop (D95(1)).
 
 Where: CI's mongo service (MONGODB_URL). On a PC: MONGO_HOST / MONGO_PORT /
-MONGO_DATABASE of a loopback Mongo (MONGO_DATABASE is only a name prefix);
-with no Mongo the tests skip locally and FAIL in CI. Each test creates its
-own database "<prefix>_<8 hex>" and drops it. No emoji (cp1252).
+MONGO_DATABASE of a loopback Mongo; with no Mongo the tests skip locally and
+FAIL in CI. Each test creates its own database "<MONGO_DATABASE>_<8 hex>" and
+drops it. CAUTION: with those variables set the app itself connects to the
+database named exactly MONGO_DATABASE, and conftest (_isolate_db) empties its
+transactional collections before every test -- give a NEW, empty name, never
+a database that holds data. No emoji (cp1252).
 """
 
 from __future__ import annotations
