@@ -581,15 +581,17 @@ export default function OnlineShopifySyncPage() {
   };
 
   // "Sync live products now" (owner ruling 2026-09-06): the SAME function the
-  // 01:00 / 09:00 IST schedule runs. Re-pushes only products ALREADY on
-  // Shopify that were edited in IMS; never a first publish. SIMULATED when
+  // 01:00 / 09:00 IST schedule runs. Re-pushes products ALREADY on Shopify
+  // that were edited in IMS and first-publishes queued new ones (owner ruling
+  // 2026-10-20; capped per run, shopify_live_sync). SIMULATED when
   // the gates are off, so it is always safe; a LIVE press confirms first.
   const syncLiveNow = async () => {
     if (!canGoLive || syncingLive) return;
     if (isLive) {
       const ok = window.confirm(
         'LIVE sync — every product already on bettervision.in that was edited in IMS will be ' +
-          'updated on Shopify now. Products never pushed are left alone. Continue?',
+          'updated on Shopify now, and queued new products that pass the website checks are ' +
+          'published for the first time (up to 25 in this press; the rest go in the next run). Continue?',
       );
       if (!ok) return;
     }

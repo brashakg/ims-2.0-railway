@@ -63,6 +63,7 @@ import {
 } from '../../utils/categoryNormalize';
 import {
   CANONICAL_TO_PICKER,
+  canonicalAttributes,
   docTags,
   getCategoryFields,
   loadCategoryRegistry,
@@ -258,7 +259,7 @@ export function CatalogProductDrawer({
   const name = docName(doc);
   const images = docImages(doc);
   const isImported = item.kind === 'imported';
-  const attributes = (doc.attributes || {}) as Record<string, unknown>;
+  const attributes = canonicalAttributes((doc.attributes || {}) as Record<string, unknown>);
   const ecom = (doc.ecom || null) as Record<string, unknown> | null;
 
   // Wire the single-product push (previously orphaned pushApi.pushProduct).

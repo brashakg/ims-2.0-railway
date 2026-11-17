@@ -154,6 +154,13 @@ describe('the address is the state', () => {
       skip: 25,
       limit: 25,
     });
+    // UI-02 / F-1435-B (D74): every category chip is a 44px x 44px tap target.
+    const chips = Array.from(screen.getByTestId('category-chips').querySelectorAll('button'));
+    expect(chips.length).toBeGreaterThan(0);
+    for (const c of chips) {
+      expect(c.className).toMatch(/(^|\s)min-h-11(\s|$)/);
+      expect(c.className).toMatch(/min-w-\[44px\]/);
+    }
   });
 
   it('a new sort is written to the address and goes back to page 1', async () => {
@@ -710,6 +717,9 @@ describe('G1 - one row per model (owner 2026-10-18)', () => {
     expect(chips).toHaveTextContent('3 variants');
     expect(chips).toHaveTextContent('Gold (J5G) · 58');
     expect(screen.queryAllByTestId('family-member-row')).toHaveLength(0);
+    // UI-02 / F-1435-B (D74): the variant chevron is a 44px x 44px tap target.
+    expect(screen.getByTestId('family-toggle').className).toMatch(/(^|\s)h-11(\s|$)/);
+    expect(screen.getByTestId('family-toggle').className).toMatch(/(^|\s)w-11(\s|$)/);
     fireEvent.click(screen.getByTestId('family-toggle'));
     const rows = screen.getAllByTestId('family-member-row');
     expect(rows).toHaveLength(3);

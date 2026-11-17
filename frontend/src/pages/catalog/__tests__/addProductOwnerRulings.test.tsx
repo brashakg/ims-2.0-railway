@@ -163,6 +163,9 @@ const reviewRow = (label: string) => {
 };
 
 beforeEach(() => {
+  // D89(1): a new form holding typed work asks before its own doors (chip,
+  // Open it, the duplicate popup) move; here the staff member answers "leave".
+  vi.spyOn(window, 'confirm').mockReturnValue(true);
   auth.roles = ['ADMIN'];
   Element.prototype.scrollIntoView = vi.fn() as unknown as typeof Element.prototype.scrollIntoView;
   window.scrollTo = vi.fn() as unknown as typeof window.scrollTo;
