@@ -4655,3 +4655,146 @@ class TestR17D110EveryReaderAndRetryPaysTheOwedTillRows:
         assert exc.value.status_code == 409 and self._actions(audit_rows, sid) == []
         till.list_sessions(db, store_id=STORE)
         assert self._actions(audit_rows, sid) == ["till.open", "till.blind_submit"]
+
+
+class TestR17D111CloseThroughFaults:
+    """The failure classes of the earlier rounds, on the D111 close."""
+
+    def test_lost_ack_then_retries_keep_one_close_and_its_one_alert(self, db, monkeypatch):
+        """The session is really Rs 500 short on its own sheet. Its close
+        commits, the acknowledgement is lost and the read-back fails: 500.
+        The identical retry and a retry with another count answer 409 with
+        the saved close; the alert is raised once, under the session's key."""
+        _one_drawer_counted_by_a_register(db, monkeypatch)
+        _cash_sale(db, 500, f"{DATE}T12:45:00")
+        raised = _raised(monkeypatch)
+        cr = db.get_collection("cash_register_sessions")
+        fired = _lose_ack(monkeypatch, cr, "update_one", _sets_status("CLOSED"))
+        _fail_read_back(monkeypatch, cr, fired)
+        with pytest.raises(HTTPException) as exc:
+            _register(db, monkeypatch, "CR-R17-2", opened="12:30:00", closed="13:00:00",
+                      opening=3000.0, pieces=6, note="Rs 500 short")
+        assert exc.value.status_code == 500 and fired == [True] and raised == []
+        for pieces in (6, 7):
+            with pytest.raises(HTTPException) as exc:
+                _register(db, monkeypatch, "CR-R17-2", opened="12:30:00", closed="13:05:00",
+                          pieces=pieces, note="Rs 500 short", insert=False)
+            code, body = _through_the_app_handler(exc.value)
+            saved = body["detail"]["session"]
+            assert code == 409
+            assert (saved["counted"], saved["expected"], saved["variance"], saved["variance_status"]) == (
+                3000.0, 3500.0, -500.0, "SHORT")
+        assert raised == [("raise_variance_task", till.followup_task_id("variance", "CR-R17-2"))]
+        stored = [d for d in cr.docs if d["session_id"] == "CR-R17-2"]
+        assert len(stored) == 1 and stored[0]["manager_followup"]["pending"] is False
+        assert stored[0]["manager_followup"]["tasks"][0]["session_id"] == "CR-R17-2"
+
+    def test_a_failed_read_of_the_cash_since_the_count_refuses_the_close(self, db, monkeypatch):
+        """The second window read (cash since the standing count) fails: 503,
+        nothing is written anywhere, and the same close then goes through.
+        A zero there would have stored Rs 500 OVER."""
+        sid, _first = _one_drawer_counted_by_a_register(db, monkeypatch)
+        _cash_sale(db, 500, f"{DATE}T12:45:00")
+        before = dict(_till(db, sid))
+        real = finance_router.cash_drawer._cash_sales_for_window
+        calls = []
+
+        def _second_read_fails(*a, **k):
+            calls.append(a[2])
+            if len(calls) == 2:
+                raise AutoReconnect("orders read fault")
+            return real(*a, **k)
+
+        monkeypatch.setattr(finance_router.cash_drawer, "_cash_sales_for_window", _second_read_fails)
+        with pytest.raises(HTTPException) as exc:
+            _register(db, monkeypatch, "CR-R17-2", opened="12:30:00", closed="13:00:00",
+                      opening=3000.0, pieces=7)
+        assert exc.value.status_code == 503
+        # The second read is the one from the count's instant.
+        assert calls == [f"{DATE}T12:30:00", f"{DATE}T12:00:00"]
+        cr = db.get_collection("cash_register_sessions").find_one({"session_id": "CR-R17-2"})
+        assert cr["status"] == "OPEN" and _till(db, sid) == before
+        out = _register(db, monkeypatch, "CR-R17-2", opened="12:30:00", closed="13:00:00",
+                        pieces=7, insert=False)
+        assert (out["counted"], out["expected"], out["variance_status"]) == (3500.0, 3500.0, "BALANCED")
+
+
+def test_r17_first_counted_close_adds_and_d111_on_real_mongo(monkeypatch):
+    """Native PyMongo with the real till indexes, the REAL AuditRepository
+    (hash chain) and TaskRepository. The must-fix sequence with the audit
+    store down for both closes, then a third session that is really short on
+    its own sheet; the reconciliation is read as stored."""
+    from pymongo.collection import Collection
+
+    from database.repositories.audit_chain import verify_chain
+    from database.repositories.audit_repository import AuditRepository
+
+    client, real_db, name = _real_till_db()
+    try:
+        till.ensure_till_indexes(real_db)
+        tasks = _real_task_repo(monkeypatch, real_db)
+        monkeypatch.setattr(
+            "api.dependencies.get_audit_repository", lambda: AuditRepository(real_db.audit_logs))
+        ndb = _NativeDB(real_db)
+        down = [True]
+        for method in ("find_one", "insert_one"):
+            real = getattr(Collection, method)
+
+            def _fault(self, *a, _real=real, **k):
+                if down and self.database.name == name and self.name == "audit_logs":
+                    raise AutoReconnect("native audit store fault")
+                return _real(self, *a, **k)
+
+            monkeypatch.setattr(Collection, method, _fault)
+
+        # A close without a count, then the close that counts the drawer.
+        first = _register(ndb, monkeypatch, "CR-R17-1", opened="04:00:00", closed="09:00:00")
+        sid = first["till_session_id"]
+        assert (first["variance_status"], first["till_link_ok"]) == ("NOT_COUNTED", True)
+        _cash_sale(real_db, 3000, datetime(2026, 11, 4, 10, 0))
+        second = _register(ndb, monkeypatch, "CR-R17-2", opened="09:30:00", closed="12:00:00", pieces=6)
+        assert (second["till_session_id"], second["counted"]) == (sid, 3000.0)
+        assert real_db.audit_logs.count_documents({}) == 0
+        assert real_db.till_sessions.find_one({"_id": sid})["manager_followup"]["pending"] is True
+
+        # D110: the reconciliation read pays the rows; D88: the count is in the totals.
+        down.clear()
+        for _ in range(2):
+            res = _recon_summary(ndb, monkeypatch)
+        t = res["totals"]
+        assert (t["counted_cash"], t["cash_sales"], t["sessions"], t["also_counted_on_till"]) == (
+            3000.0, 3000.0, 2, 0)
+        rows = list(real_db.audit_logs.find({"entity_id": sid}).sort("seq", 1))
+        assert [r["action"] for r in rows] == ["till.open", "till.blind_submit"]
+        chain = verify_chain(real_db.audit_logs)
+        assert chain["intact"] and chain["entries_checked"] == 2, chain
+        assert real_db.till_sessions.find_one({"_id": sid})["manager_followup"]["pending"] is False
+
+        # D111: a third session opened after that count, Rs 500 short on its own sheet.
+        _counted_at(real_db, sid, "12:00:00")
+        _cash_sale(real_db, 500, datetime(2026, 11, 4, 12, 45))
+        with pytest.raises(HTTPException) as exc:
+            _register(ndb, monkeypatch, "CR-R17-3", opened="12:30:00", closed="13:00:00",
+                      opening=3000.0, pieces=6)
+        assert exc.value.status_code == 400
+        assert real_db.cash_register_sessions.find_one({"session_id": "CR-R17-3"})["status"] == "OPEN"
+        third = _register(ndb, monkeypatch, "CR-R17-3", opened="12:30:00", closed="13:00:00",
+                          pieces=6, note="Rs 500 short", insert=False)
+        assert (third["counted"], third["expected"], third["variance"], third["variance_status"]) == (
+            3000.0, 3500.0, -500.0, "SHORT")
+        assert tasks.count_documents({"source_ref": f"till_variance:{STORE}:{DATE}:CR-R17-3"}) == 1
+        assert tasks.count_documents({}) == 1
+        assert real_db.till_sessions.find_one({"_id": sid})["blind_count_paisa"] == 300000
+        # The identical retry: the saved close, no second task.
+        with pytest.raises(HTTPException) as exc:
+            _register(ndb, monkeypatch, "CR-R17-3", opened="12:30:00", closed="13:00:00",
+                      pieces=6, note="Rs 500 short", insert=False)
+        assert exc.value.status_code == 409 and tasks.count_documents({}) == 1
+        # Totals unchanged: the earliest counted close adds, the later is marked.
+        res = _recon_summary(ndb, monkeypatch)
+        t = res["totals"]
+        assert (t["counted_cash"], t["shortage"], t["also_counted_on_till"]) == (3000.0, 0, 1)
+        assert _recon_row(res, "CR-R17-3")["variance_status"] == "SHORTAGE"
+    finally:
+        client.drop_database(name)
+        client.close()
