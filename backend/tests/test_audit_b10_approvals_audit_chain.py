@@ -3407,6 +3407,27 @@ def test_r5_an_approval_given_back_keeps_both_its_audit_rows(db, monkeypatch, lo
     assert verify_chain(db.get_collection("audit_logs"))["intact"] is True
 
 
+def test_r5_an_expiry_whose_reply_was_lost_keeps_its_audit_row(db, monkeypatch):
+    """The five-minute sweep flips an overdue request to EXPIRED; the flip
+    landed and its reply was lost, so the sweep counted nothing and wrote no
+    'expired' row, and the request (no longer REQUESTED) was never swept
+    again. The flip names its row; the next read writes it once (SYSTEM)."""
+    eng = _engine(db)
+    request_id = _petty_cash_request(db)
+    db.get_collection("approval_requests").update_one(
+        {"request_id": request_id}, {"$set": {"expires_at": appr._now() - timedelta(minutes=5)}})
+    undo = _db_faults(monkeypatch, db, "approval_requests", update_one=(_sets_status("EXPIRED"), "landed"))
+    assert eng.expire_stale() == 0                              # reply lost
+    undo()
+    assert _request(db, request_id)["status"] == "EXPIRED"
+    assert _request_rows(db, request_id, "expired") == []
+    for _ in range(2):
+        assert eng.expire_stale() == 0
+        eng.get(request_id)
+        assert [r["user_id"] for r in _request_rows(db, request_id, "expired")] == ["SYSTEM"]   # was no row, for good
+    assert verify_chain(db.get_collection("audit_logs"))["intact"] is True
+
+
 def test_r5_simultaneous_reads_write_an_owed_request_row_once_on_real_mongo(mongo_db, monkeypatch):
     """Real MongoDB, six readers at once (by id, the inbox, the retry's
     already_reviewed) on a request whose 'approved' row is owed: one row,
