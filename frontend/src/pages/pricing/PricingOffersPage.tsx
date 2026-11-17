@@ -18,6 +18,7 @@ import {
   pricingApi,
   productApi,
   type BulkResponse,
+  type BulkReviewedRow,
   type BulkRowResult,
 } from '../../services/api/products';
 import { storeApi } from '../../services/api/stores';
@@ -34,6 +35,19 @@ const inr = (n: number | undefined | null): string =>
 // ----------------------------------------------------------------------------
 
 function CapChip({ row }: { row: BulkRowResult }) {
+  // D94: someone changed this row after the preview; the Apply left it alone.
+  if (row.reason === 'CHANGED_SINCE_PREVIEW' || row.reason === 'NOT_CONFIRMED') {
+    const changed = row.reason === 'CHANGED_SINCE_PREVIEW';
+    return (
+      <span
+        title={row.message || undefined}
+        className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-[11px] font-medium bg-amber-100 text-amber-800"
+      >
+        <AlertTriangle className="w-3 h-3" />
+        {changed ? 'Changed since preview: not saved' : 'Not confirmed'}
+      </span>
+    );
+  }
   if (!row.ok) {
     const luxe = row.reason === 'CAP_EXCEEDED';
     return (
@@ -230,6 +244,100 @@ function PreviewTable({ rows, kind }: { rows: BulkRowResult[]; kind: 'price' | '
 }
 
 // ----------------------------------------------------------------------------
+// Preview -> apply gate (shared by both tabs)
+// ----------------------------------------------------------------------------
+// L1-F47: Apply used to stay enabled after the scope changed, committing the
+// NEW scope against the OLD preview's count. Now the shown preview carries the
+// exact inputs it was made for (`key`); Apply is allowed only while the current
+// inputs still equal them, and a late answer for older inputs is dropped.
+// The Apply also sends the reviewed rows and their prices, so the server
+// refuses (409) a scope that grew or a price that moved since the preview, and
+// never moves a row twice. An Apply that FAILED may still have saved (a lost
+// reply), so its preview is held: Apply stays off. "Retry the same Apply"
+// re-sends exactly those reviewed rows -- the server writes the rows that did
+// not land, never moves a saved row again, and re-carries its website copy.
+// A fresh Preview instead starts a new change from the prices as they are now.
+const reviewedRowsOf = (rows: BulkRowResult[]): BulkReviewedRow[] =>
+  rows.map((r) => ({
+    product_id: r.product_id, mrp: r.old_mrp ?? r.mrp ?? 0, offer_price: r.old_offer_price, version: r.version ?? '',
+  }));
+
+function useReviewedBulk(
+  inputKey: string,
+  call: (apply: boolean, reviewed?: BulkReviewedRow[]) => Promise<BulkResponse>,
+  onApplied: (res: BulkResponse) => void,
+) {
+  const [shown, setShown] = useState<{ key: string; res: BulkResponse; applied: boolean; uncertain?: boolean } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const latest = useRef(0);
+  const inFlight = useRef(0);
+  const result = shown && shown.key === inputKey ? shown.res : null;
+  const uncertain = !!(result && shown?.uncertain);
+  // After an apply the shown table is the RESULT, not a preview: a second
+  // Apply needs a fresh Preview (no double +10 from a stray second click).
+  const canApply = !!result && !shown?.applied && result.summary.counts.valid > 0 && !busy;
+
+  const run = useCallback(async (apply: boolean, fail: (e: unknown) => void) => {
+    // Never apply inputs nobody previewed; a held (uncertain) preview may
+    // only be re-sent as it was reviewed.
+    if (apply && !canApply && !(uncertain && !busy)) return;
+    const key = inputKey;
+    const seq = ++latest.current;
+    inFlight.current += 1;
+    setBusy(true);
+    try {
+      const res = await call(apply, apply && result ? reviewedRowsOf(result.rows) : undefined);
+      if (apply) onApplied(res);
+      if (seq === latest.current) setShown({ key, res, applied: apply });
+    } catch (e) {
+      // Saved or not is unknown: hold this preview until a fresh one.
+      if (apply) setShown((s) => (s && s.key === key ? { ...s, applied: true, uncertain: true } : s));
+      if (apply || seq === latest.current) fail(e);
+    } finally {
+      inFlight.current -= 1;
+      if (inFlight.current === 0) setBusy(false);
+    }
+  }, [inputKey, call, onApplied, canApply, uncertain, busy, result]);
+
+  return { result, busy, canApply, uncertain, run };
+}
+
+function UncertainApplyNote({ show, busy, onRetry }: { show: boolean; busy: boolean; onRetry: () => void }) {
+  if (!show) return null;
+  return (
+    <div role="alert" className="mb-3 flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-[12.5px] text-amber-800">
+      <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+      <span className="flex-1">
+        The last Apply did not confirm, so it may already have saved. Retry the same Apply: rows it already
+        saved are not changed again. Pressing Preview instead starts a new change from today&apos;s prices.
+      </span>
+      <button type="button" onClick={onRetry} disabled={busy}
+        className="shrink-0 rounded border border-amber-400 bg-white px-2.5 py-1 text-[12px] font-medium text-amber-800 hover:bg-amber-100 disabled:opacity-50">
+        Retry the same Apply
+      </button>
+    </div>
+  );
+}
+
+// The hold above lives in this browser tab only. The server names rows a bulk
+// Apply moved in the last hour, so after a reload or a fresh preview a landed
+// change is still visible before it is applied a second time.
+function RecentBulkNote({ result }: { result: BulkResponse | null }) {
+  const recent = (result?.rows ?? []).map((r) => r.recent_bulk_change_at).filter((x): x is string => !!x).sort();
+  if (!result || result.summary.applied || !recent.length) return null;
+  const latest = new Date(recent[recent.length - 1]).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
+  return (
+    <div role="status" className="mb-3 flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-[12.5px] text-amber-800">
+      <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+      <span>
+        {recent.length} row{recent.length === 1 ? ' was' : 's were'} changed by a bulk Apply in the last hour (latest {latest}).
+        If an earlier Apply did not confirm, it may already be saved: check these prices before applying again.
+      </span>
+    </div>
+  );
+}
+
+// ----------------------------------------------------------------------------
 // Bulk price tab
 // ----------------------------------------------------------------------------
 
@@ -240,38 +348,33 @@ function BulkPriceTab({ categories, brands, stores }: { categories: string[]; br
   const [mode, setMode] = useState<'PERCENT' | 'FLAT'>('PERCENT');
   const [target, setTarget] = useState<'OFFER' | 'MRP' | 'BOTH'>('OFFER');
   const [amount, setAmount] = useState<number>(-5);
-  const [result, setResult] = useState<BulkResponse | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  const validCount = result?.summary.counts.valid ?? 0;
-
-  const run = useCallback(async (apply: boolean) => {
-    setBusy(true);
-    try {
-      const res = await pricingApi.bulkPrice({
-        category: scope.category || undefined,
-        brand: scope.brand || undefined,
-        store_id: scope.storeId || undefined,
-        mode,
-        target,
-        amount,
-        apply,
-        reason: apply ? `Bulk price ${mode} ${amount} to ${target} by ${user?.name || 'user'}` : undefined,
-      });
-      setResult(res);
-      if (apply) {
-        toast.success(`Applied ${res.summary.committed} price change${res.summary.committed === 1 ? '' : 's'}` +
-          (res.summary.counts.violations ? ` · ${res.summary.counts.violations} skipped (cap)` : ''));
-        if (res.summary.website_failed) {
-          toast.warning(`${res.summary.website_failed} saved for billing but not on the website yet: save those products again`);
-        }
-      }
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Bulk price operation failed');
-    } finally {
-      setBusy(false);
+  const inputKey = JSON.stringify([scope, mode, target, amount]);
+  const call = useCallback((apply: boolean, expected?: BulkReviewedRow[]) => pricingApi.bulkPrice({
+    category: scope.category || undefined,
+    brand: scope.brand || undefined,
+    store_id: scope.storeId || undefined,
+    mode,
+    target,
+    amount,
+    apply,
+    reason: apply ? `Bulk price ${mode} ${amount} to ${target} by ${user?.name || 'user'}` : undefined,
+    expected,
+  }), [scope, mode, target, amount, user]);
+  const onApplied = useCallback((res: BulkResponse) => {
+    toast.success(`Applied ${res.summary.committed} price change${res.summary.committed === 1 ? '' : 's'}` +
+      (res.summary.counts.violations ? ` · ${res.summary.counts.violations} skipped (cap)` : '') +
+      (res.summary.counts.already_applied ? ` · ${res.summary.counts.already_applied} already saved by an earlier Apply` : ''));
+    if (res.summary.counts.changed_since_preview) {
+      toast.warning(`${res.summary.counts.changed_since_preview} row(s) changed since your preview and were left alone: preview again to change them`);
     }
-  }, [scope, mode, target, amount, user, toast]);
+    if (res.summary.website_failed) {
+      toast.warning(`${res.summary.website_failed} saved for billing but not on the website yet: save those products again`);
+    }
+  }, [toast]);
+  const { result, busy, canApply, uncertain, run: gateRun } = useReviewedBulk(inputKey, call, onApplied);
+  const validCount = result?.summary.counts.valid ?? 0;
+  const run = useCallback((apply: boolean) => gateRun(apply, (e) =>
+    toast.error(e instanceof Error ? e.message : 'Bulk price operation failed')), [gateRun, toast]);
 
   // Auto-run a dry-run preview so the SKU list populates on load and stays live
   // as the scope/operation changes -- the operator shouldn't have to discover
@@ -289,6 +392,8 @@ function BulkPriceTab({ categories, brands, stores }: { categories: string[]; br
 
   return (
     <>
+      <UncertainApplyNote show={uncertain} busy={busy} onRetry={() => run(true)} />
+      <RecentBulkNote result={result} />
       <StatStrip result={result} />
 
       {/* Dark bulk-action bar (high contrast on purpose — destructive operation) */}
@@ -313,7 +418,7 @@ function BulkPriceTab({ categories, brands, stores }: { categories: string[]; br
           className="inline-flex items-center gap-1.5 border border-gray-600 text-gray-200 hover:bg-gray-800 rounded px-3.5 py-1.5 text-sm disabled:opacity-50">
           {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />} Preview
         </button>
-        <button type="button" onClick={() => run(true)} disabled={busy || !result || validCount === 0}
+        <button type="button" onClick={() => run(true)} disabled={!canApply}
           className="inline-flex items-center gap-1.5 bg-bv hover:bg-bv-600 text-white rounded px-3.5 py-1.5 text-sm font-medium disabled:opacity-40">
           Apply {validCount} valid row{validCount === 1 ? '' : 's'}
         </button>
@@ -350,38 +455,33 @@ function BulkOfferTab({ categories, brands, stores }: { categories: string[]; br
   const [valueMode, setValueMode] = useState<'PERCENT' | 'FLAT'>('PERCENT');
   const [discountPct, setDiscountPct] = useState<number>(10);
   const [flatPrice, setFlatPrice] = useState<number>(0);
-  const [result, setResult] = useState<BulkResponse | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  const validCount = result?.summary.counts.valid ?? 0;
-
-  const run = useCallback(async (apply: boolean) => {
-    setBusy(true);
-    try {
-      const res = await pricingApi.bulkOffer({
-        category: scope.category || undefined,
-        brand: scope.brand || undefined,
-        store_id: scope.storeId || undefined,
-        action,
-        discount_percent: action === 'SET' && valueMode === 'PERCENT' ? discountPct : undefined,
-        offer_price: action === 'SET' && valueMode === 'FLAT' ? flatPrice : undefined,
-        apply,
-        reason: apply ? `Bulk offer ${action} by ${user?.name || 'user'}` : undefined,
-      });
-      setResult(res);
-      if (apply) {
-        toast.success(`Applied ${res.summary.committed} offer change${res.summary.committed === 1 ? '' : 's'}` +
-          (res.summary.counts.violations ? ` · ${res.summary.counts.violations} skipped (cap)` : ''));
-        if (res.summary.website_failed) {
-          toast.warning(`${res.summary.website_failed} saved for billing but not on the website yet: save those products again`);
-        }
-      }
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Bulk offer operation failed');
-    } finally {
-      setBusy(false);
+  const inputKey = JSON.stringify([scope, action, valueMode, discountPct, flatPrice]);
+  const call = useCallback((apply: boolean, expected?: BulkReviewedRow[]) => pricingApi.bulkOffer({
+    category: scope.category || undefined,
+    brand: scope.brand || undefined,
+    store_id: scope.storeId || undefined,
+    action,
+    discount_percent: action === 'SET' && valueMode === 'PERCENT' ? discountPct : undefined,
+    offer_price: action === 'SET' && valueMode === 'FLAT' ? flatPrice : undefined,
+    apply,
+    reason: apply ? `Bulk offer ${action} by ${user?.name || 'user'}` : undefined,
+    expected,
+  }), [scope, action, valueMode, discountPct, flatPrice, user]);
+  const onApplied = useCallback((res: BulkResponse) => {
+    toast.success(`Applied ${res.summary.committed} offer change${res.summary.committed === 1 ? '' : 's'}` +
+      (res.summary.counts.violations ? ` · ${res.summary.counts.violations} skipped (cap)` : '') +
+      (res.summary.counts.already_applied ? ` · ${res.summary.counts.already_applied} already saved by an earlier Apply` : ''));
+    if (res.summary.counts.changed_since_preview) {
+      toast.warning(`${res.summary.counts.changed_since_preview} row(s) changed since your preview and were left alone: preview again to change them`);
     }
-  }, [scope, action, valueMode, discountPct, flatPrice, user, toast]);
+    if (res.summary.website_failed) {
+      toast.warning(`${res.summary.website_failed} saved for billing but not on the website yet: save those products again`);
+    }
+  }, [toast]);
+  const { result, busy, canApply, uncertain, run: gateRun } = useReviewedBulk(inputKey, call, onApplied);
+  const validCount = result?.summary.counts.valid ?? 0;
+  const run = useCallback((apply: boolean) => gateRun(apply, (e) =>
+    toast.error(e instanceof Error ? e.message : 'Bulk offer operation failed')), [gateRun, toast]);
 
   // Auto-run a dry-run preview (read-only) so the SKU list is never mysteriously
   // empty -- mirrors the price tab. Debounced; latest `run` held in a ref.
@@ -396,6 +496,8 @@ function BulkOfferTab({ categories, brands, stores }: { categories: string[]; br
 
   return (
     <>
+      <UncertainApplyNote show={uncertain} busy={busy} onRetry={() => run(true)} />
+      <RecentBulkNote result={result} />
       <StatStrip result={result} />
 
       {/* Offer builder card */}
@@ -444,7 +546,7 @@ function BulkOfferTab({ categories, brands, stores }: { categories: string[]; br
               className="inline-flex items-center gap-1.5 border border-gray-300 text-gray-600 hover:bg-gray-50 rounded-lg px-3.5 py-1.5 text-sm disabled:opacity-50">
               {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />} Preview
             </button>
-            <button type="button" onClick={() => run(true)} disabled={busy || !result || validCount === 0}
+            <button type="button" onClick={() => run(true)} disabled={!canApply}
               className="inline-flex items-center gap-1.5 bg-bv hover:bg-bv-600 text-white rounded-lg px-3.5 py-1.5 text-sm font-medium disabled:opacity-40">
               Apply {validCount} valid row{validCount === 1 ? '' : 's'}
             </button>

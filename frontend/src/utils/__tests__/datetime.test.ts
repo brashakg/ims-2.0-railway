@@ -6,6 +6,7 @@ import {
   formatTimeIST,
   IST_TZ,
 } from '../datetime';
+import { withStrictDate } from '../../test/strictDate';
 
 describe('toDate', () => {
   it('returns null for empty-ish inputs', () => {
@@ -47,6 +48,18 @@ describe('toDate', () => {
 
   it('returns null for garbage strings', () => {
     expect(toDate('hello world')).toBeNull();
+  });
+
+  it('reads a date-only value in a browser that parses only the standard format (Safari)', () => {
+    // "2026-10-25Z" is not a standard date string: Chrome reads it, Safari on
+    // iPhone/iPad does not. The same instant must come out either way.
+    expect(toDate('2026-10-25')!.toISOString()).toBe('2026-10-25T00:00:00.000Z');
+    withStrictDate(() => {
+      expect(toDate('2026-10-25')?.toISOString()).toBe('2026-10-25T00:00:00.000Z');
+      expect(toDate('2026-05-22 16:28:24')?.toISOString()).toBe('2026-05-22T16:28:24.000Z');
+      expect(toDate('2026-05-22T16:28:24.836000')?.toISOString()).toBe('2026-05-22T16:28:24.836Z');
+      expect(formatDateIST('2026-10-25')).toContain('25');
+    });
   });
 });
 
