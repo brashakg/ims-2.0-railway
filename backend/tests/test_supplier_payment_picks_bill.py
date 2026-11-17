@@ -391,6 +391,28 @@ def test_a_cut_off_apply_is_finished_and_a_rival_keeps_its_share(ap, monkeypatch
     assert _recorded(memory, adv) == (400, 2)
 
 
+def test_a_read_that_finishes_the_application_first_leaves_one_row(ap, monkeypatch):
+    """A ledger read finished the application between the door's two writes:
+    the row is insert-once (its own _id), so the door's insert is a duplicate
+    key, read back as stored -- one row, never two."""
+    memory, world = ap
+    adv = _pay(world, {"amount": 400}).json()["payment_id"]
+    real = memory.vendor_payments
+
+    class _ReaderFirst:
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+        def insert_one(self, doc, *a, **k):
+            real.insert_one(dict(doc))  # the row the read stored
+            return real.insert_one(doc, *a, **k)
+
+    monkeypatch.setattr(vendors_pkg, "_get_db", lambda: SimpleNamespace(
+        get_collection=lambda name: _ReaderFirst() if name == "vendor_payments" else memory[name]))
+    assert _apply(world, adv, "B1", 300, left=400).status_code == 200
+    assert _recorded(memory, adv) == (400, 1)
+
+
 def test_a_whole_apply_whose_reply_was_lost_says_so_and_is_applied_once(ap, monkeypatch):
     memory, world = ap
     adv = _pay(world, {"amount": 400}).json()["payment_id"]
