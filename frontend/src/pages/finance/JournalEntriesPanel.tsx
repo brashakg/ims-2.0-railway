@@ -242,6 +242,9 @@ export default function JournalEntriesPanel() {
       load();
     } catch (e: any) {
       toast.error(getErrorMessage(e, 'Reverse failed'));
+      // Show the entry as the server now sees it: a reversal whose voucher was
+      // not written is marked reversal_unfinished and keeps the button.
+      await refreshSelected(je);
     } finally {
       setActing(false);
     }
@@ -531,6 +534,21 @@ export default function JournalEntriesPanel() {
                 <button onClick={() => doReverse(selected)} disabled={acting} className="btn-secondary text-sm disabled:opacity-50">
                   Reverse this entry
                 </button>
+              )}
+
+              {/* A reversal whose voucher was never written: the same press finishes it */}
+              {selected.reversal_unfinished && (
+                <div className="space-y-3 border-t border-gray-200 pt-3">
+                  <div className="text-amber-700 bg-amber-50 border border-amber-200 rounded px-3 py-2">
+                    This entry is marked reversed, but its reversal voucher was not saved, so the books still carry it.
+                    {isChecker ? ' Press Finish the reversal to save the voucher.' : ' An admin must finish the reversal.'}
+                  </div>
+                  {isChecker && (
+                    <button onClick={() => doReverse(selected)} disabled={acting} className="btn-secondary text-sm disabled:opacity-50">
+                      Finish the reversal
+                    </button>
+                  )}
+                </div>
               )}
             </div>
           </div>

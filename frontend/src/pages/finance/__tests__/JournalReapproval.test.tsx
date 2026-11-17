@@ -22,6 +22,7 @@ vi.mock('../../../services/api/finance', () => ({
     getChartOfAccounts: vi.fn().mockResolvedValue({ accounts: [] }),
     approveJournalEntry: vi.fn().mockResolvedValue({ ok: true }),
     postJournalEntry: vi.fn(),
+    reverseJournalEntry: vi.fn(),
     getJournalEntry: vi.fn(),
   },
 }));
@@ -112,6 +113,50 @@ describe('journal re-approval (D54)', () => {
     api.postJournalEntry.mockResolvedValueOnce({ ok: true });
     fireEvent.click(await screen.findByRole('button', { name: 'Post to ledger' }));
     await waitFor(() => expect(api.postJournalEntry).toHaveBeenCalledTimes(2));
+  });
+});
+
+// PR-1411 round 4: a journal left REVERSED whose reversal voucher was never
+// written (the voucher's write failed, or the server stopped between the two
+// writes) showed no button at all, and the books carried it in full for good.
+// The server marks it `reversal_unfinished`; the checker gets "Finish the
+// reversal", which is the same Reverse call (the server writes the one voucher
+// the entry already names).
+describe('a reversal left without its voucher (round 4)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    auth.user = { id: 'u-admin', roles: ['ADMIN'] };
+  });
+
+  it('offers Finish the reversal and calls Reverse', async () => {
+    api.reverseJournalEntry.mockResolvedValue({ ok: true });
+    await open({ status: 'REVERSED', reversed_by: 'JE-9', reversal_unfinished: true });
+    expect(screen.getByText(/its reversal voucher was not saved/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Finish the reversal' }));
+    await waitFor(() => expect(api.reverseJournalEntry).toHaveBeenCalledWith('JE-1'));
+  });
+
+  it('a finished reversal shows no reverse button', async () => {
+    await open({ status: 'REVERSED', reversed_by: 'JE-9', reversal_unfinished: false });
+    expect(screen.queryByRole('button', { name: 'Finish the reversal' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Reverse this entry' })).toBeNull();
+  });
+
+  it('a Reverse that failed follows the server: the entry now offers Finish the reversal', async () => {
+    api.reverseJournalEntry.mockRejectedValueOnce({ response: { status: 503, data: { detail: { error: 'write_failed' } } } });
+    api.getJournalEntry.mockResolvedValue(entry({ status: 'REVERSED', reversed_by: 'JE-9', reversal_unfinished: true }));
+    await open({ status: 'POSTED' });
+    fireEvent.click(screen.getByRole('button', { name: 'Reverse this entry' }));
+    api.reverseJournalEntry.mockResolvedValueOnce({ ok: true });
+    fireEvent.click(await screen.findByRole('button', { name: 'Finish the reversal' }));
+    await waitFor(() => expect(api.reverseJournalEntry).toHaveBeenCalledTimes(2));
+  });
+
+  it('an accountant is told an admin must finish it', async () => {
+    auth.user = { id: 'u-acc', roles: ['ACCOUNTANT'] };
+    await open({ status: 'REVERSED', reversed_by: 'JE-9', reversal_unfinished: true });
+    expect(screen.getByText(/An admin must finish the reversal/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Finish the reversal' })).toBeNull();
   });
 });
 
