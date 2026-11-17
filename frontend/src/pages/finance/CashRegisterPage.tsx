@@ -349,10 +349,10 @@ export default function CashRegisterPage() {
                           s.till_standing_count !== s.opening_float && (
                             <span
                               data-testid="standing-count"
-                              title="This drawer was already counted when the session opened. Expected cash starts from that count, not from this float."
+                              title="This drawer was already counted by another screen or an earlier session. Expected cash starts from the latest such count (less any bank deposit recorded after it), not from this float."
                               className="ml-1 text-[10px] font-medium text-amber-700"
                             >
-                              Till count {inr(s.till_standing_count)}
+                              Earlier count {inr(s.till_standing_count)}
                             </span>
                           )}
                       </td>

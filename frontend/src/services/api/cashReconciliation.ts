@@ -97,6 +97,11 @@ export interface ReconTotals {
   sessions: number;
   // D88: rows shown but not added to the totals.
   also_counted_on_till?: number;
+  // D121: later Cash Register closes on an already counted drawer (among the
+  // rows above), and the sum of their own shortages and of their own excesses.
+  later_closes?: number;
+  later_closes_short?: number;
+  later_closes_over?: number;
   balanced: number;
   overage: number;
   shortage: number;

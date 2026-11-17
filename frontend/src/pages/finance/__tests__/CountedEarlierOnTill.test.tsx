@@ -72,11 +72,14 @@ describe('Cash Register - a session on a drawer counted earlier (D111)', () => {
     expect(screen.queryByTestId('counted-at-day-end')).toBeNull();
   });
 
-  it('says when expected cash starts from the till count, not the float typed', async () => {
+  it('says when expected cash starts from an earlier count, not the float typed', async () => {
     history(closed({ opening_float: 2000 }));
     render(<CashRegisterPage />);
     const tag = await screen.findByTestId('standing-count');
-    expect(tag.textContent).toContain('Till count');
+    // D120: the starting point can be an earlier session's sheet, so the tag
+    // no longer calls it the till's count.
+    expect(tag.textContent).toContain('Earlier count');
+    expect(tag.textContent).not.toContain('Till count');
     expect(tag.textContent).toContain('3,000');
   });
 
@@ -116,5 +119,60 @@ describe('Cash reconciliation - a session on a drawer counted earlier (D111)', (
     render(<CashReconciliationPage />);
     expect((await screen.findAllByText('Not counted')).length).toBeGreaterThanOrEqual(1);
     expect(screen.queryByText('Counted earlier today on the till')).toBeNull();
+  });
+});
+
+// D121: a later Cash Register close on an already counted drawer is never in
+// the range totals (D88). The totals block must say so in words and show
+// those closes' own differences, so a second-shift shortage cannot be missed.
+describe('Cash reconciliation - later closes named beside the totals (D121)', () => {
+  const totals = { sessions: 1, also_counted_on_till: 2, cash_sales: 3000, counted_cash: 3000 };
+  const rows = [
+    row({ session_id: 'CR-3', variance: 0, variance_status: 'BALANCED', counted_cash: 3500 }),
+    row({ session_id: 'CR-2', variance: -500, variance_status: 'SHORTAGE', expected_cash: 3500 }),
+    row({ session_id: 'CR-1', also_counted_on_till: false, variance: 0, variance_status: 'BALANCED' }),
+  ];
+  const lineText = async () =>
+    ((await screen.findByTestId('later-closes')).textContent || '').replace(/\s+/g, ' ');
+
+  it('says how many there are and their own shortage', async () => {
+    recon.summary.mockResolvedValue({
+      rows, totals: { ...totals, later_closes: 2, later_closes_short: 500, later_closes_over: 0 },
+    });
+    render(<CashReconciliationPage />);
+    const text = await lineText();
+    expect(text).toContain(
+      '2 later Cash Register close(s) on an already counted drawer are on their own rows and not in these totals; their own differences:',
+    );
+    expect(text).toMatch(/500(\.00)? short/);
+    expect(text).not.toContain('over');
+    expect(text).toContain('The totals describe each drawer at its first count of the day.');
+    expect(screen.getByTestId('later-closes').className).toContain('text-red-600');
+  });
+
+  it('keeps a shortage and an excess apart, so they cannot cancel', async () => {
+    recon.summary.mockResolvedValue({
+      rows, totals: { ...totals, later_closes: 2, later_closes_short: 500, later_closes_over: 500 },
+    });
+    render(<CashReconciliationPage />);
+    expect(await lineText()).toMatch(/500(\.00)? short and .*500(\.00)? over/);
+  });
+
+  it('says "none" when the later closes all balanced', async () => {
+    recon.summary.mockResolvedValue({
+      rows, totals: { ...totals, later_closes: 2, later_closes_short: 0, later_closes_over: 0 },
+    });
+    render(<CashReconciliationPage />);
+    expect(await lineText()).toContain('their own differences: none.');
+    expect(screen.getByTestId('later-closes').className).not.toContain('text-red-600');
+  });
+
+  it('CONTROL: a range with no such close shows no such line', async () => {
+    recon.summary.mockResolvedValue({
+      rows: [rows[2]], totals: { ...totals, also_counted_on_till: 0, later_closes: 0 },
+    });
+    render(<CashReconciliationPage />);
+    await screen.findByText(/Totals/);
+    expect(screen.queryByTestId('later-closes')).toBeNull();
   });
 });

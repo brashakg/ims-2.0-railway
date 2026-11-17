@@ -265,6 +265,15 @@ export default function CashReconciliationPage() {
     URL.revokeObjectURL(url);
   };
 
+  // D121: short and over apart, so one cannot cancel the other.
+  const laterDifferences = (t: CashReconSummary['totals']) => {
+    const parts = [
+      (t.later_closes_short ?? 0) > 0 ? `${inr(t.later_closes_short ?? 0)} short` : '',
+      (t.later_closes_over ?? 0) > 0 ? `${inr(t.later_closes_over ?? 0)} over` : '',
+    ].filter(Boolean);
+    return parts.length ? parts.join(' and ') : 'none';
+  };
+
   const netVarianceTone =
     !totals || Math.abs(totals.variance) < 0.005
       ? 'text-gray-900'
@@ -424,6 +433,19 @@ export default function CashReconciliationPage() {
                     {(totals.also_counted_on_till ?? 0) > 0 && (
                       <span className="block text-xs font-normal text-gray-500">
                         {totals.also_counted_on_till} also counted on the till, not added
+                      </span>
+                    )}
+                    {(totals.later_closes ?? 0) > 0 && (
+                      <span
+                        data-testid="later-closes"
+                        className={`block text-xs font-normal ${
+                          (totals.later_closes_short ?? 0) > 0 ? 'text-red-600' : 'text-gray-500'
+                        }`}
+                      >
+                        {totals.later_closes} later Cash Register close(s) on an already counted
+                        drawer are on their own rows and not in these totals; their own
+                        differences: {laterDifferences(totals)}. The totals describe each drawer at
+                        its first count of the day.
                       </span>
                     )}
                   </td>
