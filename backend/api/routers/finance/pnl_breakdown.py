@@ -10,6 +10,7 @@ from fastapi import Depends, HTTPException
 from ..auth import get_current_user
 from ...dependencies import resolve_store_scope
 from ...services import product_cost
+from ...utils.expense_status import COMMITTED_EXPENSE_STATUS_MATCH
 from ...services.cost_mask import mask_cost
 from ...services.salary_visibility import SALARY_RESTRICTED_MESSAGE, is_salary_admin
 from ._shared import (
@@ -22,9 +23,11 @@ from ._shared import (
     _store_maps,
     _store_name_map,
     compute_cogs_with_flag,
+    customer_return_adjustments,
     is_period_locked,
     pnl_by_category,
     router,
+    services_bill_costs,
 )
 from .pnl import COST_ONLY_PNL_FIELDS
 from ...services.margin_basis import order_revenue_ex_gst
@@ -93,12 +96,17 @@ async def get_pnl_by_store(
         db, "store_id", store_ids=store_ids, from_day=from_date, to_day=to_date
     ).items():
         cogs_by_store[sid] = cogs_by_store.get(sid, 0) + v
+    # Completed customer returns, dated by the return (RUN-04): the same
+    # reader /pnl uses, so the store rows add up to the statement.
+    for sid, r in customer_return_adjustments(db, cost_map, store_ids, from_date, to_date).items():
+        rev_by_store[sid] = rev_by_store.get(sid, 0) - r["taxable"]
+        cogs_by_store[sid] = cogs_by_store.get(sid, 0) - r["cogs_reversal"]
 
     # Expenses are dated on `expense_date` (ISO 'YYYY-MM-DD' string), not
     # `date`; the old field name silently dropped every expense for any
     # date-ranged P&L. from_date / to_date are 'YYYY-MM-DD' strings -> the
     # string comparison is consistent.
-    exp_match: dict = {"status": {"$in": ["APPROVED", "PAID", "approved", "paid"]}}
+    exp_match: dict = {"status": {"$in": COMMITTED_EXPENSE_STATUS_MATCH}}
     if store_ids is not None:
         exp_match["store_id"] = {"$in": store_ids}
     if from_date:
@@ -114,6 +122,9 @@ async def get_pnl_by_store(
         )
     )
     exp_by_store = {e["_id"]: e["amt"] for e in exp}
+    # Supplier SERVICES bills (L3-04), the reader /pnl uses.
+    for row in services_bill_costs(db, store_ids, from_date, to_date):
+        exp_by_store[row["store_id"]] = exp_by_store.get(row["store_id"], 0) + row["amount"]
 
     pay_by_store = _payroll_by_store(db, from_date, to_date)
 
@@ -180,8 +191,12 @@ async def get_pnl_by_category(
     _apply_created_at_range(match, from_date, to_date)
 
     orders = list(db.get_collection("orders").find(match, {"_id": 0, "items": 1}))
-    cats = pnl_by_category(orders, _cost_by_product(db), product_cost.variance_by(
-        db, "item_type", store_ids=store_ids, from_day=from_date, to_day=to_date))
+    cost_map = _cost_by_product(db)
+    # Completed customer returns (RUN-04): the reader GET /pnl uses, keyed by
+    # the sale line's category, so the categories add up to the statement.
+    cats = pnl_by_category(orders, cost_map, product_cost.variance_by(
+        db, "item_type", store_ids=store_ids, from_day=from_date, to_day=to_date),
+        customer_return_adjustments(db, cost_map, store_ids, from_date, to_date, by="category"))
     # COGS and gross profit are worked out from product cost: the accounts
     # roles' only, as on GET /pnl and /reports/profit/by-category (owner ruling
     # 2026-10-12). The managers keep the revenue.

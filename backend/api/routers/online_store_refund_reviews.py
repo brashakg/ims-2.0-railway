@@ -352,9 +352,20 @@ async def confirm_refund_review(
     if not posted:
         # The post could not issue the credit note (e.g. no customer / ledger
         # error). Surface it so the accountant retries after fixing the cause.
+        from ..services.shopify_refund import CLAIM_UNREADABLE, HELD_BY_IMPORT, NOT_CLAIMED
+
         raise HTTPException(
             status_code=422,
             detail=(
+                # Decision D103(1): the order-history import holds this refund
+                # and has not finished it -- say so, never a bare "duplicate".
+                f"{result.get('store_credit_reason')} The row stays open: confirm it again after that."
+                if result.get("reason") == HELD_BY_IMPORT else
+                # Decisions D118 / D125: the refund's claim could not be read,
+                # or could not be saved -- say so (nothing was booked), never
+                # "duplicate".
+                f"{result.get('store_credit_reason')} The row stays open: confirm it again."
+                if result.get("reason") in (CLAIM_UNREADABLE, NOT_CLAIMED) else
                 "Credit note could not be issued for this refund "
                 f"({post_status or 'error'}). The row stays open for retry."
             ),
