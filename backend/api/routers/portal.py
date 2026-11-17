@@ -47,6 +47,13 @@ import jwt
 from fastapi import APIRouter, HTTPException, Path, Request
 from pydantic import BaseModel, Field
 
+from ..services.rx_patient import rx_patient_identity
+from ..services.rx_print_values import (
+    rx_binocular_pd,
+    rx_date_ymd,
+    rx_issue_date_value,
+)
+
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
@@ -738,7 +745,9 @@ def _first_recorded(*values: Any) -> Any:
     return None
 
 
-def _safe_prescription_view(rx: Dict[str, Any]) -> Dict[str, Any]:
+def _safe_prescription_view(
+    rx: Dict[str, Any], customer: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
     """Project a prescription to the read-only fields a customer should see.
     Keeps clinical values (SPH/CYL/AXIS/ADD) -- those ARE the customer's own
     data -- but drops internal optometrist IDs / audit columns.
@@ -748,17 +757,29 @@ def _safe_prescription_view(rx: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "prescription_id": rx.get("prescription_id") or rx.get("id"),
         "prescription_number": rx.get("prescription_number"),
-        "prescription_date": rx.get("prescription_date"),
+        # L2-CLIN-F03: the shared reader rule (services/rx_print_values) -- a
+        # clinical exam's Rx records its date as `test_date` and its binocular
+        # PD as `ipd`, so reading one spelling each showed the patient
+        # "Issued -" and no PD for an exam that recorded both.
+        # Round 1: projected as the IST CALENDAR DAY ('YYYY-MM-DD'), never the
+        # raw stored instant -- the page formatted '2026-11-13T20:30:00+00:00'
+        # in the VIEWER's timezone, so one exam read 14 Nov in India and
+        # 13 Nov in New York. None when no issue date was recorded.
+        "prescription_date": rx_date_ymd(rx_issue_date_value(rx)) or None,
+        # D71: one account holds the whole family's prescriptions; every card
+        # names the member examined (shared rule, services.rx_patient -- never
+        # the holder's name for a dependent; None when nobody can be named).
+        "patient_name": rx_patient_identity(rx, customer).get("name"),
         "expiry_date": rx.get("expiry_date"),
         "type": rx.get("type") or rx.get("prescription_type"),
         "right_eye": _safe_eye_view(rx.get("right_eye") or rx.get("od")),
         "left_eye": _safe_eye_view(rx.get("left_eye") or rx.get("os")),
-        "pd": rx.get("pd") or rx.get("pupillary_distance"),
+        "pd": rx_binocular_pd(rx),
         # PATIENT SAFETY: `or` is a truthiness test, and a recorded ADD of 0 is
         # falsy -- so a patient whose prescription says "no reading addition"
         # had that finding silently dropped and read a blank on their own Rx
-        # page. A 0 is a RECORDED value here (unlike `pd`, where 0mm is
-        # anatomically impossible, so the `or` above is safe). Fall through to
+        # page. A 0 is a RECORDED value here (`pd` above goes through the shared
+        # present-value rule too). Fall through to
         # the alias only when the canonical key holds nothing at all.
         "add_power": _first_recorded(rx.get("add_power"), rx.get("add")),
         "notes": rx.get("remarks") or rx.get("notes"),
@@ -796,22 +817,30 @@ async def get_my_prescriptions(request: Request):
         logger.warning("[PORTAL] prescription repo unavailable: %s", exc)
         rx_repo = None
 
+    # A missing store is NOT "you have no prescriptions": answer 503 so the
+    # patient sees "try again", never a false empty list.
     if rx_repo is None:
-        return {"customer_id": customer_id, "prescriptions": [], "count": 0}
+        raise HTTPException(
+            status_code=503, detail="Prescriptions are temporarily unavailable"
+        )
 
-    rows = rx_repo.find_by_customer(customer_id) or []
-    prescriptions = [_safe_prescription_view(r) for r in rows]
+    # PR-1430 review 2: the repositories' own reads swallow a native read
+    # error into [] / None (a false empty list, unnamed cards). Strict reads:
+    # any failure is 503 "try again". The account gives the greeting and each
+    # card's member name (D71).
+    from ..services.rx_patient import read_by_id_strict, read_rx_for_customer_strict
 
-    # Customer display name (first name) for the greeting -- fail-soft.
-    first_name = None
+    _down = "Prescriptions are temporarily unavailable"
+    rows = read_rx_for_customer_strict(rx_repo, customer_id, _down)
     try:
         cust_repo = get_customer_repository()
-        if cust_repo is not None:
-            cust = cust_repo.find_by_id(customer_id)
-            if cust:
-                first_name = (cust.get("name") or "").strip().split(" ")[0] or None
     except Exception:  # noqa: BLE001
-        pass
+        cust_repo = None
+    cust = read_by_id_strict(cust_repo, customer_id, _down)
+    first_name = (
+        ((cust or {}).get("name") or "").strip().split(" ")[0] or None
+    )
+    prescriptions = [_safe_prescription_view(r, cust) for r in rows]
 
     return {
         "customer_id": customer_id,

@@ -11,7 +11,6 @@ from fastapi import HTTPException, Depends, Path
 from fastapi.responses import HTMLResponse
 from typing import Optional
 from datetime import datetime
-from ...utils.ist import ist_date_str
 from html import escape as _html_escape
 import uuid
 from ..auth import require_roles
@@ -21,11 +20,16 @@ from ...dependencies import (
     get_store_repository,
 )
 from ...services.rx_print_values import (
-    first_present_rx_value,
     is_absent_rx_value,
     format_axis_value,
     format_rx_value,
+    rx_binocular_pd,
+    RX_DATE_NOT_RECORDED,
+    rx_date_ymd,
+    rx_issue_date_value,
+    rx_text_or,
 )
+from ...services.rx_patient import load_rx_patient, read_by_id_strict, rx_patient_identity
 from ._shared import _REDO_ROLES, require_rx_read, router
 from .models import RedoCreate
 
@@ -53,43 +57,33 @@ def _eye_block(rx: dict, key: str) -> dict:
 
 
 def _rx_date(rx: dict) -> str:
-    """Best-effort human date for the Rx (prescription_date / test_date / created_at).
+    """The recorded issue date printed on the Rx card, as its IST calendar day.
 
-    BUG-104, VALUE rule, on the legacy created_at fallback leg: this date is
-    PRINTED on the patient's Rx card. prescription_date / test_date are IST
-    business-date strings (frame-less -- their parse lands on midnight, which
-    the +5:30 shift leaves on the same day). created_at is a stored instant
-    on the UTC wall clock (BSON datetime, or an aware 'Z' string on imported
-    rows), so formatting it raw printed YESTERDAY's date on a card for an eye
-    test recorded 00:00-05:30 IST. ist_date_str shifts datetimes to the IST
-    calendar day; a NAIVE ISO string still passes through unshifted by
-    documented design (no reliable frame), matching the old behaviour.
+    The SHARED rule (services.rx_print_values): prescription_date, else the
+    exam's test_date, shifted onto the IST day when stored as an instant
+    (BUG-104). L2-CLIN-F02 round 1: this door used to fall back to created_at
+    -- when the ROW was written, not a date a clinician recorded -- so an
+    undated legacy Rx printed '01 Nov 2026' here while the canonical print and
+    the portal showed no date. Unknown stays unknown, on every door.
     """
-    raw = rx.get("prescription_date") or rx.get("test_date") or rx.get("created_at")
-    if raw is None:
-        return ""
-    if isinstance(raw, datetime):
-        return datetime.strptime(ist_date_str(raw), "%Y-%m-%d").strftime("%d %b %Y")
-    if isinstance(raw, str):
-        # ISO strings -> dd Mon YYYY; fall back to the raw string on parse fail.
-        try:
-            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-            if parsed.tzinfo is not None:
-                # An offset-bearing string has an exact frame: use it.
-                return datetime.strptime(
-                    ist_date_str(parsed), "%Y-%m-%d"
-                ).strftime("%d %b %Y")
-            return parsed.strftime("%d %b %Y")
-        except ValueError:
-            return raw[:10]
-    return str(raw)
+    ymd = rx_date_ymd(rx_issue_date_value(rx))
+    if not ymd:
+        return RX_DATE_NOT_RECORDED
+    try:
+        return datetime.strptime(ymd, "%Y-%m-%d").strftime("%d %b %Y")
+    except ValueError:
+        return ymd
 
 
-def _build_rx_card_html(rx: dict, store: Optional[dict]) -> str:
+def _build_rx_card_html(
+    rx: dict, store: Optional[dict], patient: Optional[dict] = None
+) -> str:
     """Build a self-contained, printable A5 Rx card (no external assets).
 
-    PURE-ish: depends only on its two dict args, so it renders deterministically
-    for a given prescription + store. All dynamic text is HTML-escaped.
+    PURE-ish: depends only on its dict args, so it renders deterministically
+    for a given prescription + store + resolved patient. All dynamic text is
+    HTML-escaped. `patient` is services.rx_patient's identity (the route loads
+    the account); without it only the Rx's embedded fields are used.
     """
     store = store or {}
 
@@ -112,14 +106,13 @@ def _build_rx_card_html(rx: dict, store: Optional[dict]) -> str:
     clinic_phone = store.get("phone") or store.get("contact_number") or ""
     clinic_gstin = store.get("gstin") or ""
 
-    patient_name = (
-        rx.get("patient_name")
-        or rx.get("patientName")
-        or rx.get("customer_name")
-        or "Patient"
-    )
+    # L2-CLIN-F02: the examined person (dependent or holder) from ONE shared
+    # rule -- never a generic "Patient", never the holder for a dependent.
+    if patient is None:
+        patient = rx_patient_identity(rx, None)
+    patient_name = rx_text_or(patient.get("name"), "Not recorded")
     age = rx.get("patient_age", rx.get("age"))
-    phone = rx.get("customer_phone") or rx.get("patient_phone") or rx.get("phone")
+    phone = patient.get("phone")
     optometrist = rx.get("optometrist_name") or rx.get("optometristName") or ""
     rx_number = rx.get("prescription_number") or rx.get("prescription_id") or ""
     rx_date = _rx_date(rx)
@@ -127,19 +120,15 @@ def _build_rx_card_html(rx: dict, store: Optional[dict]) -> str:
     od = _eye_block(rx, "right_eye")
     os_ = _eye_block(rx, "left_eye")
 
-    # PD: prefer a top-level pd, else fall back to per-eye pd values.
-    #
-    # This block used to read `if pd in (None, "", 0)` then `od.get("pd") or
-    # os_.get("pd")`, which failed three ways on a patient's card:
-    #   * a stored junk string ("None") is truthy, so it won the `or` and the
-    #     card printed "PD: None mm";
-    #   * a REAL top-level PD of 0 was in the discard tuple and was thrown away;
-    #   * `or` between the eyes swallowed a REAL right-eye 0 and silently
-    #     printed the LEFT eye's number in its place.
-    # `first_present_rx_value` keeps the same preference order while treating
-    # only genuinely-absent values as absent. A PD of 0 is real clinical data.
-    pd = first_present_rx_value(rx.get("pd"), od.get("pd"), os_.get("pd"))
-    pd_str = "" if is_absent_rx_value(pd) else str(pd)
+    # L2-CLIN-F02: the per-eye MONOCULAR PDs and the BINOCULAR IPD are
+    # different measurements and print separately. This card used to collapse
+    # them into one "PD" (top-level pd, else right-eye pd, else left-eye pd), so
+    # an Rx with OD 31 / OS 32.5 / IPD 63.5 printed "PD: 31 mm" -- one eye's
+    # number as if it were the whole -- and the clinical exam's `ipd` was never
+    # read at all. A missing value stays missing (a dash in its own cell); it is
+    # never filled from the other measurement. A recorded 0 is still printed.
+    ipd = rx_binocular_pd(rx)
+    pd_str = "" if is_absent_rx_value(ipd) else str(ipd)
 
     def row(label: str, eye: dict) -> str:
         return (
@@ -149,6 +138,7 @@ def _build_rx_card_html(rx: dict, store: Optional[dict]) -> str:
             f"<td>{esc(format_rx_value(eye['cyl']))}</td>"
             f"<td>{esc(format_axis_value(eye['axis']))}</td>"
             f"<td>{esc(format_rx_value(eye['add']))}</td>"
+            f"<td>{esc(rx_text_or(eye['pd']))}</td>"
             "</tr>"
         )
 
@@ -160,7 +150,9 @@ def _build_rx_card_html(rx: dict, store: Optional[dict]) -> str:
     # `if pd_str` would be a truthiness test again; "0" is truthy so it happens
     # to work, but the explicit form is the one that stays correct.
     pd_html = (
-        f"<div class='pd'><b>PD:</b> {esc(pd_str)} mm</div>" if pd_str != "" else ""
+        f"<div class='pd'><b>IPD (binocular):</b> {esc(pd_str)} mm</div>"
+        if pd_str != ""
+        else ""
     )
     gstin_html = (
         f"<div class='clinic-gstin'>GSTIN: {esc(clinic_gstin)}</div>"
@@ -248,7 +240,7 @@ def _build_rx_card_html(rx: dict, store: Optional[dict]) -> str:
     </div>
     <table class="rx">
       <thead>
-        <tr><th>Eye</th><th>SPH</th><th>CYL</th><th>AXIS</th><th>ADD</th></tr>
+        <tr><th>Eye</th><th>SPH</th><th>CYL</th><th>AXIS</th><th>ADD</th><th>PD (mono)</th></tr>
       </thead>
       <tbody>
         {row("Right (OD)", od)}
@@ -276,19 +268,20 @@ async def print_prescription(
     """Return a self-contained, printable A5 Rx card (read-only).
 
     Same gate as GET /prescriptions/{id} (audit L2-CLIN-F01): the clinical
-    read roles, and the Rx's own store (404 cross-store). Fail-soft: if the DB is
-    unavailable we still return a minimal valid card rather than 500-ing, so a
-    degraded backend never blocks a counter staffer from handing a patient a
-    printout.
+    read roles, and the Rx's own store (404 cross-store). With the DB
+    unavailable it answers 503 (never a blank card presented as an Rx).
     """
     rx_repo = get_prescription_repository()
     if rx_repo is None:
-        # DB down: render an empty-but-valid card so the print window opens.
-        return HTMLResponse(
-            _build_rx_card_html({"prescription_id": prescription_id}, None)
+        # PR-1430 round 1: this used to print an EMPTY card with a 200 -- a
+        # blank prescription a patient could be handed as if it were theirs.
+        # A missing store is "try again", never a printed Rx.
+        raise HTTPException(
+            status_code=503, detail="Prescription is temporarily unavailable"
         )
 
-    rx = rx_repo.find_by_id(prescription_id)
+    # A failed read is 503, never a false "Prescription not found" (PR-1430 r2).
+    rx = read_by_id_strict(rx_repo, prescription_id)
     # BUG-088 / L2-CLIN-F01: store-scope the Rx (404 hides existence cross-store).
     if not rx or not can_access_store_scoped(rx.get("store_id"), current_user):
         raise HTTPException(status_code=404, detail="Prescription not found")
@@ -302,7 +295,7 @@ async def print_prescription(
         except Exception:
             store = None  # Header is optional; never block the printout.
 
-    return HTMLResponse(_build_rx_card_html(rx, store))
+    return HTMLResponse(_build_rx_card_html(rx, store, load_rx_patient(rx)))
 
 
 @router.post("/prescriptions/{prescription_id}/redo")

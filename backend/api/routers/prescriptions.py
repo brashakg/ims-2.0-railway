@@ -13,7 +13,7 @@ from typing import Optional
 from typing_extensions import Literal
 from datetime import date, datetime, timedelta
 
-from ..utils.ist import now_ist_naive
+from ..utils.ist import IST, now_ist_naive
 import uuid
 
 from .auth import get_current_user
@@ -21,8 +21,17 @@ from ..services.rx_print_values import (
     format_rx_value,
     is_absent_rx_value,
     rx_axis_or,
+    rx_binocular_pd,
+    RX_DATE_NOT_RECORDED,
+    rx_date_ymd,
+    rx_issue_date_value,
     rx_power_or,
     rx_text_or,
+)
+from ..services.rx_patient import (
+    load_rx_patient,
+    read_by_id_strict,
+    read_rx_for_customer_strict,
 )
 from ..dependencies import (
     get_prescription_repository,
@@ -1113,6 +1122,22 @@ def _rx_validity(rx: dict):
         raw = rx.get("created_at") or rx.get("createdAt")
         from_stored_instant = True
     td = _parse_dt(raw)
+    # L2-CLIN-F02 round 1: a date stored WITH an offset (the clinical exam's
+    # test_date '...+00:00' without a fraction, or an aware created_at) parsed
+    # to an AWARE datetime, and comparing it with the naive IST clock below
+    # raised TypeError -- one such row 500'd the whole family history. An
+    # offset-bearing value is an instant: move it onto the IST wall clock.
+    # (_parse_dt drops the offset of a fractional-second string; re-read it.)
+    if isinstance(raw, str):
+        try:
+            aware = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+            if aware.tzinfo is not None:
+                td = aware
+        except ValueError:
+            pass
+    if td is not None and td.tzinfo is not None:
+        td = td.astimezone(IST).replace(tzinfo=None)
+        from_stored_instant = False  # already on the IST wall clock
     months = rx.get("validity_months") or rx.get("validityMonths") or 12
     try:
         months = int(months)
@@ -1148,17 +1173,17 @@ async def family_prescriptions(
     under an 'Unlinked patient' group (legacy/imported data)."""
     repo = get_prescription_repository()
     customer_repo = get_customer_repository()
-    if repo is None:
-        return {
-            "customer_id": customer_id,
-            "members": [],
-            "member_count": 0,
-            "total_prescriptions": 0,
-        }
+    # A missing store is not "this family has no prescriptions" (nor "no such
+    # customer"): 503, never a false empty history or a false 404.
+    if repo is None or customer_repo is None:
+        raise HTTPException(
+            status_code=503, detail="Prescription history is temporarily unavailable"
+        )
 
-    customer = (
-        customer_repo.find_by_id(customer_id) if customer_repo is not None else None
-    )
+    # PR-1430 review 2: the repositories' own reads swallow a native read
+    # error into None / [] -- a false 404 or a false empty history. Strict.
+    _down = "Prescription history is temporarily unavailable"
+    customer = read_by_id_strict(customer_repo, customer_id, _down)
     if customer is None:
         raise HTTPException(status_code=404, detail="Customer not found")
     # BUG-062 tail: the Rx below are store-filtered, but the customer ROSTER
@@ -1179,7 +1204,9 @@ async def family_prescriptions(
 
     # BUG-088: scope the household Rx view to stores the caller may access so a
     # single-store user can't pull another store's family clinical PII by id.
-    all_rx = filter_docs_by_store(repo.find_by_customer(customer_id) or [], current_user)
+    all_rx = filter_docs_by_store(
+        read_rx_for_customer_strict(repo, customer_id, _down), current_user
+    )
     by_patient: dict = {}
     for rx in all_rx:
         by_patient.setdefault(rx.get("patient_id"), []).append(rx)
@@ -1880,12 +1907,43 @@ def _text(value, fallback: str = "-") -> str:
     return rx_text_or(value, fallback)
 
 
-def _build_spectacle_print_html(prescription: dict, identity_html: str = "") -> str:
+def _rx_card_date(prescription: dict) -> str:
+    """The recorded issue date (shared rule: prescription_date, else the
+    clinical exam's test_date), YYYY-MM-DD. A clinical exam Rx carries only
+    test_date, so reading prescription_date alone printed a blank date."""
+    return rx_date_ymd(rx_issue_date_value(prescription)) or RX_DATE_NOT_RECORDED
+
+
+def _patient_line_html(patient: Optional[dict]) -> str:
+    """L2-CLIN-F02: name the person examined (shared rule, services.rx_patient)
+    on the card. Escaped -- the name is free text typed at the counter."""
+    from html import escape
+
+    patient = patient or {}
+    name = escape(_text(patient.get("name"), "Not recorded"))
+    phone = patient.get("phone")
+    phone_html = (
+        "" if _is_absent_rx_value(phone) else f" &nbsp; <strong>Phone:</strong> {escape(str(phone))}"
+    )
+    return f"<p><strong>Patient:</strong> {name}{phone_html}</p>"
+
+
+def _build_spectacle_print_html(
+    prescription: dict, identity_html: str = "", patient: Optional[dict] = None
+) -> str:
     """Spectacle Rx card. `identity_html` is the issuing store/entity supplier
     block (legal name, address, GSTIN, NCAHP/DMC reg, logo) prepended above the
     Rx so a customer-facing prescription always shows WHO issued it."""
     right = prescription.get("right_eye", {}) or {}
     left = prescription.get("left_eye", {}) or {}
+    # The PD column is each eye's MONOCULAR PD; the binocular IPD is its own
+    # line and is never copied into an eye's cell (L2-CLIN-F02).
+    ipd = rx_binocular_pd(prescription)
+    ipd_html = (
+        ""
+        if _is_absent_rx_value(ipd)
+        else f"<p><strong>IPD (binocular):</strong> {_text(ipd)} mm</p>"
+    )
     return f"""
         <!DOCTYPE html>
         <html>
@@ -1898,11 +1956,12 @@ def _build_spectacle_print_html(prescription: dict, identity_html: str = "") -> 
             <div class="header">
                 <h2>Eye Prescription</h2>
                 <p class="rx-number">{_text(prescription.get('prescription_number'), '')}</p>
-                <p>Date: {prescription.get('prescription_date', '')[:10]}</p>
+                <p>Date: {_rx_card_date(prescription)}</p>
             </div>
+            {_patient_line_html(patient)}
             <table>
                 <tr>
-                    <th></th><th>SPH</th><th>CYL</th><th>AXIS</th><th>ADD</th><th>PD</th>
+                    <th></th><th>SPH</th><th>CYL</th><th>AXIS</th><th>ADD</th><th>PD (mono)</th>
                 </tr>
                 <tr>
                     <td><strong>RE</strong></td>
@@ -1921,6 +1980,7 @@ def _build_spectacle_print_html(prescription: dict, identity_html: str = "") -> 
                     <td>{_cell(left.get('pd'))}</td>
                 </tr>
             </table>
+            {ipd_html}
             <p><strong>Lens Recommendation:</strong> {_text(prescription.get('lens_recommendation'), 'N/A')}</p>
             <p><strong>Coating:</strong> {_text(prescription.get('coating_recommendation'), 'N/A')}</p>
             <p><strong>Remarks:</strong> {_text(prescription.get('remarks'))}</p>
@@ -1932,7 +1992,9 @@ def _build_spectacle_print_html(prescription: dict, identity_html: str = "") -> 
         """
 
 
-def _build_cl_print_html(prescription: dict, identity_html: str = "") -> str:
+def _build_cl_print_html(
+    prescription: dict, identity_html: str = "", patient: Optional[dict] = None
+) -> str:
     """Contact-lens Rx card: brand/series/modality header + per-eye
     power/CYL/AXIS/ADD/BC/DIA (no PD -- a CL is fit by base-curve+diameter).
     `identity_html` prepends the issuing store/entity supplier block."""
@@ -1958,8 +2020,9 @@ def _build_cl_print_html(prescription: dict, identity_html: str = "") -> str:
             <div class="header">
                 <h2>Contact Lens Prescription</h2>
                 <p class="rx-number">{_text(prescription.get('prescription_number'), '')}</p>
-                <p>Date: {prescription.get('prescription_date', '')[:10]}</p>
+                <p>Date: {_rx_card_date(prescription)}</p>
             </div>
+            {_patient_line_html(patient)}
             <p><strong>Brand:</strong> {brand} &nbsp; <strong>Series:</strong> {series}
                &nbsp; <strong>Modality:</strong> {modality}</p>
             {color_row}
@@ -2038,7 +2101,8 @@ async def print_prescription(
     repo = get_prescription_repository()
 
     if repo is not None:
-        prescription = repo.find_by_id(prescription_id)
+        # A failed read is 503, never a false 404 (PR-1430 review 2).
+        prescription = read_by_id_strict(repo, prescription_id)
         # BUG-088: store-scope the clinical Rx read (404 hides existence cross-store).
         if prescription is None or not can_access_store_scoped(
             prescription.get("store_id"), current_user
@@ -2046,17 +2110,22 @@ async def print_prescription(
             raise HTTPException(status_code=404, detail="Prescription not found")
 
         identity_html = _rx_identity_html(prescription)
+        patient = load_rx_patient(prescription)
         if (prescription.get("rx_kind") or "SPECTACLE") == "CONTACT_LENS":
-            html = _build_cl_print_html(prescription, identity_html)
+            html = _build_cl_print_html(prescription, identity_html, patient)
         else:
-            html = _build_spectacle_print_html(prescription, identity_html)
+            html = _build_spectacle_print_html(prescription, identity_html, patient)
 
         return {
             "html": html,
             "prescription_number": prescription.get("prescription_number"),
         }
 
-    return {"html": "<html><body>Prescription not found</body></html>"}
+    # PR-1430 round 1: a missing store answered 200 "Prescription not found",
+    # a false not-found for an Rx that may well exist. 503 = try again.
+    raise HTTPException(
+        status_code=503, detail="Prescription is temporarily unavailable"
+    )
 
 
 # ============================================================================

@@ -219,44 +219,63 @@ def _rx_card_pd(rx: dict) -> str:
     return match.group(0) if match else ""
 
 
+def _rx_card_eye_pds(rx: dict) -> tuple:
+    """The per-eye MONOCULAR PD cells (last column) of the clinical card."""
+    html = _build_rx_card_html(rx, None)
+    cells = []
+    for label in ("Right (OD)", "Left (OS)"):
+        start = html.index(f"<td class='eye'>{label}</td>")
+        end = html.index("</tr>", start)
+        cells.append(re.findall(r"<td>(.*?)</td>", html[start:end])[-1])
+    return tuple(cells)
+
+
+# L2-CLIN-F02 changed this card's PD layout: each eye's MONOCULAR PD is its own
+# column and the BINOCULAR IPD is its own line. The rules these tests pinned --
+# never print junk, keep a real 0, a junk value never masks a real one -- hold
+# for both, and no value is ever borrowed from the other measurement.
+
+
 def test_second_card_never_prints_pd_none_mm():
     """The live document shape: per-eye pd is the string "None"."""
-    pd_block = _rx_card_pd({"right_eye": {"pd": "None"}, "left_eye": {"pd": "None"}})
-    assert "None" not in pd_block
-    # Nothing real to show, so the PD line is omitted entirely.
-    assert pd_block == ""
+    rx = {"right_eye": {"pd": "None"}, "left_eye": {"pd": "None"}}
+    assert _rx_card_pd(rx) == ""
+    assert _rx_card_eye_pds(rx) == ("-", "-")
+    assert "None" not in _build_rx_card_html(rx, None)
 
 
 def test_second_card_keeps_a_real_top_level_pd_of_zero():
     """`if pd in (None, "", 0)` discarded a REAL 0 and then fell through to junk."""
     assert _rx_card_pd({"pd": 0, "right_eye": {"pd": "None"}, "left_eye": {"pd": "None"}}) == (
-        "<div class='pd'><b>PD:</b> 0 mm</div>"
+        "<div class='pd'><b>IPD (binocular):</b> 0 mm</div>"
     )
 
 
-def test_second_card_does_not_let_the_left_eye_override_a_real_right_zero():
-    """`od.get("pd") or os_.get("pd")` -- `or` swallowed a real right-eye 0."""
-    assert _rx_card_pd({"right_eye": {"pd": 0}, "left_eye": {"pd": 64}}) == (
-        "<div class='pd'><b>PD:</b> 0 mm</div>"
-    )
+def test_second_card_keeps_each_eye_own_pd_including_a_real_zero():
+    """`od.get("pd") or os_.get("pd")` swallowed a real right-eye 0; the single
+    merged PD then dropped one eye entirely. Each eye now keeps its own."""
+    rx = {"right_eye": {"pd": 0}, "left_eye": {"pd": 64}}
+    assert _rx_card_eye_pds(rx) == ("0", "64")
+    # No binocular value was recorded, so none is invented from the eyes.
+    assert _rx_card_pd(rx) == ""
 
 
 def test_second_card_control_a_real_pd_still_prints():
     assert _rx_card_pd({"pd": 62, "right_eye": {}, "left_eye": {}}) == (
-        "<div class='pd'><b>PD:</b> 62 mm</div>"
+        "<div class='pd'><b>IPD (binocular):</b> 62 mm</div>"
     )
 
 
 @pytest.mark.parametrize("junk", ["None", "null", "undefined", "NaN", "   ", ""])
 def test_second_card_treats_every_junk_token_as_absent(junk):
-    assert _rx_card_pd({"right_eye": {"pd": junk}, "left_eye": {"pd": junk}}) == ""
+    rx = {"right_eye": {"pd": junk}, "left_eye": {"pd": junk}, "ipd": junk}
+    assert _rx_card_pd(rx) == ""
+    assert _rx_card_eye_pds(rx) == ("-", "-")
 
 
-def test_second_card_falls_through_junk_to_the_other_eye():
-    """A junk right-eye PD must not mask a REAL left-eye PD."""
-    assert _rx_card_pd({"right_eye": {"pd": "None"}, "left_eye": {"pd": 64}}) == (
-        "<div class='pd'><b>PD:</b> 64 mm</div>"
-    )
+def test_second_card_junk_eye_does_not_mask_the_other_eye():
+    """A junk right-eye PD must not hide a REAL left-eye PD."""
+    assert _rx_card_eye_pds({"right_eye": {"pd": "None"}, "left_eye": {"pd": 64}}) == ("-", "64")
 
 
 # --------------------------------------------------------------------------

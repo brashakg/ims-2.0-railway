@@ -54,6 +54,9 @@ export interface CompletedTest {
   customerPhone: string;
   customerId?: string;
   completedAt: string;
+  /** The exam's stored Final-Rx block (camelCased by GET /clinical/tests);
+   *  `ipd` is its recorded binocular IPD, a string such as "62.0". */
+  prescription?: { ipd?: string | number | null } | null;
   rightEye: { sphere: number | null; cylinder: number | null; axis: number | null };
   leftEye: { sphere: number | null; cylinder: number | null; axis: number | null };
 }

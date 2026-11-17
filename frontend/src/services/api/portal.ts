@@ -72,7 +72,10 @@ export interface OtpVerifyResponse {
 export interface PortalPrescription {
   prescription_id: string | null;
   prescription_number: string | null;
+  /** The recorded issue date as its IST calendar day 'YYYY-MM-DD'. */
   prescription_date: string | null;
+  /** The family member examined (D71); null when nobody can be named. */
+  patient_name?: string | null;
   expiry_date: string | null;
   type: string | null;
   right_eye: Record<string, unknown> | null;
