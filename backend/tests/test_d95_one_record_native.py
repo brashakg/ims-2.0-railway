@@ -81,6 +81,15 @@ def _open_native():
     return client, f"{base}_{uuid.uuid4().hex[:8]}"
 
 
+def _slot_indexes(db):
+    """D82 / D122(7): the return-slot indexes exist before the code serves
+    (the app's own, database/connection.py ensure_indexes) -- without them
+    the counter press refuses with 503."""
+    for field in ("return_slot", "return_slots"):
+        db["stock_units"].create_index(field, unique=True, name=f"uniq_stock_unit_{field}",
+                                       partialFilterExpression={field: {"$type": "string"}})
+
+
 @pytest.fixture()
 def native(monkeypatch):
     """The real doors over one fresh native database: a paid two-unit cash
@@ -104,10 +113,7 @@ def native(monkeypatch):
     for n in (1, 2):
         db["stock_units"].insert_one({"_id": f"U{n}", "stock_id": f"U{n}", "product_id": "P1", "store_id": STORE,
                                       "status": "SOLD", "order_id": "ORD-1", "quantity": 1, "barcode": f"BC{n}"})
-    # D82 / D122(7): the return-slot indexes exist before the code serves.
-    for field in ("return_slot", "return_slots"):
-        db["stock_units"].create_index(field, unique=True, name=f"uniq_stock_unit_{field}",
-                                       partialFilterExpression={field: {"$type": "string"}})
+    _slot_indexes(db)
     # D95(1): no unique index on return_id anywhere in these tests.
     db["returns"].insert_one({"_id": "seed"})
     db["returns"].delete_one({"_id": "seed"})

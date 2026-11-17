@@ -743,7 +743,9 @@ def test_the_retry_never_flips_another_lines_piece_nor_mints_when_its_own_is_bac
     r = _retry(ctx)
     assert r.status_code == 200, r.text
     assert _units(ctx) == before, "nothing flipped, nothing minted"
-    assert r.json()["restock_applied"] is True and r.json()["restock_stock_ids"] == []
+    # D122: the record now NAMES the unit the stock says this return put back
+    # (a worker that died before its stamp left it on the stock rows only).
+    assert r.json()["restock_applied"] is True and r.json()["restock_stock_ids"] == ["STK-A"]
     saved = ctx["returns_coll"].docs[-1]
     assert saved["restock_applied"] is True and saved["restock_in_progress"] is False
     assert saved["restocked"] == [], "no unit counted as moved by this retry"

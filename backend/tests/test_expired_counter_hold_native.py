@@ -49,7 +49,7 @@ from api.routers import online_store_refund_reviews as RR  # noqa: E402
 from api.services import shopify_refund as S  # noqa: E402
 from database.repositories.product_repository import StockRepository  # noqa: E402
 from database.repositories.task_repository import TaskRepository  # noqa: E402
-from tests.test_d95_one_record_native import _in_thread, _open_native  # noqa: E402
+from tests.test_d95_one_record_native import _in_thread, _open_native, _slot_indexes  # noqa: E402
 from tests.test_pos_money_doors import STORE, _advance_client, _hdr, _user, _wire, returns_router  # noqa: E402
 from tests.test_refund_review_unpaid_credit import _order as _online_order  # noqa: E402
 from tests.test_refund_review_unpaid_credit import _payload as _refund_payload  # noqa: E402
@@ -75,6 +75,7 @@ def online(monkeypatch):
     assert db.name == name and name not in client.list_database_names(), name  # fresh, this test's own
     env = _wire(monkeypatch, db)
     monkeypatch.setattr(returns_router, "get_stock_repository", lambda: StockRepository(db["stock_units"]))
+    _slot_indexes(db)
     monkeypatch.setattr(returns_router, "get_product_repository", lambda: None)
     monkeypatch.setattr("api.dependencies.get_task_repository", lambda: TaskRepository(db["tasks"]), raising=False)
     db["customers"].insert_one({"customer_id": "CUST-1", "name": "Ravi", "store_credit": 0.0})
