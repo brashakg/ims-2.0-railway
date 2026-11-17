@@ -1755,3 +1755,84 @@ def test_r2_b_no_database_or_an_unreadable_one_is_unavailable_never_empty(monkey
         with pytest.raises(HTTPException) as err:
             asyncio.run(call())
         assert err.value.status_code == 503 and err.value.detail == bank._STATEMENTS_UNREADABLE
+
+
+# --------------------------------------------------------------------------
+# The same failure classes on the supplier-money doors (round 2 hunt): a save
+# is answered only when it is stored.
+# --------------------------------------------------------------------------
+
+_PAY = {"amount": 50.0, "payment_date": "2026-11-04", "mode": "BANK", "store_id": "S1", "reference": "UTR-H"}
+_DOORS = [("payments", "vendor_payments", "payment_id", _PAY),
+          ("debit-notes", "vendor_debit_notes", "debit_note_id",
+           {"amount": 10.0, "date": "2026-11-04", "reason": "scheme", "cn_type": "SCHEME_CN", "store_id": "S1"})]
+
+
+@pytest.mark.parametrize("path,coll,_id_field,body", _DOORS)
+def test_r2_hunt_no_database_is_never_a_recorded_payment_or_credit(ap, monkeypatch, path, coll, _id_field, body):
+    """With no database the door answered 201 with a payment (or credit)
+    nothing had stored."""
+    from api.routers import vendors as vendors_pkg
+
+    d, cli = ap
+    monkeypatch.setattr(vendors_pkg, "_get_db", lambda: None)
+    assert cli.post(f"/vendors/V1/{path}", json=body).status_code == 503
+    assert d[coll].count_documents({}) == 0
+
+
+@pytest.mark.parametrize("path,coll,id_field,body", _DOORS)
+def test_r2_hunt_an_unkeyed_save_is_failed_only_when_it_is_not_stored(ap, monkeypatch, path, coll, id_field, body):
+    """A request with no request_id whose save landed with its reply lost was
+    answered 500 'Failed to save' -- the accountant records it again, twice
+    the money. Stored is saved (201); not stored is failed (500); no answer
+    either way is a 503 that says to check first."""
+    d, cli = ap
+    real = mongomock.collection.Collection.insert_one
+    mode = ["lost_ack"]
+
+    def insert_one(self, doc, *a, **k):
+        if self.name == coll and mode[0]:
+            if mode[0] == "lost_ack":
+                real(self, doc, *a, **k)
+            raise RuntimeError(f"{coll} write: no reply")
+        return real(self, doc, *a, **k)
+
+    monkeypatch.setattr(mongomock.collection.Collection, "insert_one", insert_one)
+    saved = cli.post(f"/vendors/V1/{path}", json=body)
+    assert saved.status_code == 201, saved.text
+    assert [r[id_field] for r in d[coll].find({})] == [saved.json()[id_field]]
+    mode[0] = "refused"
+    assert cli.post(f"/vendors/V1/{path}", json=body).status_code == 500
+    assert d[coll].count_documents({}) == 1
+    real_find = mongomock.collection.Collection.find_one
+
+    def find_one(self, *a, **k):
+        if self.name == coll:
+            raise RuntimeError(f"{coll} unavailable")
+        return real_find(self, *a, **k)
+
+    monkeypatch.setattr(mongomock.collection.Collection, "find_one", find_one)
+    unknown = cli.post(f"/vendors/V1/{path}", json=body)
+    assert unknown.status_code == 503 and "Could not confirm" in unknown.json()["detail"]
+    assert d[coll].count_documents({}) == 1
+
+
+def test_r2_hunt_a_supplier_credit_is_never_numbered_by_the_clock(ap, monkeypatch):
+    """L3-27: with the counter unreadable the credit was saved under a
+    time-derived reference -- the one two credits in the same second share.
+    Now a 503 and nothing written; the next try gets the next number."""
+    d, cli = ap
+    real = mongomock.collection.Collection.find_one_and_update
+    down = [True]
+
+    def find_one_and_update(self, *a, **k):
+        if self.name == "counters" and down[0]:
+            raise RuntimeError("counters unavailable")
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(mongomock.collection.Collection, "find_one_and_update", find_one_and_update)
+    assert _credit(cli).status_code == 503
+    assert d.vendor_debit_notes.count_documents({}) == 0
+    down[0] = False
+    ok = _credit(cli)
+    assert ok.status_code == 201 and ok.json()["debit_note_number"] == "DN/BV-S1/26-27/0001"
