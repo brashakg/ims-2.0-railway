@@ -202,6 +202,9 @@ export default function BlindEodTallyPage() {
       await load();
     } catch (e: any) {
       toast.error('Could not submit count');
+      // The till may hold a write whose reply was lost: show what it holds
+      // now, not the screen from before the press.
+      await load();
     } finally {
       setBusy(false);
     }
@@ -223,6 +226,9 @@ export default function BlindEodTallyPage() {
       await load();
     } catch {
       toast.error('Could not lock');
+      // The till may hold a write whose reply was lost: show what it holds
+      // now, not the screen from before the press.
+      await load();
     } finally {
       setBusy(false);
     }
@@ -244,6 +250,9 @@ export default function BlindEodTallyPage() {
       // staff, e.g. another drawer is still open for the day) is shown as
       // written; anything else keeps the plain fallback (audit L3-28).
       toast.error(err instanceof ApiError && err.code ? err.message : 'Could not reopen');
+      // The till may hold a write whose reply was lost: show what it holds
+      // now, not the screen from before the press.
+      await load();
     } finally {
       setBusy(false);
     }
