@@ -32,6 +32,13 @@ _SNAPSHOT_FIELDS = (
 )
 
 
+ABORTED = "PERMISSIONS_UPDATE_ABORTED"
+# Audit-row flag: applied only if the user document confirms it.
+NEEDS_CONFIRMATION = "confirmed_on_user"
+# User-document list of the permission audit rows whose write landed.
+CONFIRMED_IDS_FIELD = "permission_log_ids"
+
+
 def snapshot_of(user: Optional[dict]) -> dict:
     """Extract the permission-relevant snapshot from a user doc (or {} when the
     field is absent). Deterministic shape so prior/after diffs are clean."""
@@ -84,14 +91,17 @@ def write_permission_audit(
     }
     if note:
         row["note"] = note
+    if action != ABORTED:
+        # The row is written BEFORE the user write, so on its own it proves
+        # nothing. The user write appends this row's log_id to the user's
+        # ``permission_log_ids`` in the same atomic update; history treats the
+        # row as applied only when the id is there (see find_permission_history).
+        row[NEEDS_CONFIRMATION] = True
     row.update(extra or {})
     try:
         return audit_repo.create(row)
     except Exception:  # noqa: BLE001 - any failure => no-log-no-commit
         return None
-
-
-ABORTED = "PERMISSIONS_UPDATE_ABORTED"
 
 
 def write_permission_abort(audit_repo, *, actor: dict, aborted: dict, reason: str):
@@ -115,11 +125,19 @@ def write_permission_abort(audit_repo, *, actor: dict, aborted: dict, reason: st
     return row
 
 
-def find_permission_history(audit_repo, target_user_id: str, limit: int = 50):
+def find_permission_history(
+    audit_repo, target_user_id: str, limit: int = 50, applied_ids=None
+):
     """Return the permission-change audit rows for a user, newest first, each
     change that never landed marked ``not_applied``. None when the repo is
     unavailable or the read fails: an unreadable history is never shown as
-    "no changes" (and Revert cannot pick from it)."""
+    "no changes" (and Revert cannot pick from it).
+
+    ``applied_ids`` is the user's ``permission_log_ids``. A row that needs
+    confirmation and is not in it is ``not_applied``: its write failed, lost
+    its compare-and-set, or never ran -- whether or not an ABORTED row could
+    be written afterwards. Rows from before the confirmation existed keep the
+    ABORTED-row rule."""
     if audit_repo is None:
         return None
     try:
@@ -132,7 +150,10 @@ def find_permission_history(audit_repo, target_user_id: str, limit: int = 50):
     except Exception:  # noqa: BLE001
         return None
     dead = {r.get("aborts_log_id") for r in rows if r.get("action") == ABORTED}
+    applied = set(applied_ids or [])
     for r in rows:
-        if r.get("log_id") in dead:
+        if r.get("log_id") in dead or (
+            r.get(NEEDS_CONFIRMATION) and r.get("log_id") not in applied
+        ):
             r["not_applied"] = True
     return rows

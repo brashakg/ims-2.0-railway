@@ -198,7 +198,13 @@ class BaseRepository(ABC, Generic[T]):
                 raise
             return []
 
-    def update(self, id: str, data: Dict, expected: Optional[Dict] = None) -> bool:
+    def update(
+        self,
+        id: str,
+        data: Dict,
+        expected: Optional[Dict] = None,
+        add_to_set: Optional[Dict] = None,
+    ) -> bool:
         """
         Update document by ID
 
@@ -215,8 +221,13 @@ class BaseRepository(ABC, Generic[T]):
 
             # ``expected``: extra field values the stored row must still hold
             # (a compare-and-set); no match -> False, nothing written.
+            # ``add_to_set``: {list_field: value} appended in the SAME write, so
+            # the value lands if and only if the $set does.
+            ops: Dict = {"$set": data}
+            if add_to_set:
+                ops["$addToSet"] = add_to_set
             result = self.collection.update_one(
-                {self.id_field: id, **(expected or {})}, {"$set": data}
+                {self.id_field: id, **(expected or {})}, ops
             )
             return result.modified_count > 0
         except Exception as e:

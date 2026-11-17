@@ -511,3 +511,197 @@ def test_old_snapshot_cap_equal_to_any_role_standard_follows_the_current_role(
                json={"audit_log_id": target["log_id"], "expected_roles": now})
     assert r.status_code == 200, r.text
     assert _stored(repo, uid) == expected, (created, snap_cap, now)
+
+
+# --- Codex round 2 (2026-11-17): R2-A and D97 --------------------------------
+
+def _nothing_lands_and_no_abort_row(monkeypatch, repo, audit):
+    """The user write fails with a driver error, and the ABORTED row that
+    would say so cannot be written either (Codex R2-A)."""
+    from pymongo.errors import AutoReconnect
+
+    def denied(*a, **k):
+        raise AutoReconnect("user update did not land")
+
+    real_create = audit.create
+    monkeypatch.setattr(repo.collection, "update_one", denied)
+    monkeypatch.setattr(
+        audit, "create",
+        lambda row: None if row.get("action") == "PERMISSIONS_UPDATE_ABORTED"
+        else real_create(row))
+
+
+def test_a_failed_change_whose_abort_row_also_failed_is_not_revertible(monkeypatch):
+    """R2-A: cap 10 -> 30 is logged, the write fails, the abort row fails. A
+    later healthy history must still say it never applied and Revert must
+    refuse it (it used to store a 30 that had never existed)."""
+    repo = _repo()
+    audit = AuditRepository(mongomock.MongoClient().db.audit_logs)
+    c, _ = _client_with_audit(repo, _SUPER, monkeypatch, audit_repo=audit)
+    uid = _create(c, "auto", ["SALES_STAFF"])
+    with monkeypatch.context() as m:
+        _nothing_lands_and_no_abort_row(m, repo, audit)
+        r = c.put(f"/api/v1/users/{uid}",
+                  json={"discount_cap": 30, "expected_roles": ["SALES_STAFF"]})
+        assert r.status_code == 409, r.text
+    hist = _history(c, uid)
+    assert not [h for h in hist if h["action"] == "PERMISSIONS_UPDATE_ABORTED"]
+    phantom = [h for h in hist if h["permissions_after"].get("discount_cap") == 30.0]
+    assert len(phantom) == 1 and phantom[0].get("not_applied") is True
+    r = c.post(f"/api/v1/users/{uid}/permissions/revert",
+               json={"audit_log_id": phantom[0]["log_id"],
+                     "expected_roles": ["SALES_STAFF"]})
+    assert r.status_code == 409, r.text
+    assert _stored(repo, uid) == (10.0, True)
+
+
+def test_a_failed_revert_whose_abort_row_also_failed_is_not_applied(monkeypatch):
+    """R2-A on the Revert door: its own row must not stand as a real state."""
+    repo = _repo()
+    audit = AuditRepository(mongomock.MongoClient().db.audit_logs)
+    c, _ = _client_with_audit(repo, _SUPER, monkeypatch, audit_repo=audit)
+    uid = _create(c, "auto", ["SALES_STAFF"])
+    target = _two_cap_edits(c, uid)
+    with monkeypatch.context() as m:
+        _nothing_lands_and_no_abort_row(m, repo, audit)
+        r = c.post(f"/api/v1/users/{uid}/permissions/revert",
+                   json={"audit_log_id": target})
+        assert r.status_code == 409, r.text
+    assert _stored(repo, uid) == (15.0, False)
+    hist = _history(c, uid)
+    rev = [h for h in hist if h["action"] == "PERMISSIONS_REVERT"]
+    assert len(rev) == 1 and rev[0].get("not_applied") is True
+    # The two real edits stay live; the 12 can still be reverted to.
+    assert len([h for h in hist if not h.get("not_applied")]) == 2
+    assert c.post(f"/api/v1/users/{uid}/permissions/revert",
+                  json={"audit_log_id": target}).status_code == 200
+    assert _stored(repo, uid) == (12.0, False)
+
+
+def test_a_logged_change_with_no_write_at_all_is_not_applied(monkeypatch):
+    """A crash between the audit row and the user write leaves only the row.
+    Nothing confirms it, so it is not applied; a create with a typed cap IS
+    confirmed (by the insert) and a pre-confirmation row keeps its old rule."""
+    from api.services import permission_audit as pa
+
+    repo = _repo()
+    audit = AuditRepository(mongomock.MongoClient().db.audit_logs)
+    c, _ = _client_with_audit(repo, _SUPER, monkeypatch, audit_repo=audit)
+    uid = _create(c, "typed", ["SALES_STAFF"], cap=7)
+    snap = pa.snapshot_of(repo.find_by_id(uid))
+    orphan = pa.write_permission_audit(
+        audit, action="PERMISSIONS_UPDATE", actor=_SUPER, target_user_id=uid,
+        prior=snap, after=dict(snap, discount_cap=30.0))
+    legacy = pa.write_permission_audit(
+        audit, action="PERMISSIONS_UPDATE", actor=_SUPER, target_user_id=uid,
+        prior=snap, after=dict(snap, discount_cap=9.0))
+    audit.collection.update_one(
+        {"log_id": legacy["log_id"]}, {"$unset": {pa.NEEDS_CONFIRMATION: ""}})
+    by_id = {h["log_id"]: h for h in _history(c, uid)}
+    assert by_id[orphan["log_id"]].get("not_applied") is True
+    assert not by_id[legacy["log_id"]].get("not_applied")
+    created = [h for h in by_id.values() if h["action"] == "PERMISSIONS_CREATE"]
+    assert len(created) == 1 and not created[0].get("not_applied")
+    assert c.post(f"/api/v1/users/{uid}/permissions/revert",
+                  json={"audit_log_id": orphan["log_id"]}).status_code == 409
+    assert _stored(repo, uid) == (7.0, False)
+
+
+def _shops_and_roles(repo, uid):
+    d = repo.find_by_id(uid)
+    return d["store_ids"], d["roles"]
+
+
+def test_assign_store_with_a_role_lands_whole_or_not_at_all(monkeypatch):
+    """D97: the shop grant and the role change are ONE compare-and-set write.
+    A refusal used to answer 409 and still leave the shop granted."""
+    from pymongo.errors import AutoReconnect
+
+    repo = _repo()
+    c, _ = _client_with_audit(repo, _SUPER, monkeypatch)
+    body = {"store_id": "S2", "role": "OPTOMETRIST"}
+
+    # A role changed between the read and the write: refused, no shop.
+    uid = _create(c, "race", ["SALES_STAFF"])
+    before = _shops_and_roles(repo, uid)[0]
+    with monkeypatch.context() as m:
+        _write_between_reads(m, repo, uid, {"$push": {"roles": "WORKSHOP_STAFF"}})
+        r = c.post(f"/api/v1/users/{uid}/assign-store", json=body)
+    assert r.status_code == 409, r.text
+    assert _shops_and_roles(repo, uid) == (before, ["SALES_STAFF", "WORKSHOP_STAFF"])
+    # Retried after a reload: both land, the other role is kept.
+    assert c.post(f"/api/v1/users/{uid}/assign-store", json=body).status_code == 200
+    assert _shops_and_roles(repo, uid) == (
+        before + ["S2"], ["SALES_STAFF", "WORKSHOP_STAFF", "OPTOMETRIST"])
+    # Identical retry: no error, nothing doubled.
+    assert c.post(f"/api/v1/users/{uid}/assign-store", json=body).status_code == 200
+    assert _shops_and_roles(repo, uid) == (
+        before + ["S2"], ["SALES_STAFF", "WORKSHOP_STAFF", "OPTOMETRIST"])
+
+    # The write itself fails: neither lands.
+    uid = _create(c, "fail", ["SALES_STAFF"])
+    real = repo.collection.update_one
+
+    def role_write_fails(flt, update, *a, **k):
+        if "roles" in update.get("$set", {}):
+            raise AutoReconnect("role write did not land")
+        return real(flt, update, *a, **k)
+
+    with monkeypatch.context() as m:
+        m.setattr(repo.collection, "update_one", role_write_fails)
+        r = c.post(f"/api/v1/users/{uid}/assign-store", json=body)
+    assert r.status_code == 409, r.text
+    assert _shops_and_roles(repo, uid) == (before, ["SALES_STAFF"])
+
+    # The write lands but its reply is lost: success, both stored.
+    with monkeypatch.context() as m:
+        _ack_lost_after_commit(m, repo)
+        r = c.post(f"/api/v1/users/{uid}/assign-store", json=body)
+    assert r.status_code == 200, r.text
+    assert _shops_and_roles(repo, uid) == (before + ["S2"], ["SALES_STAFF", "OPTOMETRIST"])
+
+
+def test_assign_store_moves_a_role_default_cap_in_the_same_write(monkeypatch):
+    """D97 + D70: Accountant (standard 0) gains Store Manager through
+    assign-store: shop, role, cap and its confirmed audit row together."""
+    repo = _repo()
+    audit = AuditRepository(mongomock.MongoClient().db.audit_logs)
+    c, _ = _client_with_audit(repo, _SUPER, monkeypatch, audit_repo=audit)
+    uid = _create(c, "acct", ["ACCOUNTANT"])
+    r = c.post(f"/api/v1/users/{uid}/assign-store",
+               json={"store_id": "S2", "role": "STORE_MANAGER"})
+    assert r.status_code == 200, r.text
+    assert "S2" in repo.find_by_id(uid)["store_ids"]
+    assert _stored(repo, uid) == (ROLE_DISCOUNT_CAPS["STORE_MANAGER"], True)
+    moved = [h for h in _history(c, uid) if h["action"] == "PERMISSIONS_UPDATE"]
+    assert len(moved) == 1 and not moved[0].get("not_applied")
+
+
+@pytest.mark.parametrize("path, body", [
+    ("/assign-store", {"store_id": "S2"}),
+    ("/stores/S2", None),
+], ids=["assign-store", "stores"])
+def test_a_shop_grant_that_did_not_land_is_an_error_and_a_lost_reply_is_not(
+        monkeypatch, path, body):
+    """assign-store without a role ignored the result of its write: a failed
+    write answered 200 "Store assigned" with nothing stored."""
+    from pymongo.errors import AutoReconnect
+
+    repo = _repo()
+    c, _ = _client_with_audit(repo, _SUPER, monkeypatch)
+    uid = _create(c, "shop", ["SALES_STAFF"])
+    before = repo.find_by_id(uid)["store_ids"]
+
+    def denied(*a, **k):
+        raise AutoReconnect("grant did not land")
+
+    with monkeypatch.context() as m:
+        m.setattr(repo.collection, "update_one", denied)
+        r = c.post(f"/api/v1/users/{uid}{path}", json=body)
+    assert r.status_code == 503, r.text
+    assert repo.find_by_id(uid)["store_ids"] == before
+    with monkeypatch.context() as m:
+        _ack_lost_after_commit(m, repo)
+        r = c.post(f"/api/v1/users/{uid}{path}", json=body)
+    assert r.status_code == 200, r.text
+    assert repo.find_by_id(uid)["store_ids"] == before + ["S2"]

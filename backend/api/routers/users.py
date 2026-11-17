@@ -1033,6 +1033,12 @@ async def create_user(user: UserCreate, current_user: dict = Depends(require_adm
             if _val:
                 user_data[_id_field] = _val
 
+        # The audit row's id is stored on the user in the insert itself, so the
+        # row is confirmed exactly when the account exists.
+        _create_log_id = str(uuid.uuid4())
+        if _clean_perms or _clamped_cap is not None:
+            user_data[_perm_audit.CONFIRMED_IDS_FIELD] = [_create_log_id]
+
         created = repo.create(user_data)
         if created:
             # AUDIT (no-log-no-commit): only when an actual override was set --
@@ -1041,6 +1047,7 @@ async def create_user(user: UserCreate, current_user: dict = Depends(require_adm
             if _clean_perms or _clamped_cap is not None:
                 audit = _perm_audit.write_permission_audit(
                     get_audit_repository(),
+                    extra={"log_id": _create_log_id},
                     action="PERMISSIONS_CREATE",
                     actor=current_user,
                     target_user_id=created["user_id"],
@@ -1093,29 +1100,47 @@ async def get_user(user_id: str, current_user: dict = Depends(require_manager)):
     return {"user_id": user_id}
 
 
-def _commit_user_write(repo, user_id, update_data, expected, actor, audit):
+def _commit_user_write(
+    repo, user_id, update_data, expected, actor, audit, add_to_set=None
+):
     """Write ``update_data`` (compare-and-set on ``expected`` when given).
+
+    ``add_to_set`` ({list_field: value}, e.g. a shop grant) lands in the SAME
+    update, or not at all (D97). So does the logged ``audit`` row's id, into
+    the user's ``permission_log_ids``: that id on the user document is the
+    only proof the logged change was applied. History and Revert read it
+    (find_permission_history), so a change that did not land can never be
+    shown or re-applied as real, even when nothing more could be written.
 
     ``repo.update`` returns False both for "nothing matched" and for a driver
     error that may come AFTER the server committed (lost reply). So on False
-    re-read the row: if it already holds the intended values, the write
-    landed. Only a write that truly did not land gets the ABORTED row for its
-    logged ``audit`` (history marks it not applied, Revert refuses it). If the
-    re-read itself fails the outcome is unknown: returns None, no abort row."""
-    if (
-        repo.update(user_id, update_data, expected=expected)
-        if expected is not None
-        else repo.update(user_id, update_data)
-    ):
+    re-read the row: the audit id on it (or, for an unaudited edit, the
+    intended values) means the write landed. A write that did not land also
+    gets a best-effort ABORTED row for the trail. If the re-read itself fails
+    the outcome is unknown: returns None."""
+    adds = dict(add_to_set or {})
+    _log_id = (audit or {}).get("log_id")
+    if _log_id:
+        adds[_perm_audit.CONFIRMED_IDS_FIELD] = _log_id
+    kwargs = {}
+    if expected is not None:
+        kwargs["expected"] = expected
+    if adds:
+        kwargs["add_to_set"] = adds
+    if repo.update(user_id, update_data, **kwargs):
         return True
     stored = repo.find_by_id(user_id)
     if stored is None:
         return None
-    if all(
-        stored.get(k) == v
-        for k, v in update_data.items()
-        if k not in ("updated_at", "updated_by")
-    ):
+    if _log_id:
+        landed = _log_id in (stored.get(_perm_audit.CONFIRMED_IDS_FIELD) or [])
+    else:
+        landed = all(
+            stored.get(k) == v
+            for k, v in update_data.items()
+            if k not in ("updated_at", "updated_by")
+        ) and all(v in (stored.get(k) or []) for k, v in adds.items())
+    if landed:
         return True
     if audit is not None:
         _perm_audit.write_permission_abort(
@@ -1137,6 +1162,14 @@ async def update_user(
     user_id: str, user: UserUpdate, current_user: dict = Depends(require_admin)
 ):
     """Update user (Admin only)"""
+    return await _apply_user_update(user_id, user, current_user)
+
+
+async def _apply_user_update(
+    user_id: str, user: UserUpdate, current_user: dict, grant_store=None
+):
+    """The one user-edit door. ``grant_store`` (assign-store with a role, D97)
+    is a shop added in the same compare-and-set write as the edit."""
     repo = get_user_repository()
 
     if repo is not None:
@@ -1292,6 +1325,7 @@ async def update_user(
         _updated = _commit_user_write(
             repo, user_id, update_data, _expect, current_user,
             audit if _audit_needed else None,
+            add_to_set={"store_ids": grant_store} if grant_store else None,
         )
         if _updated is None:
             raise HTTPException(
@@ -1373,7 +1407,9 @@ async def delete_user(user_id: str, current_user: dict = Depends(require_admin))
     return {"message": "User deactivated"}
 
 
-async def _add_role_via_update(user_id: str, existing: dict, role: str, current_user: dict):
+async def _add_role_via_update(
+    user_id: str, existing: dict, role: str, current_user: dict, grant_store=None
+):
     """One door for every role change (D70): the PUT path moves a marked
     role-default discount cap with its audit row and compare-and-set, and runs
     the hierarchy / escalation / last-admin guards."""
@@ -1382,10 +1418,11 @@ async def _add_role_via_update(user_id: str, existing: dict, role: str, current_
     roles = list(existing.get("roles", []) or [])
     if role not in roles:
         roles.append(role)
-    await update_user(
+    await _apply_user_update(
         user_id,
         UserUpdate(roles=roles, expected_roles=list(existing.get("roles", []) or [])),
         current_user,
+        grant_store=grant_store,
     )
 
 
@@ -1691,6 +1728,19 @@ class AssignStoreBody(BaseModel):
     role: Optional[str] = None
 
 
+def _grant_store(repo, user_id: str, store_id: str) -> None:
+    """Add one shop to a user. A write that did not land is an error, never a
+    silent "assigned"; a write that landed but lost its reply is success."""
+    if repo.add_store(user_id, store_id):
+        return
+    stored = repo.find_by_id(user_id)
+    if stored is None or store_id not in (stored.get("store_ids") or []):
+        raise HTTPException(
+            status_code=503,
+            detail="Could not save the shop access. Reload and try again.",
+        )
+
+
 @router.post("/{user_id}/assign-store")
 async def assign_store(
     user_id: str, body: AssignStoreBody, current_user: dict = Depends(require_admin)
@@ -1724,11 +1774,15 @@ async def assign_store(
     existing = repo.find_by_id(user_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="User not found")
-    repo.add_store(user_id, body.store_id)
     if body.role:
-        # Through the same role-change door as add_role (D70). A refusal is
-        # reported; the store access above has already been granted.
-        await _add_role_via_update(user_id, existing, body.role, current_user)
+        # D97: through the same role-change door as add_role (D70), with the
+        # shop grant in that ONE compare-and-set write. A refusal (409) leaves
+        # the person's shops and roles exactly as stored.
+        await _add_role_via_update(
+            user_id, existing, body.role, current_user, grant_store=body.store_id
+        )
+    else:
+        _grant_store(repo, user_id, body.store_id)
     return {"user_id": user_id, "store_id": body.store_id, "message": "Store assigned"}
 
 
@@ -1744,10 +1798,8 @@ async def add_store_access(
         if existing is None:
             raise HTTPException(status_code=404, detail="User not found")
 
-        if repo.add_store(user_id, store_id):
-            return {"message": f"Store {store_id} access granted"}
-
-        raise HTTPException(status_code=500, detail="Failed to add store access")
+        _grant_store(repo, user_id, store_id)
+        return {"message": f"Store {store_id} access granted"}
 
     return {"message": f"Store {store_id} access granted"}
 
@@ -1918,7 +1970,11 @@ async def get_user_permissions(
     existing = repo.find_by_id(user_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="User not found")
-    history = _perm_audit.find_permission_history(get_audit_repository(), user_id)
+    history = _perm_audit.find_permission_history(
+        get_audit_repository(),
+        user_id,
+        applied_ids=existing.get(_perm_audit.CONFIRMED_IDS_FIELD),
+    )
     if history is None:
         # A failed history read is not "no changes recorded yet".
         raise HTTPException(status_code=503, detail="Could not read the change history.")
@@ -1973,7 +2029,12 @@ async def revert_user_permissions(
             )
 
     # Locate the prior snapshot in the immutable audit trail.
-    history = _perm_audit.find_permission_history(audit_repo, user_id, limit=200)
+    history = _perm_audit.find_permission_history(
+        audit_repo,
+        user_id,
+        limit=200,
+        applied_ids=existing.get(_perm_audit.CONFIRMED_IDS_FIELD),
+    )
     if history is None:
         raise HTTPException(status_code=503, detail="Could not read the change history.")
     target = next((h for h in history if h.get("log_id") == body.audit_log_id), None)
