@@ -3070,6 +3070,77 @@ class TestD88OneDrawerNeverTwiceInTheTotals:
         res = _recon_summary(db, monkeypatch)
         assert len(res["rows"]) == 1 and res["totals"]["counted_cash"] == 3000.0
 
+    def test_two_register_closes_on_one_unlocked_drawer_count_it_once(self, db, monkeypatch):
+        """Review of head 70c94024: one drawer, counted through a Cash Register
+        close and not yet locked; a SECOND register session the same day
+        closes on the same drawer and holds the same count. Both rows used to
+        add it: counted Rs 6,000 for a Rs 3,000 drawer."""
+        sid = till.open_session(
+            db, store_id=STORE, session_date=DATE, opening_float_paisa=0, actor=CASHIER,
+        )["session"]["session_id"]
+        _cash_sale(db, 3000)
+        first = _cr_close_b(db, monkeypatch, 6)
+        second = _second_register_close(db, monkeypatch, 7, note="Rs 500 taken after the count")
+        assert (first["till_session_id"], second["till_session_id"]) == (sid, sid)
+        assert (first["till_link_ok"], second["till_link_ok"]) == (True, True)
+        # The second close holds the drawer's one count, not its own Rs 3,500.
+        assert (second["counted"], second["counted_from_shared_record"]) == (3000.0, True)
+
+        res = _recon_summary(db, monkeypatch)
+        assert _money_totals(res) == {
+            "opening_float": 0.0, "cash_sales": 3000.0, "cash_refunds": 0.0,
+            "cash_expenses": 0.0, "expected_cash": 3000.0, "counted_cash": 3000.0,
+            "variance": 0.0,
+        }
+        by_id = {r["session_id"]: r for r in res["rows"]}
+        # Both rows still show; the later one is marked and adds nothing.
+        assert by_id["CR-D40"]["also_counted_on_till"] is False
+        assert by_id["CR-D40-2"]["also_counted_on_till"] is True
+        assert by_id["CR-D40-2"]["counted_cash"] == 3000.0
+        t = res["totals"]
+        assert (t["sessions"], t["also_counted_on_till"]) == (1, 1)
+        assert (t["balanced"], t["overage"], t["shortage"]) == (1, 0, 0)
+
+        # Locked: both closes fold into the drawer's one Z-Read row.
+        assert till.lock_session(db, sid, actor=MANAGER)["ok"]
+        res = _recon_summary(db, monkeypatch)
+        assert [r["source"] for r in res["rows"]] == ["BLIND_EOD"]
+        assert res["totals"]["counted_cash"] == 3000.0
+
+    def test_control_two_register_closes_with_no_till_link_both_count(self, db, monkeypatch):
+        """Two closes that name no till drawer (records from before the shared
+        till record) are two counts and keep adding, as before."""
+        coll = db.get_collection("cash_register_sessions")
+        for n, at in ((1, "09:00:00"), (2, "12:00:00")):
+            coll.insert_one({
+                "_id": f"CR-OLD-{n}", "session_id": f"CR-OLD-{n}", "store_id": STORE,
+                "status": "CLOSED", "opening_float": 0.0, "counted": 1000.0, "expected": 1000.0,
+                "cash_sales": 1000.0, "closed_at": f"{DATE}T{at}",
+            })
+        res = _recon_summary(db, monkeypatch)
+        assert res["totals"]["counted_cash"] == 2000.0
+        assert res["totals"]["also_counted_on_till"] == 0
+
+
+def _second_register_close(db, monkeypatch, pieces, note=None):
+    """A SECOND Cash Register session of DATE, opened after the first closed
+    (carrying its Rs 3,000) and closed through the real handler after one
+    more Rs 500 cash sale."""
+    monkeypatch.setattr(finance_router, "_get_db", lambda: db)
+    monkeypatch.setattr(finance_router, "_iso_now", lambda: f"{DATE}T13:00:00")
+    db.get_collection("cash_register_sessions").insert_one({
+        "_id": "CR-D40-2", "session_id": "CR-D40-2", "store_id": STORE, "status": "OPEN",
+        "opening_float": 3000.0, "opening_denominations": [], "opened_at": f"{DATE}T12:30:00",
+    })
+    _cash_sale(db, 500, f"{DATE}T12:45:00")
+    body = finance_router.CashRegisterClose(
+        session_id="CR-D40-2",
+        denominations=[{"face": 500, "kind": "note", "pieces": pieces}],
+        closing_count_state="COUNTED",
+        **({"note": note} if note else {}),
+    )
+    return asyncio.run(finance_router.close_cash_register(body=body, current_user=MANAGER))
+
 
 def test_d88_uncompared_close_counted_once_on_real_mongo(monkeypatch):
     """D88(1) on a native PyMongo Database: the drawer-list read of the close
@@ -4036,6 +4107,76 @@ class TestR12TillWritesKeepTheirAuditRow:
         # owed, stored once (TestR11OneOwedTaskIsStoredOnce).
         assert {r[1] for r in raised} == {raised[0][1]}
 
+    # -- a count on a drawer whose OPEN still owes its row -------------------
+    # The count restates the owed record. It used to store only its own row,
+    # so a ``till.open`` row that could not be written at open time was gone
+    # for good (review must-fix on head 70c94024).
+
+    @pytest.mark.parametrize("door", ["till", "screen_close", "cash_register", "day_end"])
+    def test_a_count_carries_forward_the_row_the_open_still_owes(
+        self, db, monkeypatch, audit_rows, day_end, door
+    ):
+        _cash_sale(db, 1000)
+        up = []
+        store = _AuditStore(audit_rows, up=lambda: bool(up))
+        monkeypatch.setattr("api.dependencies.get_audit_repository", lambda: store)
+        monkeypatch.setattr(reports_router, "get_audit_repository", lambda: store)
+        notes = [{"face": 500, "kind": "note", "pieces": 2}]
+        if door == "till":
+            # Two requests, the audit store down across both.
+            sid = till.open_session(
+                db, store_id=STORE, session_date=DATE, opening_float_paisa=0, actor=CASHIER,
+            )["session"]["session_id"]
+            assert till.blind_submit(db, sid, blind_denominations=notes, actor=CASHIER)["ok"]
+        elif door == "screen_close":
+            # ONE request opens and counts (a close on a day with no drawer).
+            link = till.record_screen_close(
+                db, store_id=STORE, session_date=DATE, counted_paisa=100000, actor=MANAGER)
+            assert link["ok"] and link["created"], link
+            sid = link["session_id"]
+        elif door == "cash_register":
+            out = _cr_close_two_drawers(
+                db, monkeypatch, denominations=notes, closing_count_state="COUNTED")
+            assert out["till_link_ok"] is True
+            sid = out["till_session_id"]
+        else:
+            sid = day_end(closing_cash=1000.0, system_cash=1000.0)["close"]["till_session_id"]
+        drawer = _till(db, sid)
+        assert drawer["status"] == till.STATUS_BLIND_SUBMITTED
+        assert drawer["manager_followup"]["pending"] is True
+        assert [r for r in audit_rows if r.get("entity_id") == sid] == []
+        up.append(True)
+        till.list_sessions(db, store_id=STORE)  # the Blind EOD Tally loads
+        mine = [r for r in audit_rows if r.get("entity_id") == sid]
+        assert [r["action"] for r in mine] == ["till.open", "till.blind_submit"]
+        assert mine[0]["after_state"] == {"status": till.STATUS_OPEN, "opening_float_paisa": 0}
+        assert _till(db, sid)["manager_followup"]["pending"] is False
+        till.get_session(db, sid)
+        till.list_sessions(db, store_id=STORE)
+        assert len([r for r in audit_rows if r.get("entity_id") == sid]) == 2
+
+    def test_open_count_and_lock_with_the_audit_store_down_keep_all_three_rows(
+        self, db, monkeypatch, audit_rows
+    ):
+        up = []
+        store = _AuditStore(audit_rows, up=lambda: bool(up))
+        monkeypatch.setattr("api.dependencies.get_audit_repository", lambda: store)
+        sid = self._short(db)
+        assert till.lock_session(db, sid, actor=MANAGER, variance_note="Rs 500 short")["ok"]
+        assert audit_rows == []
+        up.append(True)
+        till.get_session(db, sid)
+        assert [r["action"] for r in audit_rows] == ["till.open", "till.blind_submit", "till.lock"]
+        assert [r["user_id"] for r in audit_rows] == ["u-cash", "u-cash", "u-mgr"]
+        assert _till(db, sid)["manager_followup"]["pending"] is False
+
+    def test_a_count_on_a_drawer_whose_open_row_is_paid_owes_only_its_own(self, db, audit_rows):
+        """Control: nothing owed by the open, nothing carried."""
+        sid = self._short(db)
+        owed = _till(db, sid)["manager_followup"]
+        assert [t["row"]["action"] for t in owed["tasks"]] == ["till.blind_submit"]
+        assert [r["action"] for r in audit_rows] == ["till.open", "till.blind_submit"]
+
     def test_every_till_write_has_one_row_and_a_relock_is_a_new_row(self, db, audit_rows):
         sid = self._locked(db)
         assert till.reopen_session(db, sid, reason="recount", actor=MANAGER)["ok"]
@@ -4129,6 +4270,59 @@ def test_r12_till_audit_rows_survive_a_lost_ack_on_real_mongo(monkeypatch):
         assert (stored["reopen_count"], len(stored["history"])) == (1, 1)
         assert stored["manager_followup"]["pending"] is False
         assert tasks.count_documents({}) == 1
+    finally:
+        client.drop_database(name)
+        client.close()
+
+
+def test_r13_open_and_count_with_the_audit_store_down_on_real_mongo(monkeypatch):
+    """Native PyMongo, the REAL AuditRepository (hash chain). One close on a
+    day with no drawer opens AND counts it in one request while ``audit_logs``
+    cannot be read or written; the drawer is then locked, still down. When
+    the store is back, one read writes ``till.open``, ``till.blind_submit``
+    and ``till.lock`` -- the count used to drop the row the open owed."""
+    from pymongo.collection import Collection
+
+    from database.repositories.audit_chain import verify_chain
+    from database.repositories.audit_repository import AuditRepository
+
+    client, real_db, name = _real_till_db()
+    try:
+        till.ensure_till_indexes(real_db)
+        _real_task_repo(monkeypatch, real_db)
+        monkeypatch.setattr(
+            "api.dependencies.get_audit_repository", lambda: AuditRepository(real_db.audit_logs))
+        _cash_sale(real_db, 1000, datetime(2026, 11, 4, 5, 0))
+        down = [True]
+        for method in ("find_one", "insert_one"):
+            real = getattr(Collection, method)
+
+            def _fault(self, *a, _real=real, **k):
+                if down and self.database.name == name and self.name == "audit_logs":
+                    raise AutoReconnect("native audit store fault")
+                return _real(self, *a, **k)
+
+            monkeypatch.setattr(Collection, method, _fault)
+
+        link = till.record_screen_close(
+            real_db, store_id=STORE, session_date=DATE, counted_paisa=50000, actor=CASHIER)
+        assert link["ok"] and link["created"] and link["counted"], link
+        sid = link["session_id"]
+        assert till.lock_session(real_db, sid, actor=MANAGER, variance_note="Rs 500 short")["ok"]
+        stored = real_db.till_sessions.find_one({"_id": sid})
+        assert stored["status"] == till.STATUS_LOCKED
+        assert stored["manager_followup"]["pending"] is True
+        assert real_db.audit_logs.count_documents({}) == 0
+
+        down.clear()
+        till.list_sessions(real_db, store_id=STORE)
+        till.get_session(real_db, sid)
+        rows = list(real_db.audit_logs.find({"entity_id": sid}).sort("seq", 1))
+        assert [r["action"] for r in rows] == ["till.open", "till.blind_submit", "till.lock"]
+        assert [r["user_id"] for r in rows] == ["u-cash", "u-cash", "u-mgr"]
+        chain = verify_chain(real_db.audit_logs)
+        assert chain["intact"] and chain["entries_checked"] == 3, chain
+        assert real_db.till_sessions.find_one({"_id": sid})["manager_followup"]["pending"] is False
     finally:
         client.drop_database(name)
         client.close()
