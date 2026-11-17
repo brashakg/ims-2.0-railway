@@ -955,6 +955,14 @@ async def complete_task(
             detail=f"Task is already in '{current_status}' status and cannot be completed.",
         )
 
+    ref = str(task.get("source_ref") or "")
+    if ref.startswith("return_restock_blocked:"):
+        # D109(2): the person who checked a stopped stock step by hand is
+        # recorded on the return BEFORE its task closes (503: it stays open).
+        from .returns import note_units_checked
+
+        note_units_checked(ref.split(":", 1)[1], current_user)
+
     now = datetime.now()
     result = repo.update(
         task_id,
