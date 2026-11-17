@@ -1543,6 +1543,11 @@ def test_r2_a_an_unreadable_booked_check_is_failed_never_a_second_note(db, monke
     an older import stored (a random _id, no index) the re-import booked a
     second ledger row. No answer is now a failed refund the next run heals."""
     shopify_ingest = _importer(db, monkeypatch)
+
+    def no_index(self, *a, **k):
+        raise RuntimeError("unique index cannot be built")
+
+    monkeypatch.setattr(mongomock.collection.Collection, "create_index", no_index)
     order = _imported_two_piece(db, "RD")
     payload = {"id": order["shopify_order_id"], "financial_status": "partially_refunded",
                "refunds": [dict(_RD_REFUND)]}
@@ -1560,11 +1565,7 @@ def test_r2_a_an_unreadable_booked_check_is_failed_never_a_second_note(db, monke
             raise RuntimeError(f"{self.name} unavailable")
         return real(self, *a, **k)
 
-    def no_index(self, *a, **k):
-        raise RuntimeError("unique index cannot be built")
-
     monkeypatch.setattr(mongomock.collection.Collection, "find_one", find_one)
-    monkeypatch.setattr(mongomock.collection.Collection, "create_index", no_index)
     again = shopify_ingest._book_historical_refund_credit_notes(db, payload, order)
     assert (again["credit_notes"], again["cn_failed"], again["cn_failed_refund_ids"]) == (0, 1, ["RF-RD"])
     down[0] = False
