@@ -17,9 +17,9 @@ is created WITHOUT any index on returns.return_id: nothing here may depend on
 that backstop (D95(1)).
 
 Where: CI's mongo service (MONGODB_URL). On a PC: MONGO_HOST / MONGO_PORT /
-MONGO_DATABASE of a loopback Mongo (a database named ims_claude_*); with no
-Mongo the tests skip locally and FAIL in CI. Each test uses its own database
-and drops it. No emoji (cp1252).
+MONGO_DATABASE of a loopback Mongo (MONGO_DATABASE is only a name prefix);
+with no Mongo the tests skip locally and FAIL in CI. Each test creates its
+own database "<prefix>_<8 hex>" and drops it. No emoji (cp1252).
 """
 
 from __future__ import annotations
@@ -62,8 +62,8 @@ def _open_native():
     MONGODB_URL / localhost:27017 only, so this file decides for itself."""
     host, port = os.getenv("MONGO_HOST"), os.getenv("MONGO_PORT")
     if host and port:
-        base = os.getenv("MONGO_DATABASE") or "ims_claude_d95_unit"
-        assert host in ("127.0.0.1", "localhost") and base.startswith("ims_claude_"), (host, base)
+        base = os.getenv("MONGO_DATABASE") or "ims_d95_unit"
+        assert host in ("127.0.0.1", "localhost"), host  # a developer's own loopback Mongo only
         url = f"mongodb://{host}:{port}"
     else:
         url, base = os.getenv("MONGODB_URL") or "mongodb://localhost:27017", "ims_test_d95"
@@ -83,7 +83,7 @@ def native(monkeypatch):
     bill, its two units SOLD, real stock / task / ledger collections."""
     client, name = _open_native()
     db = client[name]
-    assert db.name == name and name.startswith(("ims_claude_", "ims_test_d95_")), name
+    assert db.name == name and name not in client.list_database_names(), name  # fresh, this test's own
     env = _wire(monkeypatch, db)
     monkeypatch.setattr(returns_router, "get_stock_repository", lambda: StockRepository(db["stock_units"]))
     monkeypatch.setattr(returns_router, "get_product_repository", lambda: None)
