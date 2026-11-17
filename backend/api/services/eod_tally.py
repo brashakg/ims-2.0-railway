@@ -773,6 +773,35 @@ def _own_share(exp: Dict[str, Any], earlier: List[Dict[str, Any]]) -> Dict[str, 
     }
 
 
+def moved_since_count(db, drawer: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """D111: the cash that moved on a COUNTED drawer's shop-day after the
+    day's counts, by the D60 rule above (``_own_share``): the day so far
+    minus what every counted drawer of the day, this one included, was
+    charged with at its count.
+
+    "Cash since the count's instant" cannot be read back: payouts are booked
+    by day only, so the day's payouts already out of the standing count were
+    taken off again (a false excess), and orders are read by created_at, so a
+    balance paid after the count on an order opened before it was in no
+    figure. ``opening_float_paisa`` of the result is the standing count.
+
+    None when a counted drawer's own share is not known (an older-code
+    snapshot beside another drawer, D76/D86(3)): no comparison can be made.
+    RAISES when a read fails: a zero here would be stored as a variance."""
+    counted = [drawer, *_counted_drawers(db, drawer)]
+    if any(s.get("cash_sales_paisa") is None for s in counted) or (
+        len(counted) > 1 and any("expected_net_of_drawers" not in s for s in counted)
+    ):
+        return None
+    store_id = drawer.get("store_id")
+    ws, we = _session_day_window(drawer)
+    payouts, off_till_excluded = auto_cash_payouts_paisa(db, store_id, ws, we)
+    exp = compute_expected(
+        db, store_id, ws, we, int(drawer.get("blind_count_paisa") or 0), payouts
+    )
+    return {**_own_share(exp, counted), "off_till_excluded": off_till_excluded}
+
+
 # ---------------------------------------------------------------------------
 # The per-face drawer ledger (denominated tally)
 # ---------------------------------------------------------------------------

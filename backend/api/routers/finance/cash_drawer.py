@@ -246,14 +246,9 @@ async def close_cash_register(
     # written: answering zero stored a false variance, demanded a note and
     # alerted the manager for a drawer that balanced (D53). The session stays
     # OPEN and the same close can be sent again.
-    def _window_cash(start):
+    def _strict(read):
         try:
-            sales, refunds = _cash_sales_for_window(
-                db, store_id, start, end_iso, strict=True
-            )
-            return sales, refunds, _cash_expenses_for_window(
-                db, store_id, start, end_iso, strict=True
-            )
+            return read()
         except Exception:  # noqa: BLE001
             logger.exception("Cash register close: cash read failed for %s", body.session_id)
             raise HTTPException(
@@ -264,8 +259,14 @@ async def close_cash_register(
                 ),
             )
 
-    cash_sales, cash_refunds, _cash_exp = _window_cash(start_iso)
+    cash_sales, cash_refunds = _strict(
+        lambda: _cash_sales_for_window(db, store_id, start_iso, end_iso, strict=True)
+    )
+    _cash_exp = _strict(
+        lambda: _cash_expenses_for_window(db, store_id, start_iso, end_iso, strict=True)
+    )
     cash_expenses = _cash_exp.total
+    off_till_excluded = _cash_exp.excluded_count
     opening_float = float(session.get("opening_float", 0) or 0)
 
     denoms = cash_register.normalize_denominations(
@@ -343,15 +344,26 @@ async def close_cash_register(
     # against that count plus the cash moved since it. Comparing the EARLIER
     # count with the LATER cash stored a shortage that did not exist, demanded
     # a note for it and alerted the manager (Rs 3,000 counted, Rs 500 taken
-    # after: Rs 3,500 in hand read Rs 500 short). The window therefore starts
-    # at that count, not at this session's opening: cash taken in between is in
-    # the drawer and in no earlier figure. The till's count is not replaced.
+    # after: Rs 3,500 in hand read Rs 500 short). Its cash is therefore what
+    # moved since that count, not since this session's opening: cash taken in
+    # between is in the drawer and in no earlier figure. The till's count is
+    # not replaced.
+    # That cash is NOT re-read from the count's instant: payouts are booked by
+    # day and orders are read by created_at, so that read took the day's
+    # payouts off twice (a false excess) and missed a balance paid later on an
+    # earlier order. It is the day so far minus what the day's counted drawers
+    # were charged with at their counts -- the till's own D60 rule.
     standing = till_service.counted_before(till_link, _to_dt(start_iso))
+    moved = None
     if standing is not None:
         start_iso = standing["at"].isoformat()
-        cash_sales, cash_refunds, _cash_exp = _window_cash(start_iso)
-        cash_expenses = _cash_exp.total
         opening_float = cash_denom.paisa_to_rupees(standing["paisa"])
+        moved = _strict(lambda: till_service.moved_since_count(db, till_link["session"]))
+        if moved is not None:
+            cash_sales = cash_denom.paisa_to_rupees(moved["cash_sales_paisa"])
+            cash_refunds = cash_denom.paisa_to_rupees(moved["cash_refunds_paisa"])
+            cash_expenses = cash_denom.paisa_to_rupees(moved["cash_payouts_paisa"])
+            off_till_excluded = moved["off_till_excluded"]
 
     summary = cash_register.build_close_summary(
         opening_float=opening_float,
@@ -403,6 +415,9 @@ async def close_cash_register(
         by_mode_breakdown = _recon.get("by_mode")
     except Exception:  # noqa: BLE001
         by_mode_breakdown = None
+    if moved is not None:
+        # The D111 session's tenders on the same basis as its cash above.
+        by_mode_breakdown = moved["by_mode"]
 
     # Non-blocking, AMOUNT-MATCHED double-count advisory: a manual CASH expense
     # that matches a recorded cash refund to the paisa is probably the same money
@@ -444,14 +459,19 @@ async def close_cash_register(
     # The same withholding when the link failed before the day's drawers could
     # be read: a whole-window comparison there could be a false shortage.
     # Not for a D111 session: its opening is ONE drawer's standing count and
-    # its cash is what moved after it, so no other drawer is in its figures.
+    # its cash is what moved after every count of the day, so no other
+    # drawer's cash or payouts are in its figures.
     withheld = (
         None if standing is not None else till_service.withheld_comparison(till_link)
     )
     several_drawers = withheld is not None
-    if several_drawers:
+    # A D111 session whose cash since the count is not known (a counted
+    # drawer of the day holds an older-code snapshot, D76): nothing is
+    # compared and its window figures are not shown as its own (D86(3)).
+    uncompared = standing is not None and moved is None
+    if several_drawers or uncompared:
         summary["variance"] = None
-        summary["variance_status"] = withheld
+        summary["variance_status"] = withheld or cash_register.COMPARISON_UNAVAILABLE
 
     # WHAT THE BAND JUDGES. One drawer: the one counted figure for the day.
     # Several drawers (D53): no whole-day figure, so the drawer THIS close
@@ -542,9 +562,9 @@ async def close_cash_register(
         # record: an expected-cash figure that quietly leaves something out is
         # exactly the "screen stating something the system knows is not true"
         # that PR #960 was written to kill. Count only -- never the amount.
-        "off_till_expense_advisory": bool(_cash_exp.excluded_count),
+        "off_till_expense_advisory": bool(off_till_excluded),
         "off_till_expense_message": (
-            OFF_TILL_EXPENSE_MESSAGE if _cash_exp.excluded_count else None
+            OFF_TILL_EXPENSE_MESSAGE if off_till_excluded else None
         ),
         "negative_expected_advisory": summary.get("negative_expected_advisory", False),
         "negative_expected_message": summary.get("negative_expected_message"),
@@ -599,6 +619,16 @@ async def close_cash_register(
             "task_id": till_service.followup_task_id("uncounted", body.session_id),
         }
         if counted is not None and not till_link.get("ok")
+        else None,
+        # A sheet nothing could judge is checked by hand (as on the till, D76).
+        {
+            "kind": "uncompared",
+            "store_id": store_id,
+            "session_date": close_day,
+            "session_id": body.session_id,
+            "task_id": till_service.followup_task_id("uncompared", body.session_id),
+        }
+        if uncompared and not count_adopted
         else None,
     )
     # Guarded on "not yet CLOSED": of two closes sent at once only one lands,
