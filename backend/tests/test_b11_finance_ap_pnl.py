@@ -1475,3 +1475,282 @@ def test_l3_22_an_unreadable_book_is_unavailable_never_every_line_unmatched(monk
         _import(d, 100, monkeypatch)
     assert err.value.status_code == 503
     assert d.bank_statements.count_documents({}) == 0
+
+
+# --------------------------------------------------------------------------
+# Codex round 2 (PR-1423-round2.md): R2-A the importer without its unique
+# index, R2-B a bank statement that was not saved.
+# --------------------------------------------------------------------------
+
+_RD_REFUND = {"id": "RF-RD", "processed_at": "2026-11-08T05:00:00+00:00",
+              "refund_line_items": [{"line_item_id": "LI-RD", "quantity": 1, "subtotal": 952.38,
+                                     "total_tax": 47.62}],
+              "transactions": [{"kind": "refund", "status": "success", "amount": "1000.00"}]}
+
+
+def _importer(db, monkeypatch):
+    from api.routers import returns as rr
+    from api.services import shopify_ingest
+
+    monkeypatch.setattr(rr, "_orders_coll", lambda: _Positional(db.orders))
+    monkeypatch.setattr(rr, "_returns_coll", lambda: db.returns)
+    return shopify_ingest
+
+
+def test_r2_a_two_import_runs_without_the_unique_index_book_one_ledger_row(db, monkeypatch):
+    """Codex R2-A: with the historical-ref unique index missing (its build
+    failed, logged and skipped), two import runs that had both passed the
+    "is it booked" read each inserted a ledger row: Rs 1,800 and twice the
+    GST for one Rs 900 refund. The second run is started here from inside the
+    first run's ledger insert -- after its read, before its row lands -- which
+    is exactly that interleaving. Now the row is insert-once on its own _id."""
+    shopify_ingest = _importer(db, monkeypatch)
+    order = _imported_two_piece(db, "RD")
+    payload = {"id": order["shopify_order_id"], "financial_status": "partially_refunded",
+               "refunds": [dict(_RD_REFUND)]}
+    real_insert = mongomock.collection.Collection.insert_one
+    inner = []
+
+    def no_index(self, *a, **k):
+        if self.name == "credit_note_ledger":
+            raise RuntimeError("unique index cannot be built")
+        return None
+
+    def insert_one(self, doc, *a, **k):
+        if self.name == "credit_note_ledger" and not inner:
+            inner.append(None)  # the other run: read done, nothing stored yet
+            inner[0] = shopify_ingest._book_historical_refund_credit_notes(db, payload, order)
+        return real_insert(self, doc, *a, **k)
+
+    monkeypatch.setattr(mongomock.collection.Collection, "create_index", no_index)
+    monkeypatch.setattr(mongomock.collection.Collection, "insert_one", insert_one)
+    outer = shopify_ingest._book_historical_refund_credit_notes(db, payload, order)
+    assert inner and inner[0]["credit_notes"] == 1
+    rows = list(db.credit_note_ledger.find({"shopify_refund_id": "RF-RD"}))
+    assert len(rows) == 1, [r["_id"] for r in rows]
+    assert (rows[0]["gross_refund"], rows[0]["tax"]) == (1000.0, 47.62)
+    assert rows[0]["_id"] == rows[0]["ref"] == "SHOPIFY-HIST-REFUND-RF-RD"
+    # The run that lost the insert is a duplicate: not booked, not failed.
+    assert (outer["credit_notes"], outer["cn_failed"], outer["duplicate_refunds"]) == (0, 0, 1)
+    assert db.returns.count_documents({"shopify_refund_id": "RF-RD"}) == 1
+    assert db.orders.find_one({"order_id": "RD"})["items"][0]["returned_qty"] == 1.0
+    pnl = _pnl()
+    assert pnl["returns_taxable"] == 952.38 and pnl["returns_tax"] == 47.62
+
+
+def test_r2_a_an_unreadable_booked_check_is_failed_never_a_second_note(db, monkeypatch):
+    """The "is it booked" read failing was taken as "not booked": over a note
+    an older import stored (a random _id, no index) the re-import booked a
+    second ledger row. No answer is now a failed refund the next run heals."""
+    shopify_ingest = _importer(db, monkeypatch)
+    order = _imported_two_piece(db, "RD")
+    payload = {"id": order["shopify_order_id"], "financial_status": "partially_refunded",
+               "refunds": [dict(_RD_REFUND)]}
+    first = shopify_ingest._book_historical_refund_credit_notes(db, payload, order)
+    assert first["credit_notes"] == 1
+    # As an older import stored it: the same row under a random _id.
+    old = db.credit_note_ledger.find_one({"shopify_refund_id": "RF-RD"})
+    db.credit_note_ledger.delete_one({"_id": old["_id"]})
+    db.credit_note_ledger.insert_one({**old, "_id": uuid.uuid4().hex})
+    real = mongomock.collection.Collection.find_one
+    down = [True]
+
+    def find_one(self, *a, **k):
+        if down[0] and self.name in ("returns", "credit_note_ledger", "shopify_refund_review"):
+            raise RuntimeError(f"{self.name} unavailable")
+        return real(self, *a, **k)
+
+    def no_index(self, *a, **k):
+        raise RuntimeError("unique index cannot be built")
+
+    monkeypatch.setattr(mongomock.collection.Collection, "find_one", find_one)
+    monkeypatch.setattr(mongomock.collection.Collection, "create_index", no_index)
+    again = shopify_ingest._book_historical_refund_credit_notes(db, payload, order)
+    assert (again["credit_notes"], again["cn_failed"], again["cn_failed_refund_ids"]) == (0, 1, ["RF-RD"])
+    down[0] = False
+    assert db.credit_note_ledger.count_documents({"shopify_refund_id": "RF-RD"}) == 1
+    healthy = shopify_ingest._book_historical_refund_credit_notes(db, payload, order)
+    assert (healthy["credit_notes"], healthy["cn_failed"], healthy["duplicate_refunds"]) == (0, 0, 1)
+    assert db.credit_note_ledger.count_documents({"shopify_refund_id": "RF-RD"}) == 1
+    assert db.orders.find_one({"order_id": "RD"})["items"][0]["returned_qty"] == 1.0
+
+
+def test_r2_a_a_whole_order_note_whose_covered_stamp_did_not_land_is_failed_and_finished(db, monkeypatch):
+    """A fully refunded order with two amount-only refunds books one
+    whole-order note and stamps both refund ids as covered. The second stamp
+    not landing (a crash between the two writes) read as a complete run, and
+    every re-run left that refund unstamped for good -- its stamped sibling
+    made the run a 'duplicate'. Now it is reported failed and the next run
+    stamps it, with no second note."""
+    shopify_ingest = _importer(db, monkeypatch)
+    order = _imported_two_piece(db, "WO")
+    payload = {"id": order["shopify_order_id"], "financial_status": "refunded", "refunds": [
+        {"id": rid, "processed_at": "2026-11-08T05:00:00+00:00",
+         "transactions": [{"kind": "refund", "status": "success", "amount": "1000.00"}]}
+        for rid in ("RF-WO-A", "RF-WO-B")]}
+    real = mongomock.collection.Collection.insert_one
+    seen = []
+
+    def insert_one(self, doc, *a, **k):
+        if self.name == "returns" and doc.get("return_id") == "RET-HIST-RF-WO-B" and not seen:
+            seen.append(1)
+            raise RuntimeError("returns write refused")
+        return real(self, doc, *a, **k)
+
+    monkeypatch.setattr(mongomock.collection.Collection, "insert_one", insert_one)
+    first = shopify_ingest._book_historical_refund_credit_notes(db, payload, order)
+    assert seen and first["credit_notes"] == 1
+    assert (first["cn_failed"], first["cn_failed_refund_ids"]) == (1, ["RF-WO-B"])
+    assert db.returns.find_one({"shopify_refund_id": "RF-WO-B"}) is None
+    again = shopify_ingest._book_historical_refund_credit_notes(db, payload, order)
+    assert (again["credit_notes"], again["cn_failed"], again["unmapped_refunds"]) == (0, 0, 0)
+    stamp = db.returns.find_one({"shopify_refund_id": "RF-WO-B"})
+    assert stamp and stamp["covered_by_ref"] == f"SHOPIFY-HIST-REFUND-orderfull:{order['shopify_order_id']}"
+    # One whole-order note, never one more for the refund finished late.
+    notes = list(db.credit_note_ledger.find({}))
+    assert len(notes) == 1 and notes[0]["gross_refund"] == 2000.0
+    third = shopify_ingest._book_historical_refund_credit_notes(db, payload, order)
+    assert (third["credit_notes"], third["cn_failed"]) == (0, 0)
+    assert db.credit_note_ledger.count_documents({}) == 1 and db.returns.count_documents({}) == 3
+
+
+def _upload(d, monkeypatch, amount=100, **kw):
+    from starlette.datastructures import UploadFile
+
+    monkeypatch.setattr(bank, "_get_db", lambda: d)
+    csv = f"Date,Description,Debit,Credit,Balance\n2026-11-04,NEFT IN,0,{amount},5000\n"
+    args = {"store_id": "S1", "account_name": "B", **kw}
+    return asyncio.run(bank.import_bank_statement(
+        file=UploadFile(filename="s.csv", file=io.BytesIO(csv.encode())), current_user=SU, **args))
+
+
+def _bank_insert_fault(monkeypatch, lands, times=1):
+    real = mongomock.collection.Collection.insert_one
+    seen = []
+
+    def insert_one(self, doc, *a, **k):
+        if self.name == "bank_statements" and len(seen) < times:
+            seen.append(doc["statement_id"])
+            if lands:
+                real(self, doc, *a, **k)
+            raise RuntimeError("bank_statements write: no reply")
+        return real(self, doc, *a, **k)
+
+    monkeypatch.setattr(mongomock.collection.Collection, "insert_one", insert_one)
+    return seen
+
+
+def test_r2_b_a_statement_that_was_not_saved_is_never_answered_as_saved(monkeypatch):
+    """Codex R2-B: the save was refused and the import still answered 200
+    with a statement_id nothing was stored under (its GET a 404)."""
+    from fastapi import HTTPException
+
+    d = mongomock.MongoClient()[f"b11_{uuid.uuid4().hex[:8]}"]
+    seen = _bank_insert_fault(monkeypatch, lands=False)
+    with pytest.raises(HTTPException) as err:
+        _upload(d, monkeypatch)
+    assert seen and err.value.status_code == 503 and err.value.detail == bank._NOT_SAVED
+    assert d.bank_statements.count_documents({}) == 0
+    # The retry the message asks for saves it, once.
+    out = _upload(d, monkeypatch)
+    assert d.bank_statements.count_documents({}) == 1
+    got = asyncio.run(bank.get_bank_statement(out["statement_id"], current_user=SU))
+    assert got["statement_id"] == out["statement_id"] and got["rows"] == out["rows"]
+
+
+def test_r2_b_a_saved_statement_whose_reply_was_lost_is_answered_as_saved(monkeypatch):
+    """The other half: the save landed and only its reply was lost. That is a
+    saved statement (never a 'not saved' the accountant uploads again)."""
+    d = mongomock.MongoClient()[f"b11_{uuid.uuid4().hex[:8]}"]
+    seen = _bank_insert_fault(monkeypatch, lands=True)
+    out = _upload(d, monkeypatch)
+    assert seen == [out["statement_id"]] and d.bank_statements.count_documents({}) == 1
+    assert d.bank_statements.find_one({"statement_id": out["statement_id"]})["rows"] == out["rows"]
+
+
+def test_r2_b_a_save_that_cannot_be_confirmed_says_so(monkeypatch):
+    """Neither the save nor the read back answered: unknown, said plainly --
+    never 200, never 'not saved'."""
+    from fastapi import HTTPException
+
+    d = mongomock.MongoClient()[f"b11_{uuid.uuid4().hex[:8]}"]
+    _bank_insert_fault(monkeypatch, lands=True)
+
+    def find_one(self, *a, **k):
+        raise RuntimeError("bank_statements unavailable")
+
+    monkeypatch.setattr(mongomock.collection.Collection, "find_one", find_one)
+    with pytest.raises(HTTPException) as err:
+        _upload(d, monkeypatch)
+    assert err.value.status_code == 503 and err.value.detail == bank._SAVE_UNKNOWN
+
+
+def test_r2_b_a_retry_with_its_request_id_saves_one_statement(monkeypatch):
+    """request_id: the retry after a lost reply (or an unconfirmed save)
+    answers with the statement already saved; the same id with another file,
+    shop or account is refused; two copies at once save one."""
+    from fastapi import HTTPException
+
+    d = mongomock.MongoClient()[f"b11_{uuid.uuid4().hex[:8]}"]
+    seen = _bank_insert_fault(monkeypatch, lands=True)
+    first = _upload(d, monkeypatch, request_id="REQ-1")  # landed, reply lost: read back
+    again = _upload(d, monkeypatch, request_id="REQ-1")
+    assert seen and again == first and d.bank_statements.count_documents({}) == 1
+    for changed in ({"amount": 250}, {"account_name": "Other"}, {"store_id": "S2"}):
+        with pytest.raises(HTTPException) as err:
+            _upload(d, monkeypatch, request_id="REQ-1", **changed)
+        assert err.value.status_code == 409, changed
+    assert d.bank_statements.count_documents({}) == 1
+    # Another shop's accountant holding the same id learns nothing of it.
+    other = {"user_id": "a2", "roles": ["ACCOUNTANT"], "store_ids": ["S2"], "active_store_id": "S2"}
+    from starlette.datastructures import UploadFile
+    with pytest.raises(HTTPException) as err:
+        asyncio.run(bank.import_bank_statement(
+            file=UploadFile(filename="s.csv", file=io.BytesIO(b"Date,Description,Debit,Credit\n2026-11-04,X,0,100\n")),
+            store_id=None, account_name="B", request_id="REQ-1", current_user=other))
+    assert err.value.status_code == 404
+    # The same request racing itself: the second copy runs inside the first
+    # one's insert (both past the replay read) and only one is stored.
+    from concurrent.futures import ThreadPoolExecutor
+
+    real = mongomock.collection.Collection.insert_one
+    twin = []
+
+    def insert_one(self, doc, *a, **k):
+        if self.name == "bank_statements" and not twin:
+            twin.append(None)
+            # (its own thread: a handler's event loop is already running here)
+            with ThreadPoolExecutor(1) as pool:
+                twin[0] = pool.submit(_upload, d, monkeypatch, request_id="REQ-2").result()
+        return real(self, doc, *a, **k)
+
+    monkeypatch.setattr(mongomock.collection.Collection, "insert_one", insert_one)
+    raced = _upload(d, monkeypatch, request_id="REQ-2")
+    assert twin[0] == raced and d.bank_statements.count_documents({"request_id": "REQ-2"}) == 1
+
+
+def test_r2_b_no_database_or_an_unreadable_one_is_unavailable_never_empty(monkeypatch):
+    """A missing database answered the import 200 (unsaved) and the list as
+    'no statements'; a failed read answered the list empty and the statement
+    'not found'. Each is a 503."""
+    from fastapi import HTTPException
+
+    for call in (lambda: _upload(None, monkeypatch),
+                 lambda: asyncio.run(bank.list_bank_statements(store_id=None, limit=20, current_user=SU))):
+        monkeypatch.setattr(bank, "_get_db", lambda: None)
+        with pytest.raises(HTTPException) as err:
+            call()
+        assert err.value.status_code == 503
+    d = mongomock.MongoClient()[f"b11_{uuid.uuid4().hex[:8]}"]
+    sid = _upload(d, monkeypatch)["statement_id"]
+
+    def down(self, *a, **k):
+        raise RuntimeError("bank_statements unavailable")
+
+    monkeypatch.setattr(mongomock.collection.Collection, "find", down)
+    monkeypatch.setattr(mongomock.collection.Collection, "find_one", down)
+    for call in (lambda: bank.list_bank_statements(store_id=None, limit=20, current_user=SU),
+                 lambda: bank.get_bank_statement(sid, current_user=SU)):
+        with pytest.raises(HTTPException) as err:
+            asyncio.run(call())
+        assert err.value.status_code == 503 and err.value.detail == bank._STATEMENTS_UNREADABLE
