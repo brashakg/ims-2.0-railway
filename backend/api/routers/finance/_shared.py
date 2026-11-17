@@ -533,7 +533,7 @@ def pnl_by_category(orders, cost_by_product: dict, variance_by_category: Optiona
 
 def is_period_locked(db, month, year, *, strict: bool = False) -> bool:
     """True if the accounting period has been locked (closed). ``strict``: a
-    lock that could not be read raises instead of answering "not locked"."""
+    failed read raises instead of reading as "not locked"."""
     try:
         return (
             db.get_collection("period_locks").find_one(
@@ -547,22 +547,17 @@ def is_period_locked(db, month, year, *, strict: bool = False) -> bool:
         return False
 
 
-PERIOD_LOCK_UNREADABLE = "The period lock could not be read just now - please try again"
-
-
 def check_period_locked(db, posting_date, *, strict: bool = False) -> None:
     """Raise HTTPException(423) if the posting_date's month/year is locked.
 
     Fail-soft: if db is None or period_locks lookup fails, does not raise.
     Used by orders/returns/vendor-bills/payments to guard financial-period closure.
 
-    ``strict`` (opt-in; the manual journal doors): no database, or a lock that
-    could not be read, raises HTTPException(503) instead of letting the entry
-    through unchecked.
+    ``strict`` (payroll run / approve / mark paid): a lock that cannot be read
+    refuses with 503 instead. Those writes can wait for a retry, and letting
+    them through saved and approved payroll inside a locked month.
     """
     if db is None:
-        if strict:
-            raise HTTPException(status_code=503, detail=PERIOD_LOCK_UNREADABLE)
         return
     try:
         from datetime import date
@@ -577,9 +572,14 @@ def check_period_locked(db, posting_date, *, strict: bool = False) -> None:
             )
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception as exc:
         if strict:
-            raise HTTPException(status_code=503, detail=PERIOD_LOCK_UNREADABLE) from e
+            logger.error("Period lock read failed: %s", exc)
+            raise HTTPException(
+                status_code=503,
+                detail="Whether this accounting period is locked could not be "
+                "read, so nothing was saved. Try again.",
+            ) from exc
         # fail-soft: period check errors do not block posting
 
 
