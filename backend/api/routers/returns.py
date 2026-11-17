@@ -2728,11 +2728,14 @@ def _reactivate_original_unit(
     own_stock_id: Optional[str] = None,
     named_ids: Optional[set] = None,
     set_aside: Optional[Dict[str, Any]] = None,
+    only_ids: Optional[set] = None,
 ) -> Optional[str]:
     """Find the original serialized unit sold for this product and flip it back
     to AVAILABLE. Returns its stock_id, or None when no candidate is found.
     ``set_aside`` (F21-3, a DAMAGED return) is merged over the flip instead:
-    the unit comes back QUARANTINED, off sale, never left SOLD.
+    the unit comes back QUARANTINED, off sale, never left SOLD. ``only_ids``:
+    the units the return's record names (_reserve_damaged_units) -- no other
+    unit is a candidate.
 
     Preference order (most-specific first):
       1. a unit for (product_id, store_id) tied to THIS order_id with status
@@ -2789,7 +2792,7 @@ def _reactivate_original_unit(
     failed = False
     for unit in _line_unit_first(candidates, own_stock_id, named_ids or set()):
         sid = unit.get("stock_id") or unit.get("_id")
-        if not sid or sid in used_ids:
+        if not sid or sid in used_ids or (only_ids is not None and sid not in only_ids):
             continue
         # P1-C CLEAN RESALE LINEAGE: the unit is going BACK on the sellable
         # shelf, so it must NOT keep the attribution of the sale it was returned
@@ -3757,6 +3760,79 @@ def _restock_good_items(
     return result
 
 
+def _units_by_id(stock_repo: Any, ids: List[Any]) -> Dict[Any, Dict[str, Any]]:
+    """The stock rows of these unit ids (a legacy unit without stock_id is
+    known by its _id), each read ONCE by its own id: a row is never seen
+    half way through another writer's flip."""
+    if not ids:
+        return {}
+    rows = _find_stock(stock_repo, {"$or": [{"stock_id": {"$in": list(ids)}}, {"_id": {"$in": list(ids)}}]})
+    return {(u.get("stock_id") or u.get("_id")): u for u in rows}
+
+
+def _reserve_damaged_units(coll, stock_repo, return_id: str, lines: List[ReturnLine], order_id: str,
+                           order: Optional[Dict[str, Any]], note: str) -> Optional[List[Any]]:
+    """THE units a return sets aside as DAMAGED, named ONCE on its record
+    (``damaged_unit_ids``) by a compare-and-set on what was named before.
+    Every door that runs the set-aside -- the press, a second request of the
+    same press, the press that lost its record to Needs completing, the
+    record's Update stock -- flips only the units named here, so two of them
+    at once never set aside two units for one returned piece (counting and
+    then flipping did: the piece still with the customer became QUARANTINED
+    stock).
+
+    A named unit stays named while it is this return's (it carries the note)
+    or can still become it (SOLD on this order); one another return of the
+    bill took meanwhile is replaced, on the same compare-and-set. None: the
+    record or the stock cannot be read, or the record is not there -- nothing
+    is set aside on a guess (the record's Update stock does it)."""
+    line_units, named_ids = _order_line_units(order)
+
+    def _sid(unit):
+        return unit.get("stock_id") or unit.get("_id")
+
+    for _ in range(4):
+        try:
+            rec = coll.find_one({"return_id": return_id}) if coll is not None else {}
+            if rec is None:
+                return None
+            current = rec.get("damaged_unit_ids")
+            named = _units_by_id(stock_repo, current or [])
+            desired: List[Any] = []
+            for line in lines:
+                good = [sid for sid in (current or [])
+                        if (named.get(sid) or {}).get("product_id") == line.product_id
+                        and (named[sid].get("quarantine_notes") == note
+                             or (named[sid].get("status") == "SOLD" and named[sid].get("order_id") == order_id))]
+                left = int(round(line.return_qty)) - len([sid for sid in good if sid not in desired])
+                pool = list(good)
+                if left > 0:
+                    # Set aside already (a build before the units were named), then this order's SOLD units.
+                    pool += [_sid(u) for u in _find_stock(
+                        stock_repo, {"product_id": line.product_id, "quarantine_notes": note})]
+                    pool += [_sid(u) for u in _line_unit_first(
+                        _find_stock(stock_repo, {"product_id": line.product_id, "order_id": order_id,
+                                                 "status": "SOLD"}),
+                        line_units.get(str(line.order_item_id or "")), named_ids)]
+                left = int(round(line.return_qty))
+                for sid in pool:
+                    if left <= 0:
+                        break
+                    if sid and sid not in desired:
+                        desired.append(sid)
+                        left -= 1
+            if coll is None or desired == current:
+                return desired
+            if coll.update_one({"return_id": return_id, "damaged_unit_ids": current},
+                               {"$set": {"damaged_unit_ids": desired}}).matched_count:
+                return desired
+        except Exception as exc:  # noqa: BLE001 -- unknown: nothing set aside on a guess
+            logger.warning("[RETURNS] damaged units of %s not named, none set aside: %s", return_id, exc)
+            return None
+    logger.warning("[RETURNS] damaged units of %s not named (too many writers at once), none set aside", return_id)
+    return None
+
+
 def _quarantine_damaged_units(
     items: List[ReturnLine],
     order_id: Optional[str],
@@ -3770,10 +3846,11 @@ def _quarantine_damaged_units(
     a line whose sold unit cannot be found (a historical import) moves
     nothing. Fail-soft per unit. Returns the units set aside BY THIS RUN.
 
-    Idempotent per return (D95(2)): every unit it sets aside carries this
-    return's note, and a unit already set aside for this return is counted,
-    never a second one -- the press and the record's stock step may both run
-    it, and a line of several units keeps its other units SOLD. Stock that
+    Idempotent AND atomic per return (D92(2), D95(2)): the units are named
+    once on the return's record (_reserve_damaged_units) and only those are
+    flipped, each by a write filtered on SOLD -- the press, a second request
+    of it and the record's stock step may all run this at once, and a line
+    of several units keeps its other units SOLD. Stock or a record that
     cannot be read sets nothing aside (never on a guess).
 
     The unit stays quarantined at the shop it was sold from (an online
@@ -3791,63 +3868,63 @@ def _quarantine_damaged_units(
     used: set = set()
     out: List[Dict[str, Any]] = []
     note = f"Damaged, customer return {return_id}"[:200]
-    done: Dict[str, Optional[int]] = {}  # product -> units an earlier run set aside for this return
-    for line in lines:
-        if line.product_id not in done:
-            try:
-                done[line.product_id] = len(_find_stock(
-                    stock_repo, {"product_id": line.product_id, "quarantine_notes": note}))
-            except Exception as exc:  # noqa: BLE001 -- unknown: nothing set aside on a guess
-                logger.warning("[RETURNS] damaged units of %s unreadable, none set aside: %s", return_id, exc)
-                done[line.product_id] = None
-        if done[line.product_id] is None:
-            continue
-        for _ in range(int(round(line.return_qty))):
-            if done[line.product_id]:
-                done[line.product_id] -= 1  # set aside already, by an earlier run
-                continue
-            try:
-                sid = _reactivate_original_unit(
-                    stock_repo, line.product_id, None, order_id, used,
-                    exact_order_only=True,
-                    own_stock_id=line_units.get(str(line.order_item_id or "")),
-                    named_ids=named_ids,
-                    set_aside={
-                        "status": "QUARANTINED",
-                        "quarantine_reason": "CUSTOMER_RETURN_DAMAGED",
-                        "quarantine_at": datetime.now(timezone.utc),
-                        "quarantine_by": user_id,
-                        "quarantine_generation": uuid.uuid4().hex,
-                        "quarantine_notes": note,
-                        "quarantine_label_printed": False,
-                    },
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("[RETURNS] damaged unit not set aside: %s", exc)
-                continue
-            if not sid:
-                break
-            try:
-                unit = (_find_stock(stock_repo, {"stock_id": sid}) or [{}])[0]
-            except Exception:  # noqa: BLE001 -- the flip landed; only the shop is unknown
-                unit = {}
-            out.append({"stock_id": sid, "store_id": unit.get("store_id"),
-                        "product_id": line.product_id})
-            _audit_stock_transition(sid, "SOLD", "QUARANTINED", return_id,
-                                    unit.get("store_id"), user_id)
-            try:
-                from ..services import item_events as ie
+    coll = _returns_coll()
+    for _ in range(3):  # again only when another return of the bill took a named unit meanwhile
+        reserved = _reserve_damaged_units(coll, stock_repo, return_id, lines, order_id, order, note)
+        if not reserved:
+            break
+        for line in lines:
+            while True:
+                try:
+                    sid = _reactivate_original_unit(
+                        stock_repo, line.product_id, None, order_id, used,
+                        exact_order_only=True,
+                        own_stock_id=line_units.get(str(line.order_item_id or "")),
+                        named_ids=named_ids,
+                        only_ids=set(reserved),
+                        set_aside={
+                            "status": "QUARANTINED",
+                            "quarantine_reason": "CUSTOMER_RETURN_DAMAGED",
+                            "quarantine_at": datetime.now(timezone.utc),
+                            "quarantine_by": user_id,
+                            "quarantine_generation": uuid.uuid4().hex,
+                            "quarantine_notes": note,
+                            "quarantine_label_printed": False,
+                        },
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("[RETURNS] damaged unit not set aside: %s", exc)
+                    break
+                if not sid:
+                    break
+                try:
+                    unit = (_find_stock(stock_repo, {"stock_id": sid}) or [{}])[0]
+                except Exception:  # noqa: BLE001 -- the flip landed; only the shop is unknown
+                    unit = {}
+                out.append({"stock_id": sid, "store_id": unit.get("store_id"),
+                            "product_id": line.product_id})
+                _audit_stock_transition(sid, "SOLD", "QUARANTINED", return_id,
+                                        unit.get("store_id"), user_id)
+                try:
+                    from ..services import item_events as ie
 
-                ie.record_post_write_event(
-                    _get_db(), event_type=ie.ItemEventType.QUARANTINE_IN,
-                    actor_id=user_id or "", stock_id=sid,
-                    from_state=ie.StockState.SOLD, to_state=ie.StockState.QUARANTINED,
-                    store_id=unit.get("store_id"), product_id=line.product_id,
-                    source_type="RETURN", source_id=return_id,
-                    payload={"quarantine_reason": "CUSTOMER_RETURN_DAMAGED"},
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("[RETURNS] damaged unit ledger row failed: %s", exc)
+                    ie.record_post_write_event(
+                        _get_db(), event_type=ie.ItemEventType.QUARANTINE_IN,
+                        actor_id=user_id or "", stock_id=sid,
+                        from_state=ie.StockState.SOLD, to_state=ie.StockState.QUARANTINED,
+                        store_id=unit.get("store_id"), product_id=line.product_id,
+                        source_type="RETURN", source_id=return_id,
+                        payload={"quarantine_reason": "CUSTOMER_RETURN_DAMAGED"},
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("[RETURNS] damaged unit ledger row failed: %s", exc)
+        try:
+            rows = _units_by_id(stock_repo, reserved)
+            if all((rows.get(sid) or {}).get("quarantine_notes") == note for sid in reserved):
+                break  # every named unit is this return's now (set aside here or by another run)
+        except Exception as exc:  # noqa: BLE001 -- unknown: stop here, never a second guess
+            logger.warning("[RETURNS] damaged units of %s unreadable after the set-aside: %s", return_id, exc)
+            break
     return out
 
 
@@ -4607,8 +4684,16 @@ def _insert_record(coll, doc: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     insert landed -- its caller owns the return. Otherwise the record that is
     already there (another writer's, or the caller's own whose acknowledgement
     was lost; a record an older build wrote under another _id reads the same,
-    by its return id). RecordUnknown: neither can be said."""
+    by its return id -- looked for BEFORE the insert too, since it would not
+    collide on this _id). RecordUnknown: neither can be said."""
     rid = doc["return_id"]
+    try:
+        older = coll.find_one({"return_id": rid})
+    except Exception as exc:  # noqa: BLE001 -- the insert below still decides
+        logger.warning("[RETURNS] record of %s not looked for before its insert: %s", rid, exc)
+        older = None
+    if older is not None:
+        return older
     try:
         coll.insert_one({**doc, "_id": record_key(rid)})
         return None
@@ -5161,6 +5246,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
     # isinstance guard: when this endpoint is called directly (unit tests), the
     # default is the FastAPI Header(...) object, not a str -- don't .strip() it.
     idem_key = idempotency_key.strip() if isinstance(idempotency_key, str) else ""
+    replay: Optional[Dict[str, Any]] = None
     if idem_key:
         try:
             coll = _returns_coll()
@@ -5179,39 +5265,32 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
                     raise HTTPException(status_code=409, detail=(
                         f"This press already recorded return {existing.get('return_id')} with different "
                         "items or amounts. Reload the bill before starting a new return."))
-                if existing:
-                    logger.info(
-                        "[RETURNS] idempotency replay for key %s -> return %s",
-                        idem_key,
-                        existing.get("return_id"),
-                    )
-                    return {
-                        "return_id": existing.get("return_id"),
-                        "return_type": existing.get("return_type"),
-                        "returned_value": existing.get("returned_value"),
-                        "gross_refund": existing.get("gross_refund"),
-                        "restocking_fee": existing.get("restocking_fee"),
-                        "net_refund": existing.get("net_refund"),
-                        "points_paid_share": existing.get("points_paid_share", 0.0),
-                        "gst_breakup": existing.get("gst_breakup"),
-                        "refund_amount": existing.get("refund_amount"),
-                        "refund_method": existing.get("refund_method"),
-                        "credit_amount": existing.get("credit_amount"),
-                        "collect_amount": existing.get("collect_amount"),
-                        "settlement": existing.get("settlement"),
-                        "restocked": existing.get("restocked", []),
-                        "restock_applied": existing.get("restock_applied", False),
-                        "restock_stock_ids": existing.get("restock_stock_ids", []),
-                        # D95(2): the press stopped before it placed the units
-                        # (its record says so): the till is told, never silent.
-                        "stock_note": STOCK_PENDING_NOTE if existing.get("stock_pending") else None,
-                        "message": "Return already recorded (idempotent replay)",
-                        "_idempotent_replay": True,
-                    }
+                replay = existing
         except HTTPException:
             raise
         except Exception as _exc:  # noqa: BLE001
             logger.warning("[RETURNS] idempotency lookup skipped: %s", _exc)
+    if replay:
+        # Outside the fail-soft lookup: a record that WAS found is never
+        # followed by a fresh press of the same key.
+        logger.info("[RETURNS] idempotency replay for key %s -> return %s", idem_key, replay.get("return_id"))
+        # D95(3): this IS the "press Return again -> pay" answer of a press
+        # whose record landed unconfirmed (503), so it says everything the
+        # first answer says (_press_answer) and writes the audit row that
+        # press never reached (D84).
+        _audit_return_created(replay)
+        from .loyalty import points_waived as _points_waived
+
+        return {
+            **_press_answer(
+                replay,
+                points_waived=(float(replay.get("points_paid_share") or 0.0) > 0
+                               and _points_waived(replay.get("order_id"))),
+                # D95(2): the press stopped before it placed the units (its
+                # record says so): the till is told, never silent.
+                stock_note=STOCK_PENDING_NOTE if replay.get("stock_pending") else None),
+            "_idempotent_replay": True,
+        }
 
     # Accounting period lock: cannot create returns in a closed month.
     # IST audit: lock against the IST business day, not the UTC day --
@@ -6257,54 +6336,8 @@ async def _finish_press(coll, doc: Dict[str, Any], active_lines: List[ReturnLine
             except Exception as exc:  # noqa: BLE001
                 logger.error("[RETURNS] stock / points result of %s not stamped on its record: %s", return_id, exc)
 
-    # Audit log (optional, fail-soft).
-    try:
-        from ..dependencies import get_audit_repository
+    _audit_return_created(doc)
 
-        audit = get_audit_repository()
-        if audit is not None:
-            audit.create(
-                {
-                    "action": "RETURN_CREATED",
-                    "entity_type": "return",
-                    "entity_id": return_id,
-                    "store_id": store_id,
-                    "user_id": current_user.get("user_id"),
-                    "details": {
-                        "return_type": doc.get("return_type"),
-                        "returned_value": doc.get("returned_value"),
-                        "gross_refund": doc.get("gross_refund"),
-                        "restocking_fee": doc.get("restocking_fee"),
-                        "net_refund": doc.get("net_refund"),
-                        "refund_amount": doc.get("refund_amount"),
-                        "credit_amount": doc.get("credit_amount"),
-                        "collect_amount": doc.get("collect_amount"),
-                    },
-                    "created_at": doc.get("created_at"),
-                }
-            )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[RETURNS] audit log skipped: %s", exc)
-
-    # Response.
-    gross_refund, restocking_fee = doc.get("gross_refund"), float(doc.get("restocking_fee") or 0.0)
-    pays = round(float(doc.get("net_refund") or 0.0) - points_share, 2)
-    fee_note = (
-        f" (gross Rs {gross_refund} - restocking fee Rs {restocking_fee})"
-        if restocking_fee > 0
-        else ""
-    )
-    points_note = ""
-    if points_share > 0:
-        points_note = (
-            f"; Rs {points_share} was paid with points: {POINTS_WAIVED_NOTE}" if points_waived
-            else f"; Rs {points_share} paid with points goes back to the customer's points"
-        )
-    message = {
-        "RETURN": f"Refund of Rs {pays} recorded{fee_note}{points_note}",
-        "CREDIT_NOTE": f"Store credit of Rs {pays} issued{fee_note}{points_note}",
-        "EXCHANGE": "Exchange recorded",
-    }[doc.get("return_type")]
     stock_note = None  # shown on the till's done screen when set
     units = _stock_lines(active_lines)
     if not claimed and units and not restock_applied:
@@ -6324,45 +6357,119 @@ async def _finish_press(coll, doc: Dict[str, Any], active_lines: List[ReturnLine
             stock_note = ("Its units were NOT put back in stock (IMS could not start its stock step just now): "
                           + ("a task was raised to put them back - do not add them by hand" if _raised
                              else "tell the store manager - do not add them by hand"))
+
+    return _press_answer(
+        {**doc, "restocked": restocked, "restock_applied": restock_applied, "restock_stock_ids": restock_stock_ids,
+         "restock_store_id": restock_store_id, "restock_store_ids": restock_store_ids,
+         "restock_store_redirected_from": restock_result.get("restock_store_redirected_from"),
+         "restock_store_reason": restock_result.get("restock_store_reason")},
+        points_waived=points_waived, stock_note=stock_note)
+
+
+def _audit_return_created(rec: Dict[str, Any]) -> None:
+    """D84: ONE RETURN_CREATED audit row per counter return, under a fixed
+    id, written by whichever request finishes the press or replays it: the
+    identical re-press of a 503 writes the row its first press never reached,
+    and two requests of one press write it once. Fail-soft, as before."""
+    try:
+        from ..dependencies import get_audit_repository
+
+        audit = get_audit_repository()
+        if audit is None:
+            return
+        log_id = f"return_created:{rec.get('return_id')}"
+        find = getattr(audit, "find_by_id", None)
+        if find is not None and find(log_id):
+            return  # written already (a second insert under this id is refused anyway)
+        audit.create(
+            {
+                "log_id": log_id,
+                "action": "RETURN_CREATED",
+                "entity_type": "return",
+                "entity_id": rec.get("return_id"),
+                "store_id": rec.get("store_id"),
+                "user_id": rec.get("created_by"),
+                "details": {
+                    "return_type": rec.get("return_type"),
+                    "returned_value": rec.get("returned_value"),
+                    "gross_refund": rec.get("gross_refund"),
+                    "restocking_fee": rec.get("restocking_fee"),
+                    "net_refund": rec.get("net_refund"),
+                    "refund_amount": rec.get("refund_amount"),
+                    "credit_amount": rec.get("credit_amount"),
+                    "collect_amount": rec.get("collect_amount"),
+                },
+                "created_at": rec.get("created_at"),
+            }
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[RETURNS] audit log skipped: %s", exc)
+
+
+def _press_answer(rec: Dict[str, Any], *, points_waived: bool, stock_note: Optional[str]) -> Dict[str, Any]:
+    """THE answer of a counter press, read off its record: the first answer
+    (_finish_press) and the identical re-press of a landed record (the
+    replay) say the same. The till's Day-End note reads drawer_auto_netted and
+    refund_tenders: a replay without them read as "not netted" and told the
+    cashier to enter cash Day-End already nets as a paid-out (deducted
+    twice)."""
+    gross_refund, restocking_fee = rec.get("gross_refund"), float(rec.get("restocking_fee") or 0.0)
+    points_share = round(float(rec.get("points_paid_share") or 0.0), 2)
+    pays = round(float(rec.get("net_refund") or 0.0) - points_share, 2)
+    fee_note = (
+        f" (gross Rs {gross_refund} - restocking fee Rs {restocking_fee})"
+        if restocking_fee > 0
+        else ""
+    )
+    points_note = ""
+    if points_share > 0:
+        points_note = (
+            f"; Rs {points_share} was paid with points: {POINTS_WAIVED_NOTE}" if points_waived
+            else f"; Rs {points_share} paid with points goes back to the customer's points"
+        )
+    message = {
+        "RETURN": f"Refund of Rs {pays} recorded{fee_note}{points_note}",
+        "CREDIT_NOTE": f"Store credit of Rs {pays} issued{fee_note}{points_note}",
+        "EXCHANGE": "Exchange recorded",
+    }.get(rec.get("return_type"), "Return recorded")
+    if stock_note:
         message += ". " + stock_note
 
     return {
-        "return_id": return_id,
-        "return_type": doc.get("return_type"),
-        "returned_value": doc.get("returned_value"),
+        "return_id": rec.get("return_id"),
+        "return_type": rec.get("return_type"),
+        "returned_value": rec.get("returned_value"),
         "gross_refund": gross_refund,
         # The bill's round off this return gave back (scaled under a fee).
-        "round_off": doc.get("round_off"),
-        "restocking_fee": doc.get("restocking_fee"),
-        "net_refund": doc.get("net_refund"),
-        "points_paid_share": doc.get("points_paid_share"),
+        "round_off": rec.get("round_off"),
+        "restocking_fee": rec.get("restocking_fee"),
+        "net_refund": rec.get("net_refund"),
+        "points_paid_share": rec.get("points_paid_share"),
         # D28: True = this bill's points are settled by head office; none went back.
         "points_waived": points_waived,
-        "gst_breakup": doc.get("gst_breakup"),
-        "credit_note_number": doc.get("credit_note_number"),
-        "refund_amount": doc.get("refund_amount"),
-        "refund_method": doc.get("refund_method"),
-        "refund_tenders": doc.get("refund_tenders"),
-        "collect_method": doc.get("collect_method"),
-        "drawer_auto_netted": doc.get("drawer_auto_netted"),
-        "credit_amount": doc.get("credit_amount"),
+        "gst_breakup": rec.get("gst_breakup"),
+        "credit_note_number": rec.get("credit_note_number"),
+        "refund_amount": rec.get("refund_amount"),
+        "refund_method": rec.get("refund_method"),
+        "refund_tenders": rec.get("refund_tenders"),
+        "collect_method": rec.get("collect_method"),
+        "drawer_auto_netted": rec.get("drawer_auto_netted"),
+        "credit_amount": rec.get("credit_amount"),
         # The ledger row backing any store-credit portion, so the till can show
         # the customer what was issued (and a caller can verify it exists).
-        "credit_entry": doc.get("credit_entry"),
-        "collect_amount": doc.get("collect_amount"),
-        "settlement": doc.get("settlement"),
-        "restocked": restocked,
-        "restock_applied": restock_applied,
-        "restock_stock_ids": restock_stock_ids,
-        "restock_store_id": restock_store_id,
-        "restock_store_ids": restock_store_ids,
-        "restock_store_redirected_from": restock_result.get(
-            "restock_store_redirected_from"
-        ),
+        "credit_entry": rec.get("credit_entry"),
+        "collect_amount": rec.get("collect_amount"),
+        "settlement": rec.get("settlement"),
+        "restocked": rec.get("restocked") or [],
+        "restock_applied": bool(rec.get("restock_applied")),
+        "restock_stock_ids": rec.get("restock_stock_ids") or [],
+        "restock_store_id": rec.get("restock_store_id"),
+        "restock_store_ids": rec.get("restock_store_ids") or [],
+        "restock_store_redirected_from": rec.get("restock_store_redirected_from"),
         # Without the reason a caller sees redirected_from=<online store> and
         # cannot tell "routed by the fulfilment breakdown" from "fell back to
         # the counter". The persisted doc and the retry response both carry it.
-        "restock_store_reason": restock_result.get("restock_store_reason"),
+        "restock_store_reason": rec.get("restock_store_reason"),
         "stock_note": stock_note,
         "message": message,
     }
