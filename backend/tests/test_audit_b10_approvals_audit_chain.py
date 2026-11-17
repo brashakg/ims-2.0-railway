@@ -2726,8 +2726,10 @@ def test_r4_a_reversal_left_without_its_voucher_is_finished_by_reverse(db, monke
         monkeypatch.setattr(je_service, "_next_je_number", real_number)
     elif how == "left_by_the_previous_version":
         # as the previous version left it: the claim alone, no note of it
+        # (its worker long gone: a claim that fresh may still get its voucher)
         db.get_collection("journal_entries").update_one(
-            {"je_id": je_id}, {"$set": {"status": "REVERSED", "reversed_by": "JE-legacyclaim01"}})
+            {"je_id": je_id}, {"$set": {"status": "REVERSED", "reversed_by": "JE-legacyclaim01",
+                                        "updated_at": je_service._now() - timedelta(minutes=5)}})
     else:
         undo = _db_faults(monkeypatch, db, "journal_entries", insert_one=_is_mirror)
         code, body = _door(db, monkeypatch, "reverse", je_id, checker)
@@ -3066,11 +3068,14 @@ def test_r5_post_never_spends_an_approval_made_again_without_recording_it(db, mo
 
 
 def _unfinished_reversal(db) -> str:
-    """A journal left REVERSED naming a voucher that was never written."""
+    """A journal left REVERSED naming a voucher that was never written, by a
+    worker long gone (the claim is older than the grace a previous-version
+    worker still writing its voucher is given)."""
     je_id = _posted_journal(db)
     db.get_collection("journal_entries").update_one(
         {"je_id": je_id},
-        {"$set": {"status": "REVERSED", "reversed_by": f"JE-{uuid.uuid4().hex[:12]}"}})
+        {"$set": {"status": "REVERSED", "reversed_by": f"JE-{uuid.uuid4().hex[:12]}",
+                  "updated_at": je_service._now() - timedelta(minutes=5)}})
     return je_id
 
 
@@ -3348,15 +3353,19 @@ def test_r5_an_approvals_read_that_fails_is_503_not_an_empty_list_or_404(db, mon
     assert found == [request_id]
 
 
-def _tally_numbers(db, monkeypatch, user: Dict[str, Any]) -> set:
-    """The voucher numbers in the Tally journal export."""
+def _tally_vouchers(db, monkeypatch, user: Dict[str, Any]) -> list:
+    """The voucher number of every voucher in the Tally journal export."""
     import re
 
     monkeypatch.setattr(je_router, "_get_db", lambda: db)
     code, resp = _call(je_router.get_tally_journal_jv(
         from_date=None, to_date=None, store_id=None, current_user=user))
     assert code == 200, resp
-    return set(re.findall(r"<VOUCHERNUMBER>(.*?)</VOUCHERNUMBER>", resp.body.decode()))
+    return re.findall(r"<VOUCHERNUMBER>(.*?)</VOUCHERNUMBER>", resp.body.decode())
+
+
+def _tally_numbers(db, monkeypatch, user: Dict[str, Any]) -> set:
+    return set(_tally_vouchers(db, monkeypatch, user))
 
 
 def test_r5_an_unfinished_reversal_still_exports_to_tally_as_posted(db, monkeypatch):
@@ -3634,3 +3643,157 @@ def test_r6_a_request_raised_again_and_decided_without_a_checker_role_never_stra
     assert len(_rows(db, j["je_id"], "je_reapproved")) == 1
     assert len(_posted_rows(db, j["je_id"])) == 1
     assert verify_chain(db.get_collection("audit_logs"))["intact"] is True
+
+
+# ===========================================================================
+# Internal review of 5746a985 (round 7): the Tally export carries an entry
+# once; every spend and give-back of a request keeps its own audit row; a
+# previous-version Reverse in flight is left to finish
+# ===========================================================================
+
+
+def test_r7_an_entry_reversed_while_the_tally_export_reads_is_exported_once(db, monkeypatch):
+    """The export reads the POSTED entries, then the REVERSED ones whose
+    voucher was never written (D113). A Reverse that lands its claim between
+    the two reads put the same entry in both: two vouchers under one number
+    in the file Accounts imports into Tally. One voucher per entry."""
+    checker = _user(db, "checker", ["ADMIN"])
+    je_id = _posted_journal(db)
+    number = _je(db, je_id)["je_number"]
+    real_list, real_number = je_service.list_jes, je_service._next_je_number
+
+    def _die(*_a, **_k):
+        raise _Died()
+
+    def _reverse_claims_between_the_reads(*a, **k):
+        rows = real_list(*a, **k)
+        monkeypatch.setattr(je_service, "list_jes", real_list)
+        monkeypatch.setattr(je_service, "_next_je_number", _die)   # the press is between claim and voucher
+        with pytest.raises(_Died):
+            je_service.reverse_je(db, je_id=je_id, actor_id="checker")
+        monkeypatch.setattr(je_service, "_next_je_number", real_number)
+        return rows
+    monkeypatch.setattr(je_service, "list_jes", _reverse_claims_between_the_reads)
+    assert _tally_vouchers(db, monkeypatch, checker) == [number]      # was the entry twice
+    assert _je(db, je_id)["status"] == "REVERSED" and _mirrors(db, je_id) == []
+    assert _tally_vouchers(db, monkeypatch, checker) == [number]      # unfinished: still exported, once
+
+
+def _request_trail(db, request_id: str):
+    """The approval engine's audit rows of one request, in chain order:
+    (action, who, reason)."""
+    rows = [r for r in db.get_collection("audit_logs").find({"entity_type": "approval_request"})
+            if r.get("entity_id") == request_id]
+    return [(r["action"], r["user_id"], r.get("reason")) for r in sorted(rows, key=lambda r: r.get("seq") or 0)]
+
+
+@pytest.mark.parametrize("retry", ["identical", "corrected"])
+@pytest.mark.parametrize("lost", ["give_back_reply", "audit_check", "first_spends_row"])
+def test_r7_every_spend_and_give_back_keeps_its_own_row_with_no_read_between(db, monkeypatch, lost, retry):
+    """1411-R6-ROLLED-BACK-SPEND, the rest of it. A request named ONE audit
+    row per kind of action, and a refused spend's 'consumed' row was written
+    only by its give-back's follow-up. One fault there (the give-back's reply
+    lost, or the audit check failing) and then another spend of the same
+    approval with no read of the request between (the refund and discount
+    doors spend straight away) replaced the earlier rows' names: the first
+    spend's row, or the whole first pair, was never written, and the trail
+    could read consumed, consume_released for a request that is CONSUMED.
+    Every spend and give-back now names its own row (by log id, with who and
+    why), the names accumulate, and a spend writes what is owed before its
+    own row: each action has its row, once, in the order it happened, naming
+    who made it. A row that cannot be written (first_spends_row: its insert
+    fails through both presses) holds back the later rows of its request, so
+    none goes into the trail ahead of it."""
+    checker = _user(db, "checker", ["ADMIN"])
+    eng = _engine(db)
+    request_id = _petty_cash_request(db)
+    assert _inbox_approve(db, monkeypatch, request_id, checker)[0] == 200
+    good = {"action_type": "petty_cash", "request_id": request_id, "amount": 250.0}
+    bad = {**good, "amount": 999.0}
+
+    if lost == "give_back_reply":
+        undo = _db_faults(monkeypatch, db, "approval_requests",
+                          find_one_and_update=(_sets_status("APPROVED"), "landed"))
+    elif lost == "audit_check":
+        undo = _db_faults(monkeypatch, db, "audit_logs", find=_every_call)
+    else:
+        undo = _db_faults(monkeypatch, db, "audit_logs", insert_one=lambda _n, row, *a, **k: (
+            row.get("action"), row.get("user_id")) == ("consumed", "cashier"))
+    assert eng.consume_approval(consumed_by="cashier", **bad)["error"] == "amount_exceeded"
+    if lost != "first_spends_row":
+        undo()
+    stored = _request(db, request_id)
+    assert (stored["status"], stored["consumed"]) == ("APPROVED", False)     # refused, and given back
+
+    want = [("approval_requested", "cashier", None), ("approved", "checker", None),
+            ("consumed", "cashier", None), ("consume_released", "cashier", "amount_exceeded")]
+    if retry == "identical":
+        assert eng.consume_approval(consumed_by="cashier2", **bad)["error"] == "amount_exceeded"
+        want += [("consumed", "cashier2", None), ("consume_released", "cashier2", "amount_exceeded")]
+        status = "APPROVED"
+    else:
+        assert eng.consume_approval(consumed_by="cashier2", **good).get("ok") is True
+        want += [("consumed", "cashier2", None)]
+        status = "CONSUMED"
+    if lost == "first_spends_row":
+        assert _request_trail(db, request_id) == want[:2]        # nothing ahead of the row that failed
+        undo()
+        eng.get(request_id)
+    for _ in range(2):
+        assert _request_trail(db, request_id) == want            # was a row (or a pair) short, for good
+        assert eng.get(request_id)["status"] == status
+        _inbox_ids(db, monkeypatch, checker, status="ALL")
+    assert verify_chain(db.get_collection("audit_logs"))["intact"] is True
+
+
+def _previous_version_claim(db, je_id: str) -> str:
+    """As the previous version's Reverse leaves its claim, just made: the
+    original REVERSED naming the voucher it is about to write, no note."""
+    rev_id = f"JE-{uuid.uuid4().hex[:12]}"
+    db.get_collection("journal_entries").update_one(
+        {"je_id": je_id, "status": "POSTED"},
+        {"$set": {"status": "REVERSED", "reversed_by": rev_id, "updated_at": je_service._now()}})
+    return rev_id
+
+
+@pytest.mark.parametrize("old_worker", ["carries_on", "died"])
+def test_r7_a_previous_version_reverse_in_flight_is_left_to_finish(db, monkeypatch, old_worker):
+    """Rolling deploy. A previous-version worker has claimed the original and
+    not yet written its voucher. A Reverse press on this version read that as
+    an unfinished reversal and wrote the voucher itself; the old worker's own
+    insert was then refused, its code flipped the original back to POSTED,
+    and the next Reverse posted a second voucher: the reversal twice in the
+    books. A claim with no note (a previous version's) is left alone while it
+    is fresh -- 503, try again -- and finished only once its worker is gone."""
+    checker = _user(db, "checker", ["ADMIN"])
+    je_id = _posted_journal(db)
+    journals = db.get_collection("journal_entries")
+    rev_id = _previous_version_claim(db, je_id)
+    code, body = _door(db, monkeypatch, "reverse", je_id, checker)
+    assert (code, body.get("error") if isinstance(body, dict) else body) == (503, "write_failed"), body   # was 200
+    assert _mirrors(db, je_id) == []                               # was the old worker's voucher, written here
+    assert _je(db, je_id)["status"] == "REVERSED"
+    if old_worker == "carries_on":
+        # the rest of the previous version's Reverse: its insert, and when
+        # that is refused (its voucher is already there) the flip back
+        if journals.find_one({"je_id": rev_id}) is None:
+            original = _je(db, je_id)
+            journals.insert_one({
+                "je_id": rev_id, "je_number": "JV/OLD/0001", "store_id": "S1",
+                "entity_id": original.get("entity_id"), "entry_date": je_service._now(),
+                "lines": [dict(ln, debit=ln["credit"], credit=ln["debit"]) for ln in original["lines"]],
+                "total_debit": original["total_credit"], "total_credit": original["total_debit"],
+                "status": "POSTED", "reversal_of": je_id, "reversed_by": None,
+                "posted_at": je_service._now(), "created_at": je_service._now()})
+        else:
+            journals.update_one({"je_id": je_id, "status": "REVERSED", "reversed_by": rev_id},
+                                {"$set": {"status": "POSTED", "reversed_by": None}})
+        code, body = _door(db, monkeypatch, "reverse", je_id, checker)
+        assert (code, body["error"]) == (409, "already_reversed"), body      # was 200: a second voucher
+    else:
+        journals.update_one({"je_id": je_id}, {"$set": {"updated_at": je_service._now() - timedelta(minutes=5)}})
+        code, body = _door(db, monkeypatch, "reverse", je_id, checker)
+        assert code == 200, body
+        assert body["reversal_je_id"] == rev_id == _reversed_once(db, je_id)
+    assert [m["je_id"] for m in _mirrors(db, je_id)] == [rev_id]
+    assert _expense_net(db) == 0.0                                 # was -100: the reversal twice
