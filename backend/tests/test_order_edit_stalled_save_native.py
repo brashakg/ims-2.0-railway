@@ -169,7 +169,7 @@ def _native_tasks(shop):
     return shop["db"].get_collection("tasks")
 
 
-@pytest.mark.parametrize("recovery", ["the sweep", "an identical retry"])
+@pytest.mark.parametrize("recovery", ["the sweep", "an identical retry", "a different edit"])
 @pytest.mark.parametrize("fault", ["the insert fails", "the store is unreachable", "the read fails"])
 def test_a_points_task_that_could_not_be_raised_stays_owed_on_real_mongo(
     client, shop, door, monkeypatch, fault, recovery

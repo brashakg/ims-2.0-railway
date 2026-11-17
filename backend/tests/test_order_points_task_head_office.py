@@ -157,8 +157,9 @@ def test_overlapping_runners_raise_one_task(boards, monkeypatch):
         return real(self, doc, *a, **k)
 
     monkeypatch.setattr(kind, "insert_one", insert)
-    assert _points_task(dict(ORDER), dict(SPENT)) is True and other == [True]
-    assert boards.tasks.count_documents({"source_ref": REF}) == 1
+    mine = _points_task(dict(ORDER), dict(SPENT))
+    assert boards.tasks.count_documents({"source_ref": REF}) == 1, "one task, not one per runner"
+    assert mine is True and other == [True]
 
 
 def test_a_later_edit_raises_it_again_after_an_admin_closed_it(boards):

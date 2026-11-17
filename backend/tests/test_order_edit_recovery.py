@@ -1933,14 +1933,17 @@ def _spent_points_edit(client, shop, door, monkeypatch):
     return oid, lines, {"source_ref": f"order_points_unclawed:{oid}"}
 
 
-@pytest.mark.parametrize("recovery", ["the sweep", "an identical retry"])
+TASK_RECOVERIES = ["the sweep", "an identical retry", "a different edit"]
+
+
+@pytest.mark.parametrize("recovery", TASK_RECOVERIES)
 @pytest.mark.parametrize("fault", TASK_FAULTS)
 def test_a_points_task_that_could_not_be_raised_stays_owed(client, shop, door, tasks, monkeypatch, fault, recovery):
     """Codex round 8 R8-A (D81 handoff), both edit doors. The head-office task's
     insert failed; the edit answered 200 and closed SETTLED, two healthy sweeps
     raised nothing, and the revised invoice's identical replay raised nothing
     either. The edit now stays OPEN while its task is owed, and the sweep or the
-    next press of either door (a replay included) raises it, once."""
+    next press of either door (a replay or a different edit) raises it, once."""
     oid, lines, ref = _spent_points_edit(client, shop, door, monkeypatch)
     with _tasks_fault(monkeypatch, tasks, fault):
         assert door.press(oid, lines).status_code == 200
@@ -1950,8 +1953,11 @@ def test_a_points_task_that_could_not_be_raised_stays_owed(client, shop, door, t
     def recover():
         if recovery == "the sweep":
             _sweep(shop)
-        else:
+        elif recovery == "an identical retry":
             assert door.press(oid, lines).status_code == 200
+        else:
+            again = [_as_sent(ln, discount_percent=20) for ln in _order(shop, oid)["items"]]
+            assert door.press(oid, again).status_code == 200
 
     recover()
     rows = list(tasks.find(ref))
