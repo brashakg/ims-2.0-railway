@@ -334,17 +334,20 @@ def _in_reach_or_missing(
     return doc
 
 
-def _move_journal(doc: Optional[Dict[str, Any]], res: Dict[str, Any]) -> None:
+def _decided(res: Dict[str, Any]) -> bool:
+    """The engine's answer says the request is decided: by this press, or
+    already (already_reviewed) -- which is what the press after a decision
+    whose reply was lost (503) gets, when the journal has not moved yet."""
+    return bool(res.get("ok") or res.get("error") == "already_reviewed")
+
+
+def _move_journal(doc: Optional[Dict[str, Any]]) -> None:
     """A journal's own request decided here moves its journal in the same call
     (L3-25): the inbox used to update only the request, leaving the journal
     SUBMITTED where Post refused not_approved and the journal's own Approve
     refused already_reviewed. One rule decides whether and how, in je_service
-    (_take_request_decision). Also when the engine answers already_reviewed:
-    that is what the press after a decision whose reply was lost (503) gets,
-    and the journal has not moved yet. Fail-soft: the decision stands on the
-    request, and every journal door catches the journal up from it."""
-    if not (res.get("ok") or res.get("error") == "already_reviewed"):
-        return
+    (_take_request_decision). Fail-soft: the decision stands on the request,
+    and every journal door catches the journal up from it."""
     try:
         je_service.sync_with_request(_get_db(), doc)
     except Exception as e:  # noqa: BLE001
@@ -405,7 +408,8 @@ async def approve_request(
         pin=body.pin,
         approver_store_ids=_store_ids(current_user),
     )
-    _move_journal(doc, res)
+    if _decided(res):
+        _move_journal(doc)
     return _decode(res, success_keys=("approval_token", "status", "reviewed_at", "request_id"))
 
 
@@ -434,7 +438,8 @@ async def reject_request(
         reason=body.reason,
         approver_store_ids=_store_ids(current_user),
     )
-    _move_journal(doc, res)
+    if _decided(res):
+        _move_journal(doc)
     return _decode(res, success_keys=("status", "request_id"))
 
 
