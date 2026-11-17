@@ -1119,7 +1119,14 @@ class ApprovalEngine:
                 mismatch = "tier_too_low"
 
         if mismatch:
-            self._unconsume(updated.get("request_id"), consumed_by)
+            # The spend landed and is given back: an audited give-back like
+            # any other (release_consumption). Its 'consumed' row stays owed
+            # and a 'consume_released' row joins it, naming why. Rolled back
+            # with no trace, a read of the request between the two writes
+            # wrote 'consumed' for a spend with no give-back, and the real
+            # spend then wrote a second one.
+            self.release_consumption(updated.get("request_id"), consumed_by=consumed_by,
+                                     reason=mismatch)
             return {"ok": False, "error": mismatch}
 
         self._write_audit("consumed", updated, actor=consumed_by, log_id=log_id)
@@ -1127,49 +1134,51 @@ class ApprovalEngine:
         return {"ok": True, "request": _jsonable(updated)}
 
     def _unconsume(self, request_id: Optional[str], consumed_by: str, *,
-                   released: Optional[str] = None) -> bool:
+                   reason: str = "") -> Optional[Dict[str, Any]]:
         """Put a spent approval back to APPROVED -- only the spender's own
-        spend (atomic, guarded on consumed_by). True when it was given back.
+        spend (atomic, guarded on consumed_by). The request as given back, or
+        None when it was not.
 
-        ``released`` (release_consumption) is the log id of the release's own
-        audit row, named on the request in this same write (_record_trail);
-        the spend it gives back stood, so its 'consumed' row stays owed.
-        Without it the spend is one this very call is rolling back (it did
-        not match what was asked for): that spend owes no row."""
+        The same write names the give-back's own audit row on the request
+        (``audit_rows.consume_released``, _record_trail) with who released it
+        and why. The spend it gives back did land, so its 'consumed' row
+        stays owed: every spend that is given back leaves the pair."""
+        from pymongo import ReturnDocument
+
         coll = self._coll()
         if coll is None or not request_id:
-            return False
-        fields: Dict[str, Any] = {
-            "status": ApprovalStatus.APPROVED.value,
-            "consumed": False,
-            "consumed_at": None,
-            "consumed_by": None,
-            "consumed_for": None,
-        }
-        if released:
-            fields.update({"audit_rows.consume_released": released, "released_by": consumed_by})
-        else:
-            fields["audit_rows.consumed"] = None
+            return None
         try:
-            back = coll.find_one_and_update(
+            return coll.find_one_and_update(
                 {"request_id": request_id, "consumed": True,
                  "consumed_by": consumed_by},
-                {"$set": fields},
+                {"$set": {
+                    "status": ApprovalStatus.APPROVED.value,
+                    "consumed": False,
+                    "consumed_at": None,
+                    "consumed_by": None,
+                    "consumed_for": None,
+                    "audit_rows.consume_released": _new_log_id(),
+                    "released_by": consumed_by,
+                    "release_reason": reason or None,
+                }},
+                projection={"_id": 0},
+                return_document=ReturnDocument.AFTER,
             )
         except Exception:  # noqa: BLE001
-            return False
-        return back is not None
+            return None
 
-    def release_consumption(self, request_id: str, *, consumed_by: str) -> bool:
-        """Give back an approval whose action then failed to save (the order
-        that spent it was never written), so it is not burned for nothing.
-        Audited as ``consume_released`` (a row the request names, so a
-        release whose reply was lost still gets it: _record_trail)."""
-        if not self._unconsume(request_id, consumed_by, released=_new_log_id()):
+    def release_consumption(self, request_id: str, *, consumed_by: str, reason: str = "") -> bool:
+        """Give back a spent approval so it is not burned for nothing: its
+        action then failed to save (the order that spent it was never
+        written), or the spend did not match what was approved
+        (consume_approval; ``reason`` says which). Audited as
+        ``consume_released`` (a row the request names, so a release whose
+        reply was lost still gets it: _record_trail)."""
+        doc = self._unconsume(request_id, consumed_by, reason=reason)
+        if doc is None:
             return False
-        doc = self._raw(request_id)
-        if doc:
-            self._record_trail([doc])
+        self._record_trail([doc])
         return True
 
     def _consume_failure(self, ident: Dict[str, Any]) -> Dict[str, Any]:
@@ -1593,7 +1602,7 @@ class ApprovalEngine:
                 # as the request stood when the action was made
                 dict(doc, status=status, consumed=action == "consumed"),
                 actor=next((doc[f] for f in who if doc.get(f)), "SYSTEM"),
-                reason=(doc.get("reject_reason") or "") if action == "rejected" else "",
+                reason=doc.get(_TRAIL_REASON.get(action, "")) or "",
                 log_id=log_id,
             )
 
@@ -1696,6 +1705,8 @@ _TRAIL = {
     "consume_released": (ApprovalStatus.APPROVED.value, ("released_by",)),
     "expired": (ApprovalStatus.EXPIRED.value, ()),
 }
+# ... and the field holding the reason its row carries.
+_TRAIL_REASON = {"rejected": "reject_reason", "consume_released": "release_reason"}
 
 
 def _as_aware(dt: Any) -> datetime:

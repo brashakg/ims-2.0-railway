@@ -823,10 +823,24 @@ def _note_ok(note: Optional[str]) -> bool:
 
 
 def _reapproval_due(je: Dict[str, Any]) -> bool:
-    """An APPROVED journal whose request was raised again (D54) and whose
-    approval on that request is not yet recorded on the journal."""
+    """A journal that was APPROVED when its request was raised again (D54)
+    and whose approval on that request is not yet recorded on the journal.
+
+    A request is raised again for a SUBMITTED journal too (it lapsed
+    undecided, or was decided by someone the journal takes no decision from).
+    That journal's approval is its first and only one, recorded as 'approved':
+    it owes no 'approved again'. The raise's own note says which it was (its
+    status is the journal's status at the raise: _move)."""
     events, rid = je.get("events") or {}, je.get("approval_request_id")
-    return f"raised_again:{rid}" in events and f"reapproved:{rid}" not in events
+    raised = events.get(f"raised_again:{rid}") or {}
+    return raised.get("status") == STATUS_APPROVED and f"reapproved:{rid}" not in events
+
+
+def _reapprover(je: Dict[str, Any], req: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Who approved ``req``, when the journal takes an APPROVAL from it
+    (_decider) and they are not its maker; None otherwise."""
+    checker = _decider(je, req)
+    return checker if checker and checker != je.get("maker_id") else None
 
 
 def _decider(je: Dict[str, Any], req: Optional[Dict[str, Any]]) -> Optional[str]:
@@ -951,8 +965,11 @@ def _approval_state(je: Dict[str, Any], req: Optional[Dict[str, Any]]) -> str:
       post_bound   already spent by THIS journal's Post (its journal write was
                    lost): a Post retry finishes the posting;
       pending      a request raised again, waiting for a checker;
-      unspendable  lapsed, spent anywhere else, refused, missing or not the
-                   journal's own: only a checker's fresh approval helps.
+      unspendable  lapsed, spent anywhere else, refused, missing, not the
+                   journal's own, or an approval made again that the journal
+                   takes no decision from (_reapprover: a previous-version
+                   worker's inbox records no roles on it during a rolling
+                   deploy): only a checker's fresh approval helps.
     Read-only (no lazy expiry write), so a list can ask it."""
     from .approvals import ApprovalStatus, _as_aware, _now as _engine_now
 
@@ -963,6 +980,8 @@ def _approval_state(je: Dict[str, Any], req: Optional[Dict[str, Any]]) -> str:
         return "post_bound" if req.get("consumed_for") == _post_mark(je) else "unspendable"
     live = _as_aware(req.get("expires_at")) > _engine_now()
     if status == ApprovalStatus.APPROVED.value:
+        if _reapproval_due(je) and not _reapprover(je, req):
+            return "unspendable"
         return "spendable" if live else "unspendable"
     if status == ApprovalStatus.REQUESTED.value:
         return "pending" if live else "unspendable"
@@ -1258,6 +1277,20 @@ def post_je(db, *, je_id: str, poster_id: str) -> Dict[str, Any]:
     if not request_id:
         return {"ok": False, "http": 409, "error": "no_approval_request"}
 
+    refused = {"ok": False, "http": 409, "error": "not_approved", "status": status}
+    if _reapproval_due(je):
+        # An approval made again (D54) that the journal takes no decision
+        # from is refused BEFORE it is spent: spent first, it was burned and
+        # bound to this Post, which then refused it on every retry while
+        # Approve refused to replace a bound approval -- APPROVED for good.
+        # Unspent it reads unspendable (_approval_state), so the checker's
+        # own Approve raises a fresh request.
+        from .approvals import ApprovalStatus
+
+        req = _request(db, request_id) or {}
+        if req.get("status") == ApprovalStatus.APPROVED.value and not _reapprover(je, req):
+            return refused
+
     amount_rupees = (je.get("total_debit") or 0) / 100.0
     # A spend that raises may have landed (its reply lost): 503, and the retry
     # finds it bound to this journal's Post (post_bound) and finishes.
@@ -1295,12 +1328,19 @@ def post_je(db, *, je_id: str, poster_id: str) -> Dict[str, Any]:
         # with no je_reapproved row and no note of one, for good. The POSTED
         # write carries the decision instead (_decision: checker, time and
         # the note of the row owed), so they land together or not at all.
-        checker = _decider(je, _request(db, request_id))
-        if not checker or checker == je.get("maker_id"):
-            # Not a decision the journal takes (_take_request_decision). The
-            # engine holds a journal's request to the same rules, so this is
-            # a request altered outside the app: never posted on.
-            return {"ok": False, "http": 409, "error": "not_approved", "status": status}
+        req = _request(db, request_id) or {}
+        checker = _reapprover(je, req)
+        if not checker:
+            # Not a decision the journal takes, and it was made after the
+            # check above (or the spend is one an earlier Post left bound):
+            # never posted on, and the spend is given back (audited, by the
+            # engine) so the request is not left burned and bound to a Post
+            # that will never finish -- the checker approves again instead.
+            # A give-back that does not land is made again by the next press.
+            _engine(db).release_consumption(
+                request_id, consumed_by=req.get("consumed_by") or poster_id,
+                reason="not a decision the journal takes")
+            return refused
         decided, again = _decision(je, status=STATUS_APPROVED, checker_id=checker,
                                    request_id=request_id)
         fields = {**decided, f"events.{again[0]}": _stamp(again, STATUS_APPROVED), **fields}
