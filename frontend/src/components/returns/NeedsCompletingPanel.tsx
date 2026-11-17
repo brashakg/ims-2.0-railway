@@ -30,7 +30,6 @@ const rs = (n?: number) => `Rs ${(Number(n) || 0).toLocaleString('en-IN', { mini
 
 function creditText(item: NeedsCompletingItem): string {
   const line = item.credit_line;
-  if (!line && item.record_unconfirmed) return 'Recorded at the counter, not confirmed - the counter was told not to pay';
   if (!line) return item.record_not_saved ? 'Recorded at the counter, record not saved' : 'No store credit written';
   if (line.type === 'VOID') return 'Store credit never landed (void)';
   return `Store credit given ${rs(line.amount)}${line.note_number ? ` - CN ${line.note_number}` : ''}`;

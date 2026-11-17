@@ -721,6 +721,24 @@ function ReturnsDesk({ canComplete }: { canComplete: boolean }) {
     if (mode === 'history') loadHistory();
   }, [mode, loadHistory]);
 
+  // "Update stock" on a recorded return whose units are not placed yet (its
+  // press stopped after the record, or Accounts completed it): the server
+  // puts each unit back once. The answer is shown on the row.
+  const [stockBusy, setStockBusy] = useState<string | null>(null);
+  const [stockMsg, setStockMsg] = useState<Record<string, string>>({});
+  const updateStock = async (returnId: string) => {
+    setStockBusy(returnId);
+    try {
+      const res = await returnsApi.restock(returnId);
+      setStockMsg((m) => ({ ...m, [returnId]: String(res?.message || 'Done.') }));
+      await loadHistory();
+    } catch (e) {
+      setStockMsg((m) => ({ ...m, [returnId]: getErrorMessage(e, 'Could not update stock. Try again.') }));
+    } finally {
+      setStockBusy(null);
+    }
+  };
+
   return (
     <div className="inv-body">
       {/* Editorial header */}
@@ -1248,7 +1266,21 @@ function ReturnsDesk({ canComplete }: { canComplete: boolean }) {
                     const typeLabel = ({ RETURN: 'Refund', EXCHANGE: 'Exchange', CREDIT_NOTE: 'Credit' } as Record<string, string>)[r.return_type] || r.return_type;
                     return (
                       <tr key={r.return_id || i} className="border-b border-gray-100">
-                        <td className="py-2 pr-3 font-mono text-xs text-gray-700">{r.return_id}</td>
+                        <td className="py-2 pr-3 font-mono text-xs text-gray-700">
+                          {r.return_id}
+                          {r.stock_pending === true && r.status === 'COMPLETED' && (
+                            <div className="mt-1 font-sans">
+                              <div className="text-xs text-amber-700">Units not back in stock</div>
+                              <button type="button" onClick={() => updateStock(r.return_id)} disabled={stockBusy === r.return_id}
+                                className="mt-1 px-3 min-h-[36px] text-xs rounded-md border border-gray-300 bg-white text-gray-800 hover:bg-gray-50 disabled:opacity-50">
+                                {stockBusy === r.return_id ? 'Updating...' : 'Update stock'}
+                              </button>
+                            </div>
+                          )}
+                          {stockMsg[r.return_id] && (
+                            <div role="status" className="mt-1 font-sans text-xs text-gray-600">{stockMsg[r.return_id]}</div>
+                          )}
+                        </td>
                         <td className="py-2 pr-3"><span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-700">{typeLabel}</span></td>
                         <td className="py-2 pr-3">{r.customer_name || '-'}</td>
                         <td className="py-2 pr-3 text-gray-500">{r.order_number || '-'}</td>

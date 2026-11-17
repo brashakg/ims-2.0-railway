@@ -101,8 +101,6 @@ export interface NeedsCompletingItem {
   credit_line: { type: string; amount?: number; note_number?: string } | null;
   cash_leg: number;
   record_not_saved: boolean;
-  /** Saved at the counter, but the counter was told not to pay (round 12). */
-  record_unconfirmed?: boolean;
   /** IMS knows money moved (a credit landed, or the counter recorded it). */
   money_known: boolean;
 }
@@ -251,6 +249,13 @@ export const returnsApi = {
 
   get: async (returnId: string) => {
     const response = await api.get(`/returns/${returnId}`);
+    return response.data;
+  },
+
+  /** "Update stock" on a recorded return whose units are not placed yet
+   *  (D95): puts each GOOD unit back once, sets a DAMAGED one aside. */
+  restock: async (returnId: string) => {
+    const response = await api.post(`/returns/${encodeURIComponent(returnId)}/restock`);
     return response.data;
   },
 };
