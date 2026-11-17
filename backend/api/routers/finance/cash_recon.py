@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from ..auth import get_current_user
 from ...dependencies import validate_store_access
 from ...services import cash_register
+from ...services import eod_tally as till_service
 from ._shared import _get_db, _iso_now, _store_name_map, logger, router
 from .cash_drawer_window import _CASH_SESSIONS, _ist_day_face
 
@@ -200,7 +201,9 @@ async def cash_reconciliation_summary(
             cash_register.SEVERAL_DRAWERS,
             cash_register.COMPARISON_UNAVAILABLE,
         )
-        several = withheld
+        # D111: a session with no count of its own on a drawer counted
+        # earlier shows the till's count and compares nothing with it.
+        several = withheld or s.get("variance_status") == cash_register.COUNTED_EARLIER
         no_figures = s.get("variance_status") == cash_register.COMPARISON_UNAVAILABLE
         variance = (
             None if (counted is None or several) else round(counted - expected, 2)
@@ -211,7 +214,10 @@ async def cash_reconciliation_summary(
             pending_user_ids.append(closed_by)
         if withheld or s.get("till_link_ok") is False:
             unattributed_ids.add(s.get("session_id"))
-        elif s.get("till_session_id"):
+        elif s.get("till_session_id") and counted is not None:
+            # Only a close that HOLDS A COUNT (D88). One closed without a
+            # count names the drawer too, but it must not stand in for the
+            # close that counted it; it keeps adding its own window.
             linked_closes.append(
                 (str(closed_at or ""), str(s.get("session_id")), s["till_session_id"])
             )
@@ -223,7 +229,17 @@ async def cash_reconciliation_summary(
                 "store_name": store_names.get(s.get("store_id"), s.get("store_id")),
                 "session_date": sess_day,
                 "shift": s.get("shift"),
-                "opening_float": round(float(s.get("opening_float", 0) or 0), 2),
+                # D111: a session opened on a counted drawer starts from that
+                # count, so the row's opening + cash still equals its expected.
+                "opening_float": round(
+                    float(
+                        s.get("opening_float", 0)
+                        if s.get("till_standing_count") is None
+                        else s["till_standing_count"]
+                    )
+                    or 0,
+                    2,
+                ),
                 # D86(3): a close that could not read the day's drawers covers
                 # an unknown set of them -- its cash figures are not available
                 # and stay out of the totals (they would add a drawer twice).
@@ -299,6 +315,11 @@ async def cash_reconciliation_summary(
         sess_day = str(s.get("session_date") or "")[:10]
         if sess_day and not (start_day <= sess_day <= end_day):
             continue
+        # D110: this read pays the audit row (or manager task) a lock,
+        # count, open or reopen of this drawer still owes.
+        till_service.settle_followup(
+            db.get_collection("till_sessions"), {"session_id": s.get("session_id")}, s
+        )
         # D76: a drawer counted after an older-code drawer has no comparison
         # (expected and variance stored as None); none is rebuilt here.
         no_comparison = s.get("variance_status") == cash_register.COMPARISON_UNAVAILABLE
@@ -369,6 +390,13 @@ async def cash_reconciliation_summary(
             }
         )
 
+    # D110: the drawers the Cash Register closes of this range opened or
+    # counted may not be locked yet (so they are not read above); what they
+    # owe is paid here too.
+    till_service.settle_drawers(
+        db, [r.get("till_session_id") for r in rows if r.get("source") == "CASH_REGISTER"]
+    )
+
     # --- 2b) ONE COUNTED DRAWER, ONE ROW -----------------------------------
     # Since both close screens land on the SAME till session, a drawer closed
     # from Finance > Cash Register and then locked as a Z-Read would otherwise
@@ -406,9 +434,9 @@ async def cash_reconciliation_summary(
         for r in rows
         if r.get("source") == "BLIND_EOD"
     }
-    # Two Cash Register closes that landed on the SAME drawer both hold that
-    # drawer's one count (the second adopted it). Until its Z-Read locks and
-    # 2b folds them, only the first close adds; a later one is marked too.
+    # Several Cash Register closes that hold a count of the SAME drawer:
+    # until its Z-Read locks and 2b folds them, only the EARLIEST of them
+    # adds; a later one is marked too.
     drawers_seen = set()
     repeat_ids = set()
     for _closed, cr_id, drawer_id in sorted(linked_closes):
