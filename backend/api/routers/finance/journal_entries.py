@@ -56,27 +56,13 @@ def _je_require_enabled() -> None:
         raise HTTPException(status_code=503, detail="manual_je_not_enabled")
 
 
-_JE_UNREADABLE = "Journal entries could not be read just now - please try again"
-
-
-def _read_je(db, je_id: str):
-    """The journal, None when there is none; 503 when it could not be read --
-    never 'not found' for a journal that exists (D84)."""
-    try:
-        return je_service.get_je(db, je_id, strict=True)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("[JE] journal %s unreadable: %s", je_id, e)
-        raise HTTPException(status_code=503, detail=_JE_UNREADABLE) from e
-
-
-def _read_jes(db, **query):
-    """The journals; 503 when they could not be read -- never an empty list
-    or an empty Tally file (D84)."""
-    try:
-        return je_service.list_jes(db, **query)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("[JE] journals unreadable: %s", e)
-        raise HTTPException(status_code=503, detail=_JE_UNREADABLE) from e
+# A journal (or its approval request) that could not be read is HTTP 503 from
+# every door here: je_service raises JournalStoreUnavailable, an HTTPException,
+# from its one reader -- the route's own read and the service's reads alike
+# (D84; Codex round 3, R3-A). The period lock is read strictly here too
+# (check_period_locked(..., strict=True)): a lock that could not be read is
+# 503, so a manual journal never lands in a month that may be closed. Sales,
+# returns and bills keep the shared fail-soft gate.
 
 
 def _require_roles_for(current_user: dict, allowed: set, msg: str) -> None:
@@ -178,7 +164,7 @@ async def create_journal_entry(
         raise HTTPException(status_code=403, detail=NO_SHOP_DETAIL)
     entry_date = _je_parse_entry_date(body.entry_date, current_user)
     # Gate 1: a closed period rejects a draft at creation.
-    check_period_locked(db, entry_date.date())
+    check_period_locked(db, entry_date.date(), strict=True)
     res = je_service.create_je(
         db,
         store_id=store_id,
@@ -204,7 +190,7 @@ async def list_journal_entries(
     _require_roles_for(current_user, _JE_READER_ROLES, _JE_READ_REFUSED)
     db = _get_db()
     store_id = resolve_store_scope(store_id, current_user)
-    rows = _read_jes(db, store_id=store_id, status=status, maker_id=maker_id, limit=200)
+    rows = je_service.list_jes(db, store_id=store_id, status=status, maker_id=maker_id, limit=200)
     je_service.repair_posted_events(db, rows)
     rows = je_service.with_reapproval_flags(db, rows)
     return {"journal_entries": rows, "total": len(rows)}
@@ -221,7 +207,7 @@ async def get_journal_entry(
     # Another shop's voucher -- or a store-LESS (HQ/entity-level) one, which
     # only admins read (adversarial P3) -- is the same 404 as a missing one,
     # so a guessed id never confirms a voucher exists (audit 2026-10-18).
-    je = in_reach_or_404(_read_je(db, je_id), current_user, "Journal entry not found")
+    je = in_reach_or_404(je_service.get_je(db, je_id), current_user, "Journal entry not found")
     je.pop("_id", None)
     je_service.repair_posted_events(db, [je])
     return je_service._jsonable(je_service.with_reapproval_flags(db, [je])[0])
@@ -316,7 +302,7 @@ async def post_journal_entry(
         "Only ADMIN / SUPERADMIN may post a journal entry",
     )
     db = _get_db()
-    je = _read_je(db, je_id)
+    je = je_service.get_je(db, je_id)
     if not je:
         raise HTTPException(status_code=404, detail="Journal entry not found")
     # Gate 2 (double period-lock): a period locked after approval blocks posting.
@@ -324,7 +310,7 @@ async def post_journal_entry(
     # missing je_posted event (D68), so a lock never stands in its way.
     entry_date = je.get("entry_date")
     if isinstance(entry_date, datetime) and je.get("status") != je_service.STATUS_POSTED:
-        check_period_locked(db, entry_date.date())
+        check_period_locked(db, entry_date.date(), strict=True)
     res = je_service.post_je(db, je_id=je_id, poster_id=current_user.get("user_id"))
     return _je_raise(res)
 
@@ -344,7 +330,7 @@ async def reverse_journal_entry(
     )
     db = _get_db()
     # The reversal posts on today's date -- today's period must be open.
-    check_period_locked(db, now_ist_naive().date())
+    check_period_locked(db, now_ist_naive().date(), strict=True)
     res = je_service.reverse_je(
         db,
         je_id=je_id,
@@ -410,7 +396,7 @@ async def get_tally_journal_jv(
     # it by calendar day, never by the IST-shifted created_at bounds.
     from_dt = _je_cal_day(from_date)
     to_dt = _je_cal_day(to_date, end=True)
-    rows = _read_jes(db, store_id=store_id, status=je_service.STATUS_POSTED, limit=1000)
+    rows = je_service.list_jes(db, store_id=store_id, status=je_service.STATUS_POSTED, limit=1000)
     je_service.repair_posted_events(db, rows)
     # Date-filter in Python (entry_date is a datetime); keeps the service query simple.
     filtered = []

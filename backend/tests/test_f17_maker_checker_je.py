@@ -628,13 +628,13 @@ def test_tally_journal_voucher_xml_only_posted(db):
 
 
 def test_fail_soft_no_db():
-    # db=None -> no-op writes, a lenient get_je answers None. A journal LIST
-    # with no database raises (the routes answer 503): never "no journals" (D84).
-    assert je_service.get_je(None, "JE-x") is None
-    with pytest.raises(RuntimeError):
-        je_service.list_jes(None)
-    with pytest.raises(RuntimeError):
-        je_service.get_je(None, "JE-x", strict=True)
+    # db=None -> no-op writes. A journal READ with no database raises the 503
+    # the routes answer: never "no journals" / "not found" (D84; Codex round 3
+    # R3-A removed the lenient get_je that answered None).
+    for read in (lambda: je_service.list_jes(None), lambda: je_service.get_je(None, "JE-x")):
+        with pytest.raises(je_service.JournalStoreUnavailable) as unreadable:
+            read()
+        assert unreadable.value.status_code == 503
     assert je_service.create_je(None, store_id=None, entity_id=None,
                                 entry_date=_entry_date(), description="x",
                                 lines=_two_line("5001", "2001", 100.0),

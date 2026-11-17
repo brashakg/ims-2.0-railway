@@ -910,7 +910,7 @@ def test_l3_25_period_locked_after_inbox_approval_still_blocks_post(db, monkeypa
 
     monkeypatch.setattr(je_router, "_get_db", lambda: db)
 
-    def _locked(_db, _day):
+    def _locked(_db, _day, **_k):
         raise HTTPException(status_code=423, detail="Accounting period 05/2026 is locked")
 
     monkeypatch.setattr(je_router, "check_period_locked", _locked)
@@ -920,7 +920,7 @@ def test_l3_25_period_locked_after_inbox_approval_still_blocks_post(db, monkeypa
     req = _request(db, j["request_id"])
     assert (req["status"], req["consumed"]) == ("APPROVED", False)
 
-    monkeypatch.setattr(je_router, "check_period_locked", lambda _db, _day: None)
+    monkeypatch.setattr(je_router, "check_period_locked", lambda _db, _day, **_k: None)
     code, body = _call(je_router.post_journal_entry(j["je_id"], current_user=checker))
     assert code == 200, body
     assert _je(db, j["je_id"])["status"] == "POSTED"
@@ -1128,7 +1128,7 @@ def test_d68_a_period_locked_after_posting_does_not_block_the_repair(db, monkeyp
     db.get_collection("audit_logs").delete_many({"action": "je_posted"})
     monkeypatch.setattr(je_router, "_get_db", lambda: db)
 
-    def _locked(_db, _day):
+    def _locked(_db, _day, **_k):
         raise HTTPException(status_code=423, detail="Accounting period 05/2026 is locked")
 
     monkeypatch.setattr(je_router, "check_period_locked", _locked)
@@ -1523,6 +1523,395 @@ def test_d84_post_route_read_that_fails_is_not_not_found(db, monkeypatch, down):
     code, _body = _call(je_router.post_journal_entry(j["je_id"], current_user=checker))
     assert code == 200
     assert len(_posted_rows(db, j["je_id"])) == 1
+
+
+# ---------------------------------------------------------------------------
+# Codex round 3 (PR-1411-round3.md), R3-A -- a read that fails INSIDE a
+# journal door is 503 (try again): never "not found", "not approved" or
+# "approve again" for a record that is there
+# ---------------------------------------------------------------------------
+
+
+def _db_faults(monkeypatch, db, name: str, **faults):
+    """Collection ``name`` of ``db`` fails at the database (AutoReconnect) from
+    the methods named: ``find_one=fn`` fails the calls where fn(call_no, *args)
+    is true; ``find_one_and_update=(fn, "landed")`` runs the call at the
+    database first, then loses its reply. Every other call goes through.
+    Returns undo()."""
+    from pymongo.errors import AutoReconnect
+
+    real_get = db.get_collection
+    calls: Dict[str, int] = {}
+
+    class _Coll:
+        def __init__(self, coll):
+            self._coll = coll
+
+        def __getattr__(self, attr):
+            real = getattr(self._coll, attr)
+            if attr not in faults:
+                return real
+            fail, landed = faults[attr] if isinstance(faults[attr], tuple) else (faults[attr], "")
+
+            def call(*a, **k):
+                calls[attr] = calls.get(attr, 0) + 1
+                if fail(calls[attr], *a, **k):
+                    if landed:
+                        real(*a, **k)
+                    raise AutoReconnect(f"{name}.{attr} lost")
+                return real(*a, **k)
+            return call
+
+    monkeypatch.setattr(db, "get_collection",
+                        lambda n: _Coll(real_get(n)) if n == name else real_get(n))
+    return lambda: monkeypatch.setattr(db, "get_collection", real_get)
+
+
+def _every_call(_n, *_a, **_k):
+    return True
+
+
+def _sets_status(status: str):
+    return lambda _n, _flt, upd, *a, **k: (upd.get("$set") or {}).get("status") == status
+
+
+_MAKER = {"user_id": "maker", "roles": ["ACCOUNTANT"], "store_ids": ["S1"], "active_store_id": "S1"}
+
+
+def _door(db, monkeypatch, door: str, je_id: str, user: Dict[str, Any]):
+    """One journal door through its route handler; (status code, body)."""
+    monkeypatch.setattr(je_router, "_get_db", lambda: db)
+    monkeypatch.setattr(je_router, "_je_require_enabled", lambda: None)
+    if door == "post":
+        coro = je_router.post_journal_entry(je_id, current_user=user)
+    elif door == "submit":
+        coro = je_router.submit_journal_entry(je_id, current_user=user)
+    elif door == "approve":
+        coro = je_router.approve_journal_entry(je_id, je_router.JePinBody(pin=PIN), current_user=user)
+    elif door == "reject":
+        coro = je_router.reject_journal_entry(
+            je_id, je_router.JeRejectBody(pin=PIN, note="Wrong account, not wanted"), current_user=user)
+    else:
+        coro = je_router.reverse_journal_entry(je_id, current_user=user)
+    return _call(coro)
+
+
+@pytest.mark.parametrize("down", ["read_fails", "no_store"])
+def test_r3a_post_whose_inner_journal_read_fails_is_503_not_404(db, monkeypatch, down):
+    """Codex round 3, R3-A (read_repair_independent.py, 'inner journal lookup
+    unavailable'): the Post route read the journal, then the service's own
+    read of it failed and Post answered 404 not_found for an APPROVED journal
+    that was there. It answers 503, nothing is spent or moved, and the same
+    Post afterwards posts once."""
+    checker = _user(db, "checker", ["ADMIN"])
+    j = _submitted_journal(db, "maker")
+    assert _journal_approve(db, j["je_id"]).get("ok") is True
+    before = _je(db, j["je_id"])
+    if down == "read_fails":
+        undo = _db_faults(monkeypatch, db, "journal_entries", find_one=lambda n, *a, **k: n == 2)
+    else:
+        real_coll, seen = je_service._je_coll, []
+
+        def _second_time_none(d):
+            seen.append(1)
+            return None if len(seen) == 2 else real_coll(d)
+
+        monkeypatch.setattr(je_service, "_je_coll", _second_time_none)
+
+        def undo():
+            monkeypatch.setattr(je_service, "_je_coll", real_coll)
+    code, body = _door(db, monkeypatch, "post", j["je_id"], checker)
+    undo()
+    assert code == 503, body                                    # was 404 not_found
+    assert _je(db, j["je_id"]) == before                        # nothing moved
+    assert _request(db, j["request_id"])["status"] == "APPROVED"    # nothing spent
+    assert _posted_rows(db, j["je_id"]) == []
+    code, body = _door(db, monkeypatch, "post", j["je_id"], checker)
+    assert code == 200, body
+    assert len(_posted_rows(db, j["je_id"])) == 1
+
+
+@pytest.mark.parametrize("landed", ["", "landed"])
+def test_r3a_post_read_back_that_fails_is_503(db, monkeypatch, landed):
+    """The second window Codex named (source-reviewed): the POSTED write was
+    refused, or landed with its reply lost, and the read-back that tells the
+    two apart failed too. Post answered 409 not_approved with no status --
+    for a journal that may already be POSTED. It answers 503; the retry
+    posts (refused) or records the event and answers already_posted
+    (landed): one posting, one event."""
+    checker = _user(db, "checker", ["ADMIN"])
+    j = _submitted_journal(db, "maker")
+    assert _journal_approve(db, j["je_id"]).get("ok") is True
+    undo = _db_faults(monkeypatch, db, "journal_entries",
+                      find_one_and_update=(_sets_status("POSTED"), landed),
+                      find_one=lambda n, *a, **k: n == 3)
+    code, body = _door(db, monkeypatch, "post", j["je_id"], checker)
+    undo()
+    assert code == 503, body                                    # was 409 not_approved, status None
+    assert _je(db, j["je_id"])["status"] == ("POSTED" if landed else "APPROVED")
+    code, body = _door(db, monkeypatch, "post", j["je_id"], checker)
+    if landed:
+        assert (code, body["error"]) == (409, "already_posted")
+    else:
+        assert code == 200, body
+    assert _je(db, j["je_id"])["status"] == "POSTED"
+    assert len(_posted_rows(db, j["je_id"])) == 1
+
+
+@pytest.mark.parametrize("case", ["catch_up", "bound_spend", "no_request_store"])
+def test_r3a_post_that_cannot_read_the_approval_request_is_503(db, monkeypatch, case):
+    """Post's other inner reads are of the journal's approval request. An
+    unreadable request was answered as 'no request':
+      catch_up          the request was approved in the inbox, the journal's
+                        own write never ran; Post reads the request to catch
+                        the journal up -> was 409 not_approved (SUBMITTED);
+      bound_spend       the approval is spent by this journal's Post (D54),
+                        the retry reads the request to finish -> was 404
+                        not_found;
+      no_request_store  no approval collection at all -> was 409 no_db.
+    Each is 503 and the same Post afterwards posts once."""
+    checker = _user(db, "checker", ["ADMIN"])
+    j = _submitted_journal(db, "maker")
+    if case == "catch_up":
+        assert _engine(db).approve(j["request_id"], approver_user_id="checker",
+                                   approver_roles=["ADMIN"], pin=PIN).get("ok") is True
+        assert _je(db, j["je_id"])["status"] == "SUBMITTED"
+    else:
+        assert _journal_approve(db, j["je_id"]).get("ok") is True
+    if case == "bound_spend":
+        undo = _db_faults(monkeypatch, db, "journal_entries",
+                          find_one_and_update=_sets_status("POSTED"))
+        assert _door(db, monkeypatch, "post", j["je_id"], checker)[0] == 409
+        undo()
+        assert _request(db, j["request_id"])["consumed_for"] == f"je_post:{j['je_id']}"
+    if case == "no_request_store":
+        real_coll = appr.ApprovalEngine._coll
+        monkeypatch.setattr(appr.ApprovalEngine, "_coll", lambda self: None)
+
+        def undo():
+            monkeypatch.setattr(appr.ApprovalEngine, "_coll", real_coll)
+    else:
+        undo = _db_faults(monkeypatch, db, "approval_requests", find_one=_every_call)
+    code, body = _door(db, monkeypatch, "post", j["je_id"], checker)
+    undo()
+    assert code == 503, body                                    # was 409 / 404 / 409
+    assert _posted_rows(db, j["je_id"]) == []
+    code, body = _door(db, monkeypatch, "post", j["je_id"], checker)
+    assert code == 200, body
+    assert _je(db, j["je_id"])["status"] == "POSTED"
+    assert len(_posted_rows(db, j["je_id"])) == 1
+
+
+def test_r3a_a_spend_whose_reply_was_lost_is_503_and_the_retry_posts_once(db, monkeypatch):
+    """Post's spend of the approval landed, its reply was lost: the database
+    error went out unhandled (HTTP 500). It answers 503; the spend is bound
+    to this journal's Post, so the retry finishes the posting once (D54)."""
+    checker = _user(db, "checker", ["ADMIN"])
+    j = _submitted_journal(db, "maker")
+    assert _journal_approve(db, j["je_id"]).get("ok") is True
+    undo = _db_faults(monkeypatch, db, "approval_requests",
+                      find_one_and_update=(_sets_status("CONSUMED"), "landed"))
+    code, body = _door(db, monkeypatch, "post", j["je_id"], checker)
+    undo()
+    assert code == 503, body                                    # was an unhandled AutoReconnect
+    req = _request(db, j["request_id"])
+    assert (req["status"], req["consumed_for"]) == ("CONSUMED", f"je_post:{j['je_id']}")
+    assert _je(db, j["je_id"])["status"] == "APPROVED"
+    code, body = _door(db, monkeypatch, "post", j["je_id"], checker)
+    assert code == 200, body
+    code, body = _door(db, monkeypatch, "post", j["je_id"], checker)
+    assert (code, body["error"]) == (409, "already_posted")
+    assert len(_posted_rows(db, j["je_id"])) == 1
+
+
+@pytest.mark.parametrize("route", ["list", "detail"])
+def test_r3a_a_journal_read_never_says_approve_again_for_an_unreadable_request(db, monkeypatch, route):
+    """The list and the detail flag an APPROVED journal needs_reapproval from
+    its request. An unreadable request was read as 'no request', so a journal
+    with a good approval was shown 'Approve again' instead of Post. The read
+    answers 503; once readable the flag is false."""
+    _user(db, "checker", ["ADMIN"])
+    reader = _user(db, "accounts", ["ACCOUNTANT"])
+    j = _submitted_journal(db, "maker")
+    assert _journal_approve(db, j["je_id"]).get("ok") is True
+    undo = _db_faults(monkeypatch, db, "approval_requests", find_one=_every_call)
+    code = _read_journal(db, monkeypatch, route, j["je_id"], reader)
+    undo()
+    assert code == 503                                          # was 200, needs_reapproval true
+    assert _list_flag(db, monkeypatch, j["je_id"], reader) is False
+
+
+def test_r3a_journal_approve_never_raises_a_second_request_beside_one_it_could_not_read(db, monkeypatch):
+    """A checker presses Approve on an APPROVED journal whose (good, unspent)
+    request cannot be read. It was read as 'no request, cannot post': a new
+    request was raised and approved and the journal moved onto it, leaving
+    the good approval behind. It answers 503 and writes nothing."""
+    _user(db, "checker", ["ADMIN"])
+    checker2 = _user(db, "checker2", ["ADMIN"])
+    j = _submitted_journal(db, "maker")
+    assert _journal_approve(db, j["je_id"]).get("ok") is True
+    requests = db.get_collection("approval_requests").count_documents({})
+    undo = _db_faults(
+        monkeypatch, db, "approval_requests",
+        find_one=lambda n, flt=None, *a, **k: (flt or {}).get("request_id") == j["request_id"])
+    code, body = _door(db, monkeypatch, "approve", j["je_id"], checker2)
+    undo()
+    assert code == 503, body                                    # was 200 on a second request
+    assert db.get_collection("approval_requests").count_documents({}) == requests
+    assert _je(db, j["je_id"])["approval_request_id"] == j["request_id"]
+    assert _door(db, monkeypatch, "post", j["je_id"], checker2)[0] == 200
+    assert len(_posted_rows(db, j["je_id"])) == 1
+
+
+@pytest.mark.parametrize("door", ["create", "post", "reverse"])
+def test_r3a_a_period_lock_that_cannot_be_read_never_lets_a_journal_through(db, monkeypatch, door):
+    """The journal doors check the month's lock before they write. A lock
+    that could not be read was read as 'not locked', so a journal could be
+    created in, posted into or reversed into a closed month. A manual journal
+    now answers 503; the same door afterwards answers the lock's own 423.
+    Sales, returns and bills keep the shared fail-soft gate, unchanged."""
+    from api.routers.finance import _shared as finance_shared
+    from api.utils.ist import ist_today
+
+    checker = _user(db, "checker", ["ADMIN"])
+    j = _submitted_journal(db, "maker")                         # dated 15 May 2026
+    assert _journal_approve(db, j["je_id"]).get("ok") is True
+    if door == "reverse":
+        assert _post(db, j["je_id"]).get("ok") is True
+    monkeypatch.setattr(je_router, "_get_db", lambda: db)
+    monkeypatch.setattr(je_router, "_je_require_enabled", lambda: None)
+
+    def _go():
+        if door == "create":                                    # dated today (IST)
+            return _call(je_router.create_journal_entry(je_router.JeCreateBody(
+                description="Rent", store_id="S1",
+                lines=[je_router.JeLineBody(account_code="5003", debit=100),
+                       je_router.JeLineBody(account_code="2001", credit=100)]),
+                current_user=_MAKER))
+        return _door(db, monkeypatch, door, j["je_id"], checker)
+
+    journals = db.get_collection("journal_entries").count_documents({})
+    status = _je(db, j["je_id"])["status"]
+    undo = _db_faults(monkeypatch, db, "period_locks", find_one=_every_call)
+    code, body = _go()
+    assert finance_shared.check_period_locked(db, datetime(2026, 5, 15).date()) is None   # sales: as before
+    undo()
+    assert code == 503, body                                    # was 200: through, unchecked
+    assert db.get_collection("journal_entries").count_documents({}) == journals
+    assert _je(db, j["je_id"])["status"] == status
+    assert _request(db, j["request_id"])["status"] == ("CONSUMED" if door == "reverse" else "APPROVED")
+
+    today = ist_today()
+    month, year = (5, 2026) if door == "post" else (today.month, today.year)
+    db.get_collection("period_locks").insert_one({"month": month, "year": year})
+    code, body = _go()
+    assert code == 423, body
+    assert db.get_collection("journal_entries").count_documents({}) == journals
+
+
+def test_r3a_inbox_reject_that_cannot_read_the_journal_decides_nothing(db, monkeypatch):
+    """The inbox holds a journal's rejection to the journal's note rule, which
+    needs the journal. An unreadable journal was read as 'not a journal's
+    request': a short-note rejection went through on the request and the
+    journal stayed SUBMITTED beside it. It answers 503 and decides nothing."""
+    checker = _user(db, "checker", ["ADMIN"])
+    j = _submitted_journal(db, "maker")
+    undo = _db_faults(monkeypatch, db, "journal_entries", find_one=_every_call)
+    code, body = _inbox_reject(db, monkeypatch, j["request_id"], checker, "short")
+    undo()
+    assert code == 503, body                                    # was 200, request REJECTED
+    assert _request(db, j["request_id"])["status"] == "REQUESTED"
+    assert _je(db, j["je_id"])["status"] == "SUBMITTED"
+    code, body = _inbox_reject(db, monkeypatch, j["request_id"], checker, "short")
+    assert (code, body["error"]) == (400, "note_required")
+
+
+@pytest.mark.parametrize("door", ["submit", "approve", "reject", "reverse"])
+def test_r3a_every_journal_door_answers_503_for_a_journal_it_could_not_read(db, monkeypatch, door):
+    """The alternate routes of R3-A: Submit, Approve, Reject and Reverse read
+    the journal through the same reader and answered 404 not_found when that
+    read failed. Each answers 503, changes nothing, and works afterwards."""
+    checker = _user(db, "checker", ["ADMIN"])
+    if door == "submit":
+        je_id, who, want = _draft_journal(db, "maker", amount=100.0), _MAKER, "DRAFT"
+    else:
+        je_id, who, want = _submitted_journal(db, "maker")["je_id"], checker, "SUBMITTED"
+    if door == "reverse":
+        assert _journal_approve(db, je_id).get("ok") is True
+        assert _post(db, je_id).get("ok") is True
+        want = "POSTED"
+    undo = _db_faults(monkeypatch, db, "journal_entries", find_one=lambda n, *a, **k: n == 1)
+    code, body = _door(db, monkeypatch, door, je_id, who)
+    undo()
+    assert code == 503, body                                    # was 404 not_found
+    assert _je(db, je_id)["status"] == want
+    code, body = _door(db, monkeypatch, door, je_id, who)
+    assert code == 200, body
+
+
+@pytest.mark.parametrize("fault", ["inner_read", "reply_lost"])
+@pytest.mark.parametrize("door", ["approve", "reject"])
+def test_r3a_a_journal_decision_that_cannot_reach_its_request_is_503(db, monkeypatch, door, fault):
+    """Approve / Reject on the journal screen decide the journal's request
+    inside the approval engine. inner_read (the R3-A shape on these doors):
+    the door read the request, then the engine's own read of it failed and
+    the door answered 404 not_found -- now 503, nothing decided, the same
+    press then works. reply_lost: the decision landed and its reply was lost,
+    which went out as an unhandled database error -- now 503, and the same
+    press afterwards finds the journal moved with its request (L3-25). One
+    request either way."""
+    checker = _user(db, "checker", ["ADMIN"])
+    j = _submitted_journal(db, "maker")
+    decided = "APPROVED" if door == "approve" else "REJECTED"
+    if fault == "inner_read":
+        undo = _db_faults(monkeypatch, db, "approval_requests", find_one=lambda n, *a, **k: n == 3)
+    else:
+        undo = _db_faults(monkeypatch, db, "approval_requests",
+                          find_one_and_update=(_sets_status(decided), "landed"))
+    code, body = _door(db, monkeypatch, door, j["je_id"], checker)
+    undo()
+    assert code == 503, body                                    # was 404 / an unhandled AutoReconnect
+    assert _je(db, j["je_id"])["status"] == "SUBMITTED"
+    code, body = _door(db, monkeypatch, door, j["je_id"], checker)
+    if fault == "inner_read":
+        assert code == 200, body
+    else:
+        assert (code, body["error"], body["status"]) == (409, "not_submitted", decided)
+    assert _je(db, j["je_id"])["status"] == decided
+    assert _request(db, j["request_id"])["status"] == decided
+    assert db.get_collection("approval_requests").count_documents({}) == 1
+
+
+def test_r3a_inbox_approval_stands_when_the_journal_cannot_be_read_and_post_catches_up(db, monkeypatch):
+    """Kept: an inbox approval whose journal sync cannot read the journal is
+    still the request's decision (it is already written); the journal catches
+    up at its own doors (L3-25). The strict reader must not turn that 200
+    into an error after the request has been decided."""
+    checker = _user(db, "checker", ["ADMIN"])
+    j = _submitted_journal(db, "maker")
+    undo = _db_faults(monkeypatch, db, "journal_entries", find_one=_every_call)
+    code, body = _inbox_approve(db, monkeypatch, j["request_id"], checker)
+    undo()
+    assert code == 200, body
+    assert _request(db, j["request_id"])["status"] == "APPROVED"
+    assert _je(db, j["je_id"])["status"] == "SUBMITTED"
+    assert _door(db, monkeypatch, "post", j["je_id"], checker)[0] == 200
+    assert len(_posted_rows(db, j["je_id"])) == 1
+
+
+def test_r3a_the_approval_engines_other_callers_keep_their_reads(db, monkeypatch):
+    """The strict request read is the journal doors' alone (opt-in): refunds,
+    till discounts, supplier returns and the generic inbox read the engine as
+    before."""
+    from pymongo.errors import AutoReconnect
+
+    j = _submitted_journal(db, "maker")
+    undo = _db_faults(monkeypatch, db, "approval_requests", find_one=_every_call)
+    assert appr.ApprovalEngine(db=db).get(j["request_id"]) is None
+    with pytest.raises(AutoReconnect):
+        appr.ApprovalEngine(db=db, strict=True).get(j["request_id"])
+    undo()
+    assert appr.ApprovalEngine(db=db, strict=True).get(j["request_id"])["status"] == "REQUESTED"
 
 
 def _consume_route(db, monkeypatch, request_id: str, user: Dict[str, Any]):

@@ -417,8 +417,13 @@ class ApprovalEngine:
     COLLECTION = "approval_requests"
     AUDIT_COLLECTION = "audit_logs"
 
-    def __init__(self, db=None):
+    def __init__(self, db=None, *, strict: bool = False):
         self._db = db
+        # strict (opt-in; the journal doors, je_service): a request read that
+        # fails at the database, or finds no store, RAISES instead of
+        # answering "no such request". Every other caller keeps the lenient
+        # read (None).
+        self._strict = strict
 
     # --- collection access -------------------------------------------------
 
@@ -1151,6 +1156,8 @@ class ApprovalEngine:
             try:
                 doc = coll.find_one(ident)
             except Exception:  # noqa: BLE001
+                if self._strict:
+                    raise
                 doc = None
         if not doc:
             return {"ok": False, "error": "not_found"}
@@ -1173,10 +1180,14 @@ class ApprovalEngine:
     def _raw(self, request_id: str) -> Optional[Dict[str, Any]]:
         coll = self._coll()
         if coll is None:
+            if self._strict:
+                raise RuntimeError("approval store unavailable")
             return None
         try:
             return coll.find_one({"request_id": request_id}, {"_id": 0})
         except Exception:  # noqa: BLE001
+            if self._strict:
+                raise
             return None
 
     def get(self, request_id: str) -> Optional[Dict[str, Any]]:

@@ -27,7 +27,8 @@ update FILTER so two racing posts cannot both post (idempotent post).
 Money is paisa-exact integers (rupees * 100) for every debit/credit. Status is
 an explicit string enum, never a colour flag (DECISIONS colour-flag-migration).
 IST tz + FY (Apr-Mar) via api.utils.ist. NO emoji (Windows cp1252); ASCII log
-tag [JE]. Fail-soft: ``db=None`` => empty reads / no-op writes, never raises.
+tag [JE]. ``db=None`` => no-op writes. A journal READ that fails, or finds no
+store, raises JournalStoreUnavailable (HTTP 503): never an empty answer.
 """
 
 from __future__ import annotations
@@ -37,6 +38,8 @@ import os
 import uuid
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
+
+from fastapi import HTTPException
 
 from ..utils.ist import now_ist, fy_start_year_ist
 from .approvals import JOURNAL_CHECKER_ROLES
@@ -62,6 +65,55 @@ JE_ACTION_TYPE = "journal_entry"
 JE_CHECKER_ROLES = JOURNAL_CHECKER_ROLES
 
 FLAG_ENV = "ENABLE_MANUAL_JE"
+
+JE_UNREADABLE = "Journal entries could not be read just now - please try again"
+
+
+class JournalStoreUnavailable(HTTPException):
+    """A journal, or the approval request it hangs on, could not be read just
+    now (or a spend's outcome is unknown). HTTP 503 "try again" from whichever
+    door meets it -- list, detail, Tally export, Submit, Approve, Reject, Post,
+    Reverse, the approvals inbox's journal note rule. An unreadable record is
+    never answered as "not found", "not approved" or "approve again" (D84;
+    Codex round 3, R3-A)."""
+
+    def __init__(self):
+        super().__init__(status_code=503, detail=JE_UNREADABLE)
+
+
+def _ask(what: str, fn, *args, **kwargs):
+    """One read of / call into the journal's stores (the journal collection,
+    the approval engine) from a journal door: a database failure inside it
+    raises JournalStoreUnavailable instead of escaping as a 500 or being read
+    as "nothing there"."""
+    try:
+        return fn(*args, **kwargs)
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[JE] %s failed at the database: %s", what, e)
+        raise JournalStoreUnavailable() from e
+
+
+def _engine(db):
+    """The approval engine as the journal doors use it: its request reads are
+    strict (they raise when the request could not be read)."""
+    from .approvals import ApprovalEngine
+
+    return ApprovalEngine(db=db, strict=True)
+
+
+def _request(db, request_id: Optional[str], *, expire: bool = False) -> Optional[Dict[str, Any]]:
+    """A journal's approval request as stored, None when there is none
+    (``expire``: an overdue REQUESTED one reads EXPIRED, as the engine's own
+    read does). A read that fails raises JournalStoreUnavailable: read as "no
+    request" it answered not_approved for an approved journal, "approve
+    again" for one that can post, and raised a second request beside a good
+    one (R3-A)."""
+    engine = _engine(db)
+    # pylint: disable-next=protected-access
+    return _ask(f"approval request {request_id}", engine.get if expire else engine._raw,
+                request_id or "")
 
 
 def is_je_enabled() -> bool:
@@ -444,28 +496,26 @@ def _audit(db, action: str, je: Dict[str, Any], *, actor: str, reason: str = "",
 # ============================================================================
 
 
-def get_je(db, je_id: str, *, strict: bool = False) -> Optional[Dict[str, Any]]:
-    """The journal, or None when there is none. ``strict``: a read that fails
-    at the database raises instead of answering None -- a route must never
-    tell staff "not found" for a journal it could not read (D84)."""
+def _store(db):
+    """The journal collection; no database / no store raises."""
     coll = _je_coll(db)
     if coll is None:
-        if strict:
-            raise RuntimeError("journal store unavailable")
-        return None
-    try:
-        return coll.find_one({"je_id": je_id}, {"_id": 0})
-    except Exception:  # noqa: BLE001
-        if strict:
-            raise
-        return None
+        raise RuntimeError("journal store unavailable")
+    return coll
+
+
+def get_je(db, je_id: str) -> Optional[Dict[str, Any]]:
+    """The journal, or None when there is none. A read that fails at the
+    database, or finds no journal store, raises JournalStoreUnavailable (503)
+    on EVERY path -- the routes' own reads and each door's reads and
+    read-backs alike: no door tells staff "not found" (or reports another
+    status) for a journal it could not read (D84; Codex round 3, R3-A)."""
+    return _ask(f"journal {je_id} read",
+                lambda: _store(db).find_one({"je_id": je_id}, {"_id": 0}))
 
 
 def list_jes(db, *, store_id: Optional[str] = None, status: Optional[str] = None,
              maker_id: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
-    coll = _je_coll(db)
-    if coll is None:                          # no database: never "no journals" (D84)
-        raise RuntimeError("journal store unavailable")
     q: Dict[str, Any] = {}
     if store_id:
         q["store_id"] = store_id
@@ -473,9 +523,10 @@ def list_jes(db, *, store_id: Optional[str] = None, status: Optional[str] = None
         q["status"] = status.upper()
     if maker_id:
         q["maker_id"] = maker_id
-    # A read that fails raises: an empty list (or an empty Tally file) would
-    # tell staff there are no journals (D84). The routes answer 503.
-    return list(coll.find(q, {"_id": 0}).sort("created_at", -1).limit(int(limit)))
+    # A read that fails, or no database, raises (503): an empty list (or an
+    # empty Tally file) would tell staff there are no journals (D84).
+    return _ask("journal list read", lambda: list(
+        _store(db).find(q, {"_id": 0}).sort("created_at", -1).limit(int(limit))))
 
 
 def create_je(
@@ -598,7 +649,7 @@ def _raise_own_request(db, je: Dict[str, Any], maker_roles: Optional[List[str]])
     None when none could be recorded. The ONE place a journal's request is
     raised: at submit, and again when a checker decides a journal whose
     request was decided without it (_open_request)."""
-    from .approvals import ApprovalEngine, request_approval
+    from .approvals import request_approval
 
     # The dedupe key hands a repeat its earlier live request back. Anyone can
     # raise a request under that key first (the generic create route), for any
@@ -614,7 +665,7 @@ def _raise_own_request(db, je: Dict[str, Any], maker_roles: Optional[List[str]])
         )
         if not req or not req.get("request_id"):
             return None
-        if _is_own_request(je, ApprovalEngine(db=db).get(req["request_id"])):
+        if _is_own_request(je, _request(db, req["request_id"], expire=True)):
             return req["request_id"]
     return None
 
@@ -705,9 +756,9 @@ def _take_request_decision(db, je: Dict[str, Any]) -> Dict[str, Any]:
       * a REJECTION carries the checker note (_note_ok)."""
     if je.get("status") != STATUS_SUBMITTED or not je.get("approval_request_id"):
         return je
-    from .approvals import ApprovalEngine, ApprovalStatus
+    from .approvals import ApprovalStatus
 
-    req = ApprovalEngine(db=db).get(je["approval_request_id"]) or {}
+    req = _request(db, je["approval_request_id"], expire=True) or {}
     checker = req.get("reviewed_by")
     if (not checker or not _is_own_request(je, req)
             or not set(req.get("reviewed_by_roles") or []) & JE_CHECKER_ROLES):
@@ -796,10 +847,8 @@ def needs_reapproval(db, je: Dict[str, Any]) -> bool:
     its place still waits. The journal screen offers the checker the PIN box."""
     if (je or {}).get("status") != STATUS_APPROVED:
         return False
-    from .approvals import ApprovalEngine
-
-    req = ApprovalEngine(db=db)._raw(je.get("approval_request_id") or "")
-    return _approval_state(je, req) in ("pending", "unspendable")
+    return _approval_state(je, _request(db, je.get("approval_request_id"))) in (
+        "pending", "unspendable")
 
 
 def with_reapproval_flags(db, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -832,10 +881,10 @@ def _open_request(db, je: Dict[str, Any], *, actor_id: str,
     is guarded on the one it replaces, so two checkers arriving together end
     on one request. An approval spent by this journal's own Post is never
     replaced: a Post retry finishes that posting (post_je)."""
-    from .approvals import ApprovalEngine, ApprovalStatus
+    from .approvals import ApprovalStatus
 
     old_id = je.get("approval_request_id")
-    old = ApprovalEngine(db=db).get(old_id) or {}
+    old = _request(db, old_id, expire=True) or {}
     status = je.get("status")
     if not set(actor_roles or []) & JE_CHECKER_ROLES:
         if status == STATUS_SUBMITTED:
@@ -892,9 +941,8 @@ def approve_je(db, *, je_id: str, approver_id: str, approver_roles: List[str],
     if refusal:
         return refusal
 
-    from .approvals import ApprovalEngine
-
-    res = ApprovalEngine(db=db).approve(
+    res = _ask(
+        f"approval of request {request_id}", _engine(db).approve,
         request_id,
         approver_user_id=approver_id,
         approver_roles=list(approver_roles or []),
@@ -947,9 +995,8 @@ def reject_je(db, *, je_id: str, approver_id: str, approver_roles: List[str],
     if refusal:
         return refusal
 
-    from .approvals import ApprovalEngine
-
-    res = ApprovalEngine(db=db).reject(
+    res = _ask(
+        f"rejection of request {request_id}", _engine(db).reject,
         request_id,
         approver_user_id=approver_id,
         approver_roles=list(approver_roles or []),
@@ -1059,11 +1106,11 @@ def post_je(db, *, je_id: str, poster_id: str) -> Dict[str, Any]:
     if not request_id:
         return {"ok": False, "http": 409, "error": "no_approval_request"}
 
-    from .approvals import ApprovalEngine
-
     amount_rupees = (je.get("total_debit") or 0) / 100.0
-    engine = ApprovalEngine(db=db)
-    consume = engine.consume_approval(
+    # A spend that raises may have landed (its reply lost): 503, and the retry
+    # finds it bound to this journal's Post (post_bound) and finishes.
+    consume = _ask(
+        f"spend of request {request_id}", _engine(db).consume_approval,
         consumed_by=poster_id,
         action_type=JE_ACTION_TYPE,
         request_id=request_id,
@@ -1075,9 +1122,11 @@ def post_je(db, *, je_id: str, poster_id: str) -> Dict[str, Any]:
     # finishes that posting exactly once (D54).
     if not consume.get("ok") and not (
         consume.get("error") == "already_consumed"
-        and _approval_state(je, engine._raw(request_id)) == "post_bound"
+        and _approval_state(je, _request(db, request_id)) == "post_bound"
     ):
         err = consume.get("error")
+        if err == "no_db":                    # no approval store: not a refusal
+            raise JournalStoreUnavailable()
         code = {"already_consumed": 409, "expired": 410, "not_approved": 409,
                 "action_mismatch": 400, "amount_exceeded": 400, "not_found": 404}.get(err, 409)
         return {"ok": False, "http": code, "error": err or "consume_failed"}
