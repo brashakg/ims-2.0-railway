@@ -1,36 +1,25 @@
 """
-IMS 2.0 - #1397 (Claude's reviewers on head 71b0508a; D107, D108, D109):
-the stock step of a return's record, one test per state. NATIVE Mongo.
+IMS 2.0 - #1397 (D107, D108, D109; the stock step as rebuilt under D122):
+the open / claimed / done states of a return's stock step, and the record,
+audit and History rules around it. NATIVE Mongo.
 ==========================================================================
-The marks on a COMPLETED return record and what finishes each state
-(A = restock_applied, P = stock_pending, I = restock_in_progress):
+The state table of the stock step lives in returns.py (above
+_claim_restock). Its rows are asserted on native Mongo here and in two more
+files:
 
-  R2 pending      A no,  P yes, I no    the press's insert / Needs completing
-                                        -> Update stock (its task: the sweep)
-  R3 claim held   A no,  P yes, I yes   _claim_restock (the press, Update stock)
-                                        -> the claimer's own closing stamp
-  R1 nothing      A no,  P no           no GOOD / DAMAGED line: final
-  R4 stopped      A no,  P yes, I old   a claimer died / its stamp was lost / it
-                                        stalled past the timeout (it then writes
-                                        no unit and no stamp, D79)
-                                        -> a person checks (task, History label);
-                                           completing the task sets a DAMAGED
-                                           unit aside FIRST, then records the check
-  R5 damaged open A yes, P yes          the closing stamp, DAMAGED not set aside
-                                        -> Update stock / the identical re-press,
-                                           NO claim (idempotent on named units)
-  R6 done         A yes, P no           "Already restocked"
-  R7 checked      A no,  P no, checked  final (IMS adds nothing; its DAMAGED
-                                        unit is set aside; no stamp reopens it)
-  R8 left to the counter (a hold from before D95): a person checks.
+  S0 nothing to place     test_r1_... (this file)
+  S1 open -> S2 -> S4     test_r2_... (this file)
+  S2 claim held, live     test_r3_a_claim_held_by_another_worker_... (this file)
+  S2 -> S1 (not placed)   test_r3_a_step_that_could_not_place_... / test_r3_a_press_that_claims_after_...
+  S4 done                 test_r6_... (this file)
+  S2 lost stamp, S3 stopped part way, the sweep, the task close, D123:
+                          test_d122_stock_step_states_native.py
+  the slot on the stock row (stalled holder, resale, double mint, Shopify):
+                          test_d122_return_slot_fence_native.py and
+                          test_return_retry_race_native.py (#1413)
 
-Before (each reproduced here on native Mongo, real routes, head 71b0508a):
+Also here, each reproduced on native Mongo before its fix (real routes):
 
-* R5 was taken with a claim (I yes) that only one fail-soft write gave back:
-  that write lost, "Update stock" answered "Already restocked" for ever with
-  the damaged unit still SOLD;
-* the identical re-press that took that claim stamped the record "nothing
-  restocked": the next "Update stock" put a SECOND unit back for one piece;
 * "Cash owed - now paid" answered 201 with no audit row, ever;
 * the replay of a return recorded by the build on main wrote a second
   RETURN_CREATED row;
@@ -119,18 +108,6 @@ def _rec(db, rid):
 def _tasks(db):
     return sorted((t["status"], "check each unit" in t["description"]) for t in db["tasks"].find(
         {"source_ref": {"$regex": "^return_restock_blocked:"}}))
-
-
-def _stamp_lost(monkeypatch, state, times=1):
-    """The closing write of a stock step never lands (the reply and the write)."""
-    def update(self, flt, change, *a, **k):
-        sets = (change or {}).get("$set") or {}
-        if self.name == "returns" and "stock_pending" in sets and state.get("arm") and state.get("lost", 0) < times:
-            state["lost"] = state.get("lost", 0) + 1
-            raise AutoReconnect("the stock step's stamp was lost")
-        return REAL_UPDATE(self, flt, change, *a, **k)
-
-    monkeypatch.setattr(Collection, "update_one", update)
 
 
 def _dies_after_its_record(monkeypatch, state):
@@ -255,200 +232,15 @@ def _complete_task(db, monkeypatch, rid, who="MGR-7"):
         _user("STORE_MANAGER", who)))
 
 
-def test_r4_a_stamp_lost_after_the_units_went_back_never_adds_a_second_unit(native, monkeypatch):
-    """The press put its GOOD unit back and BOTH tries of its stamp were lost:
-    the record still reads 'claimed, nothing back'. IMS places nothing more by
-    itself (a second run flipped the customer's other piece); the History row
-    says to check by hand; closing the task records who checked and clears it."""
-    db, state = native["db"], {"arm": True}
-    _stamp_lost(monkeypatch, state, times=2)
-    r = _press(_mixed(db))
-    assert r.status_code == 201 and state["lost"] == 2, r.text
-    rid = r.json()["return_id"]
-    after_press = {"p1": ["AVAILABLE", "SOLD"], "p2": "QUARANTINED", "rows": 3}
-    assert _rows(db) == after_press
-    rec = _rec(db, rid)
-    assert (rec["restock_applied"], rec["stock_pending"], rec["restock_in_progress"]) == (False, True, True)
-    # Fresh: it may still be running.
-    assert _restock(rid)["message"] == "Restock in progress - retry shortly" and _rows(db) == after_press
-    db["returns"].update_one({"return_id": rid}, {"$set": {"restock_started_at": OLD, "created_at": OLD}})
-    for _ in range(2):
-        out = _restock(rid)
-        assert out["restock_applied"] is False and "stopped part way" in out["message"], out
-        assert _rows(db) == after_press  # the other P1 piece stays SOLD; nothing minted
-    assert _tasks(db) == [("OPEN", True)]
-    row = [x for x in _history(db)["returns"] if x["return_id"] == rid][0]
-    assert row["stock_pending"] is True and row["stock_step_stopped"] is True
-    # D109(2): the person who checked closes the task; the return records it.
-    assert _complete_task(db, monkeypatch, rid)["status"] == "COMPLETED"
-    rec = _rec(db, rid)
-    assert rec["stock_pending"] is False and rec["stock_checked_by"] == "MGR-7" and rec["stock_checked_at"]
-    row = [x for x in _history(db)["returns"] if x["return_id"] == rid][0]
-    assert row["stock_pending"] is False and not row.get("stock_step_stopped")
-    # R7: checked. The button (if anything still calls it) adds nothing.
-    out = _restock(rid)
-    assert out["restock_applied"] is False and "checked" in out["message"], out
-    assert _rows(db) == after_press and _tasks(db) == [("COMPLETED", True)]
-    assert returns_router.sweep_stuck_return_holds() == 0 and _tasks(db) == [("COMPLETED", True)]
-
-
-def test_r4_a_claimer_that_died_leaves_the_damaged_unit_to_update_stock(native, monkeypatch):
-    """A worker died holding the claim before it placed anything. Update stock
-    places no GOOD unit (it cannot know) but still sets the DAMAGED one aside
-    (D92(2)); a task not closed by a person changes nothing on the return."""
-    db = native["db"]
-    rid = _stopped_record(db, monkeypatch, _mixed(db))
-    db["returns"].update_one({"return_id": rid}, {"$set": {"restock_in_progress": True, "restock_started_at": OLD}})
-    out = _restock(rid)
-    assert "stopped part way" in out["message"], out
-    assert _rows(db) == {"p1": ["SOLD", "SOLD"], "p2": "QUARANTINED", "rows": 3}
-    rec = _rec(db, rid)
-    assert rec["stock_pending"] is True and not rec.get("stock_checked_at") and _tasks(db) == [("OPEN", True)]
-    # A record whose step is NOT stopped is never marked checked by a task close.
-    db["returns"].update_one({"return_id": rid}, {"$set": {"restock_in_progress": False}})
-    _complete_task(db, monkeypatch, rid)
-    rec = _rec(db, rid)
-    assert rec["stock_pending"] is True and not rec.get("stock_checked_at")
-
-
-# --- R5: GOOD units back, a DAMAGED unit not set aside -------------------------------------------
-
-
-def test_r5_a_damaged_step_whose_stamp_was_lost_is_finished_by_the_same_button(native, monkeypatch):
-    """Must-fix (returns.py:7457). The press put the GOOD unit back; the
-    DAMAGED unit's set-aside failed. Update stock: the set-aside fails again
-    AND its closing stamp is lost. Before: every later press answered
-    'Already restocked' with the unit SOLD for good. Now the next press sets
-    it aside and closes the step; the GOOD unit is never touched again."""
-    db, state = native["db"], {}
-    _stock_unreadable_once(monkeypatch, state)
-    r = _press(_mixed(db))
-    assert r.status_code == 201 and state.get("stock_failed"), r.text
-    rid = r.json()["return_id"]
-    open_rows = {"p1": ["AVAILABLE", "SOLD"], "p2": "SOLD", "rows": 3}
-    rec = _rec(db, rid)
-    assert _rows(db) == open_rows and (rec["restock_applied"], rec["stock_pending"]) == (True, True)
-    assert "damaged unit is NOT set aside" in r.json()["stock_note"]
-    state.pop("stock_failed")  # the stock cannot be read once more ...
-    state["arm"] = True        # ... and the step's closing stamp is lost
-    _stamp_lost(monkeypatch, state)
-    first = _restock(rid)
-    assert state.get("stock_failed") and state.get("lost") == 1, state
-    assert _rows(db) == open_rows and "Already restocked" not in first["message"], first
-    second = _restock(rid)
-    assert second["message"] != "Already restocked", second
-    assert _rows(db) == {"p1": ["AVAILABLE", "SOLD"], "p2": "QUARANTINED", "rows": 3}, second
-    rec = _rec(db, rid)
-    assert (rec["restock_applied"], rec["stock_pending"]) == (True, False) and not rec.get("restock_in_progress")
-    assert rec["quarantined_stock_ids"] == ["U3"] and len(rec["restock_stock_ids"]) == 1
-    assert not [x for x in _history(db)["returns"] if x.get("stock_pending")]
-    assert _restock(rid)["message"] == "Already restocked"
-    assert _rows(db) == {"p1": ["AVAILABLE", "SOLD"], "p2": "QUARANTINED", "rows": 3}
-
-
-def test_r5_a_set_aside_that_landed_with_its_stamp_lost_is_closed_by_the_next_press(native, monkeypatch):
-    """The other half of the same loss: the unit WAS set aside, only the
-    stamp was lost. Before: stock right, 'Units not back in stock' and a dead
-    button for ever. Now the next press finds it done and closes the step."""
-    db, state = native["db"], {}
-    _stock_unreadable_once(monkeypatch, state)
-    rid = _press(_mixed(db)).json()["return_id"]
-    state["arm"] = True
-    _stamp_lost(monkeypatch, state)
-    _restock(rid)
-    done_rows = {"p1": ["AVAILABLE", "SOLD"], "p2": "QUARANTINED", "rows": 3}
-    assert state.get("lost") == 1 and _rows(db) == done_rows
-    assert _rec(db, rid)["stock_pending"] is True  # the label is still up
-    out = _restock(rid)
-    rec = _rec(db, rid)
-    assert rec["stock_pending"] is False and not rec.get("restock_in_progress"), (out, rec)
-    assert _rows(db) == done_rows and _restock(rid)["message"] == "Already restocked"
-
-
-def test_r5_update_stock_first_then_the_press_never_wipes_what_is_back(native, monkeypatch):
-    """Must-fix (returns.py:6321, a regression of 71b0508a). 'Update stock'
-    is pressed before the press reaches its stock step: it puts the GOOD unit
-    back and its DAMAGED set-aside fails. The press then finishes. Before: it
-    stamped the record 'nothing restocked', and the next Update stock put the
-    customer's OTHER piece back too (two AVAILABLE units for one return)."""
-    db, state = native["db"], {}
-    real_claim = returns_router._claim_restock
-
-    def update_stock_gets_there_first(coll, return_id):
-        if _once(state, "raced"):
-            _stock_unreadable_once(monkeypatch, state)
-            state["first"] = _in_thread(lambda: _restock(return_id))
-        return real_claim(coll, return_id)
-
-    monkeypatch.setattr(returns_router, "_claim_restock", update_stock_gets_there_first)
-    r = _press(_mixed(db))
-    assert r.status_code == 201 and state.get("stock_failed"), (r.text, state)
-    assert state["first"]["value"]["restock_applied"] is True, state["first"]
-    rid = r.json()["return_id"]
-    done_rows = {"p1": ["AVAILABLE", "SOLD"], "p2": "QUARANTINED", "rows": 3}
-    assert _rows(db) == done_rows
-    said = _rec(db, rid)
-    for _ in range(2):
-        _restock(rid)
-        assert _rows(db) == done_rows  # the customer's other piece stays SOLD; nothing minted
-    assert said["restock_applied"] is True and len(said["restock_stock_ids"]) == 1, said
-    assert [x.get("reactivated") for x in said["restocked"]] == [1], said
-    assert r.json()["restock_applied"] is True and r.json()["restock_stock_ids"] == said["restock_stock_ids"]
-    assert _rec(db, rid)["stock_pending"] is False
-
-
-def test_r5_the_second_of_two_identical_re_presses_never_wipes_what_is_back(native, monkeypatch):
-    """The reviewer's steps: a 503 'Not confirmed' press; two identical
-    re-presses finish it. The first puts the GOOD unit back and its DAMAGED
-    set-aside fails; the second reaches the stock step AFTER that stamp."""
-    db, state = native["db"], {}
-    _insert_fails_once(monkeypatch, state)
-    payload = _mixed(db)
-    assert _press(payload, "K-MIX").status_code == 503
-    rid, one_at_a_time, real_finish = state["failed"], threading.Lock(), returns_router._finish_press
-
-    async def finish(*a, **k):
-        with one_at_a_time:  # the second starts after the first has stamped
-            if _once(state, "first_finisher"):
-                _stock_unreadable_once(monkeypatch, state)
-            return await real_finish(*a, **k)
-
-    monkeypatch.setattr(returns_router, "_finish_press", finish)
-    answers = _two_at_once(monkeypatch, payload, "K-MIX")
-    assert sorted(a.status_code for a in answers) == [201, 201], [a.text for a in answers]
-    assert state.get("stock_failed")
-    done_rows = {"p1": ["AVAILABLE", "SOLD"], "p2": "QUARANTINED", "rows": 3}
-    assert _rows(db) == done_rows
-    said = _rec(db, rid)
-    for _ in range(2):
-        _restock(rid)
-        assert _rows(db) == done_rows  # one piece came back: one P1 unit AVAILABLE, never two
-    assert said["restock_applied"] is True and len(said["restock_stock_ids"]) == 1, said
-    assert _rec(db, rid)["stock_pending"] is False
-    assert db["returns"].count_documents({"payout_of": None}) == 1
-
-
-# --- R8: a hold from before D95 ------------------------------------------------------------------
-
-
-def test_r8_a_record_left_to_the_counter_is_never_restocked_by_ims(native):
-    db = native["db"]
-    db["returns"].insert_one({"_id": "ret:RET-L", "return_id": "RET-L", "order_id": "ORD-1", "store_id": STORE,
-                              "status": "COMPLETED", "recovered": {"by": "U9"}, "restock_applied": False,
-                              "stock_pending": False, "restock_left_to_counter": True,
-                              "items": _payload()["items"]})
-    out = _restock("RET-L")
-    assert out["restock_applied"] is False and "Check each unit" in out["message"], out
-    assert sorted(u["status"] for u in db["stock_units"].find({})) == ["SOLD", "SOLD"]
-
-
 # --- D84: "Cash owed - now paid" writes its audit row before it answers --------------------------
 
 
 def test_cash_owed_now_paid_without_its_audit_row_says_press_again(native, monkeypatch):
     """Must-fix (returns.py:7165). Before: 201 'booked as paid', the return
-    left the owed list and no door ever wrote the row. Now 503 with the return
-    still listed; the re-press replays the STORED payout and writes the row once."""
+    left the owed list and no door ever wrote the row. Now 503, nothing marked;
+    the next READER of the owed return settles it from the STORED payout and
+    writes the row once (D123: the owed list here), and a re-press replays
+    the stored payout."""
     db, state = native["db"], {}
     real_own = returns_router._own_record_or_refuse
 
@@ -481,9 +273,11 @@ def test_cash_owed_now_paid_without_its_audit_row_says_press_again(native, monke
     with pytest.raises(HTTPException) as err:
         paid("STORE_DRAWER")
     assert state.get("audit_failed") and err.value.status_code == 503 and "Press again" in err.value.detail
-    assert _rec(db, rid).get("owed_paid_at") is None and owed_list() == [rid]
+    assert _rec(db, rid).get("owed_paid_at") is None
     assert db["audit_logs"].count_documents({"_id": f"return_owed_paid:{rid}"}) == 0
     assert db["tasks"].count_documents({"source_ref": f"return_cash_owed:{rid}", "status": "OPEN"}) == 1
+    assert owed_list() == []  # D123: its payout is stored -- the list settles it, audit row first
+    assert db["audit_logs"].count_documents({"_id": f"return_owed_paid:{rid}"}) == 1
     for _ in range(2):
         again = paid("HQ")  # a changed answer: the STORED payment is replayed
         assert again["replayed"] is True and again["cash_paid_from"] == "STORE_DRAWER", again
@@ -723,29 +517,6 @@ def _marks(db, rid):
     return (rec.get("restock_applied"), rec.get("stock_pending"), rec.get("restock_in_progress"))
 
 
-def _claimer_died(db, rid):
-    """R4: a worker took the claim and died before it placed or set aside anything."""
-    db["returns"].update_one({"return_id": rid}, {"$set": {
-        "restock_in_progress": True, "restock_started_at": OLD, "created_at": OLD}})
-
-
-def _stalls_past_the_timeout(db, monkeypatch, state, meanwhile=lambda rid: None):
-    """The worker that takes the stock claim stalls for more than 600 s right
-    after it: its own claim is that old when it goes on (``meanwhile`` runs
-    while it is stalled)."""
-    real_claim = returns_router._claim_restock
-
-    def claimed_long_ago(coll, return_id):
-        claim = real_claim(coll, return_id)
-        if claim is not None and _once(state, "stalled"):
-            _aged(db, return_id)
-            claim["restock_started_at"] = OLD
-            meanwhile(return_id)
-        return claim
-
-    monkeypatch.setattr(returns_router, "_claim_restock", claimed_long_ago)
-
-
 # --- R1 and R6: final states -----------------------------------------------------------------------
 
 
@@ -780,177 +551,3 @@ def test_r6_a_finished_step_is_final(native):
     for _ in range(2):
         assert _restock(rid)["message"] == "Already restocked"
         assert _rows(db) == done and _marks(db, rid) == (True, False, False)
-
-
-# --- R4 -> R7: the task close (must-fix, returns.py:4857) -----------------------------------------
-
-
-def test_r4_closing_the_task_sets_the_damaged_unit_aside_before_it_clears_the_label(native, monkeypatch):
-    """The reviewers' steps. The press takes the claim and puts the GOOD unit
-    back; its DAMAGED set-aside fails (one stock read error) and both tries
-    of its closing stamp are lost. 600 s later the sweep raises the task; the
-    manager checks the units and closes it WITHOUT pressing Update stock
-    (nothing told them to). Before: the label and the button were gone and
-    the damaged unit stayed SOLD for good -- never QUARANTINED, no task, no
-    button. Now the close sets it aside first, then records the check."""
-    db, state = native["db"], {"arm": True}
-    _stock_unreadable_once(monkeypatch, state)
-    _stamp_lost(monkeypatch, state, times=2)
-    r = _press(_mixed(db))
-    assert r.status_code == 201 and state["lost"] == 2 and state.get("stock_failed"), (r.text, state)
-    rid = r.json()["return_id"]
-    assert _rows(db) == {"p1": ["AVAILABLE", "SOLD"], "p2": "SOLD", "rows": 3}
-    assert _marks(db, rid) == (False, True, True)
-    _aged(db, rid)
-    assert returns_router.sweep_stuck_return_holds() == 1 and _tasks(db) == [("OPEN", True)]
-    assert _complete_task(db, monkeypatch, rid)["status"] == "COMPLETED"
-    assert _rows(db) == {"p1": ["AVAILABLE", "SOLD"], "p2": "QUARANTINED", "rows": 3}
-    unit = db["stock_units"].find_one({"_id": "U3"})
-    assert unit["quarantine_reason"] == "CUSTOMER_RETURN_DAMAGED" and unit["quarantine_by"] == "MGR-7"
-    rec = _rec(db, rid)
-    assert rec["stock_pending"] is False and rec["stock_checked_by"] == "MGR-7" and rec["stock_checked_at"]
-    assert rec["quarantined_stock_ids"] == ["U3"]
-    assert _row(db, rid)["stock_pending"] is False
-    assert returns_router.sweep_stuck_return_holds() == 0 and _tasks(db) == [("COMPLETED", True)]
-    # The task never tells staff to add a damaged piece as stock.
-    text = db["tasks"].find_one({"source_ref": f"return_restock_blocked:{rid}"})["description"]
-    assert "Never add the DAMAGED piece by hand" in text and "sets it aside when you close this task" in text
-
-
-def test_r4_a_task_close_that_cannot_set_the_damaged_unit_aside_refuses_and_stays_open(native, monkeypatch):
-    """The stock cannot be read when the task is closed: the close answers
-    503, the task stays open, and History still offers Update stock -- which
-    sets the unit aside. Only then does the close record the check."""
-    db, state = native["db"], {}
-    rid = _stopped_record(db, monkeypatch, _mixed(db))
-    _claimer_died(db, rid)
-    assert returns_router.sweep_stuck_return_holds() == 1 and _tasks(db) == [("OPEN", True)]
-    _stock_unreadable_once(monkeypatch, state)
-    with pytest.raises(HTTPException) as err:
-        _complete_task(db, monkeypatch, rid)
-    assert state.get("stock_failed") and err.value.status_code == 503 and "Update stock" in err.value.detail
-    assert _marks(db, rid) == (False, True, True) and not _rec(db, rid).get("stock_checked_at")
-    assert _tasks(db) == [("OPEN", True)]
-    assert _rows(db) == {"p1": ["SOLD", "SOLD"], "p2": "SOLD", "rows": 3}
-    row = _row(db, rid)
-    assert row["stock_pending"] is True and row["stock_step_stopped"] is True  # the button is still offered
-    out = _restock(rid)  # ... and it works: the DAMAGED unit is set aside, no GOOD unit is placed
-    assert "stopped part way" in out["message"], out
-    assert _rows(db) == {"p1": ["SOLD", "SOLD"], "p2": "QUARANTINED", "rows": 3}
-    assert _marks(db, rid) == (False, True, True)  # the GOOD units are still a person's to check
-    assert _complete_task(db, monkeypatch, rid)["status"] == "COMPLETED"
-    assert _rec(db, rid)["stock_checked_by"] == "MGR-7" and _rec(db, rid)["stock_pending"] is False
-    assert _rows(db) == {"p1": ["SOLD", "SOLD"], "p2": "QUARANTINED", "rows": 3}
-
-
-def test_r7_a_checked_record_is_final_and_its_damaged_unit_is_set_aside(native, monkeypatch):
-    """A worker died between the claim and the set-aside (a deploy). The task
-    is closed without Update stock: R7. IMS adds no GOOD unit (the person's
-    check is the record), the DAMAGED one is set aside, and nothing reopens
-    the step: not the button, not the sweep, not a new claim."""
-    db = native["db"]
-    rid = _stopped_record(db, monkeypatch, _mixed(db))
-    _claimer_died(db, rid)
-    assert returns_router.sweep_stuck_return_holds() == 1 and _tasks(db) == [("OPEN", True)]
-    assert _complete_task(db, monkeypatch, rid)["status"] == "COMPLETED"
-    final = {"p1": ["SOLD", "SOLD"], "p2": "QUARANTINED", "rows": 3}
-    rec = _rec(db, rid)
-    assert _rows(db) == final and _marks(db, rid) == (False, False, True)
-    assert rec["stock_checked_by"] == "MGR-7" and rec["quarantined_stock_ids"] == ["U3"]
-    assert not _row(db, rid).get("stock_pending") and not _row(db, rid).get("stock_step_stopped")
-    assert returns_router._claim_restock(db["returns"], rid) is None
-    for _ in range(2):
-        out = _restock(rid)
-        assert out["restock_applied"] is False and "checked them by hand" in out["message"], out
-        assert _rows(db) == final and _marks(db, rid) == (False, False, True)
-    assert returns_router.sweep_stuck_return_holds() == 0 and _tasks(db) == [("COMPLETED", True)]
-
-
-def test_r4_a_task_that_never_asked_for_a_hand_check_is_not_recorded_as_one(native, monkeypatch):
-    """The sweep raised the ordinary task ('press Update stock') while the
-    step was only pending; then a worker died holding the claim. Before:
-    closing that task marked the return 'checked by hand' though nobody was
-    asked to check. Now the close is refused once: the SAME task is rewritten
-    to say what to check, and the second close records the check."""
-    db = native["db"]
-    rid = _stopped_record(db, monkeypatch, _mixed(db))
-    db["returns"].update_one({"return_id": rid}, {"$set": {"created_at": OLD}})
-    assert returns_router.sweep_stuck_return_holds() == 1 and _tasks(db) == [("OPEN", False)]
-    _claimer_died(db, rid)
-    with pytest.raises(HTTPException) as err:
-        _complete_task(db, monkeypatch, rid)
-    assert err.value.status_code == 409 and "check each unit" in err.value.detail, err.value.detail
-    assert _marks(db, rid) == (False, True, True) and not _rec(db, rid).get("stock_checked_at")
-    assert _tasks(db) == [("OPEN", True)] and db["tasks"].count_documents({}) == 1
-    assert _rows(db) == {"p1": ["SOLD", "SOLD"], "p2": "SOLD", "rows": 3}
-    assert _complete_task(db, monkeypatch, rid)["status"] == "COMPLETED"
-    assert _rec(db, rid)["stock_checked_by"] == "MGR-7" and _marks(db, rid) == (False, False, True)
-    assert _rows(db) == {"p1": ["SOLD", "SOLD"], "p2": "QUARANTINED", "rows": 3}
-
-
-def test_r4_update_stock_on_a_stopped_step_rewrites_the_open_task(native, monkeypatch):
-    """The same state, the button pressed first: its answer says 'check each
-    unit', and the task already open says so too (one task, not two)."""
-    db = native["db"]
-    rid = _stopped_record(db, monkeypatch, _mixed(db))
-    db["returns"].update_one({"return_id": rid}, {"$set": {"created_at": OLD}})
-    assert returns_router.sweep_stuck_return_holds() == 1 and _tasks(db) == [("OPEN", False)]
-    _claimer_died(db, rid)
-    assert "Check each unit" in _restock(rid)["message"]
-    assert _tasks(db) == [("OPEN", True)] and db["tasks"].count_documents({}) == 1
-    assert _complete_task(db, monkeypatch, rid)["status"] == "COMPLETED"
-    assert _rec(db, rid)["stock_checked_by"] == "MGR-7"
-
-
-# --- D79: a claim older than the timeout is dead to its holder too -------------------------------
-
-
-def test_r3_update_stock_stalled_past_the_timeout_places_nothing_and_never_reopens_a_checked_record(
-        native, monkeypatch):
-    """Update stock takes the claim and stalls for more than 600 s before its
-    unit write. Meanwhile the sweep raises the task; a person finds no stock
-    row for the piece, adds one by hand and closes the task (R7). The stalled
-    worker goes on. Before: it flipped the SOLD unit to AVAILABLE (two stock
-    rows for one piece) and its stamp wrote 'restocked' over the person's
-    check. Now it writes no unit and no stamp."""
-    db, state = native["db"], {}
-    rid = _stopped_record(db, monkeypatch, _mixed(db))
-
-    def a_person_checks(return_id):
-        assert returns_router.sweep_stuck_return_holds() == 1 and _tasks(db) == [("OPEN", True)]
-        db["stock_units"].insert_one({"_id": "HAND", "stock_id": "HAND", "product_id": "P1", "store_id": STORE,
-                                      "status": "AVAILABLE", "quantity": 1, "barcode": "BCH"})
-        state["closed"] = _in_thread(lambda: _complete_task(db, monkeypatch, return_id))
-
-    _stalls_past_the_timeout(db, monkeypatch, state, a_person_checks)
-    out = _restock(rid)
-    assert state["closed"].get("value", {}).get("status") == "COMPLETED", state["closed"]
-    units = {u["_id"]: u["status"] for u in db["stock_units"].find({})}
-    assert units == {"U1": "SOLD", "U2": "SOLD", "U3": "QUARANTINED", "HAND": "AVAILABLE"}, units
-    rec = _rec(db, rid)
-    assert _marks(db, rid) == (False, False, True) and rec["stock_checked_by"] == "MGR-7", rec
-    assert not rec.get("restock_stock_ids") and not rec.get("restocked")
-    assert out["restock_applied"] is False and "checked them by hand" in out["message"], out
-    assert _tasks(db) == [("COMPLETED", True)]  # no new task on a checked record
-    assert _restock(rid)["restock_applied"] is False
-    assert {u["_id"]: u["status"] for u in db["stock_units"].find({})} == units
-
-
-def test_r3_a_press_stalled_past_the_timeout_places_nothing_and_leaves_the_step_to_a_person(native, monkeypatch):
-    """The same stall inside the press itself. Before: it placed its unit and
-    stamped 'done' 600 s late (a person may have been told to check by then).
-    Now it writes no GOOD unit and no stock stamp: the step reads as stopped
-    (R4), the till says so and a task says what to check. The DAMAGED unit is
-    still set aside (D92(2)) and the return's audit row is still written."""
-    db, state = native["db"], {}
-    _stalls_past_the_timeout(db, monkeypatch, state)
-    r = _press(_mixed(db))
-    assert r.status_code == 201 and state.get("stalled"), r.text
-    rid = r.json()["return_id"]
-    assert _rows(db) == {"p1": ["SOLD", "SOLD"], "p2": "QUARANTINED", "rows": 3}
-    rec = _rec(db, rid)
-    assert _marks(db, rid) == (False, True, True) and rec["audited"] is True and rec["quarantined_stock_ids"] == ["U3"]
-    assert r.json()["restock_applied"] is False and "check" in (r.json().get("stock_note") or ""), r.json()
-    assert _tasks(db) == [("OPEN", True)]
-    assert _row(db, rid)["stock_step_stopped"] is True
-    assert db["audit_logs"].count_documents({"_id": f"return_created:{rid}"}) == 1

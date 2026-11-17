@@ -104,6 +104,10 @@ def native(monkeypatch):
     for n in (1, 2):
         db["stock_units"].insert_one({"_id": f"U{n}", "stock_id": f"U{n}", "product_id": "P1", "store_id": STORE,
                                       "status": "SOLD", "order_id": "ORD-1", "quantity": 1, "barcode": f"BC{n}"})
+    # D82 / D122(7): the return-slot indexes exist before the code serves.
+    for field in ("return_slot", "return_slots"):
+        db["stock_units"].create_index(field, unique=True, name=f"uniq_stock_unit_{field}",
+                                       partialFilterExpression={field: {"$type": "string"}})
     # D95(1): no unique index on return_id anywhere in these tests.
     db["returns"].insert_one({"_id": "seed"})
     db["returns"].delete_one({"_id": "seed"})
@@ -134,7 +138,17 @@ def _complete(rid, **answer):
 
 
 def _restock(rid):
-    return asyncio.run(returns_router.retry_restock(rid, current_user=_user("STORE_MANAGER")))
+    """The record's stock step, from the door that owns it: 'Update stock'
+    (the store), or -- for a record Needs completing wrote, which the store
+    door refuses with 403 (D7) -- the panel's 'Retry stock step' (Accounts)."""
+    from fastapi import HTTPException
+
+    try:
+        return asyncio.run(returns_router.retry_restock(rid, current_user=_user("STORE_MANAGER")))
+    except HTTPException as exc:
+        if exc.status_code != 403:
+            raise
+        return asyncio.run(returns_router.retry_completed_record_restock(rid, current_user=_user("ACCOUNTANT")))
 
 
 def _age_hold(db):
@@ -402,38 +416,25 @@ def test_an_insert_that_never_landed_is_settled_by_the_identical_re_press(native
 
 
 def test_two_finishers_at_once_set_one_damaged_unit_aside(native, monkeypatch):
-    """D92(2) + D95(2): the bill line is 2 units, ONE comes back DAMAGED. Two
-    identical re-presses finish the return together and each reads "which
-    units has this return set aside" before the other's flip lands. Counting
-    and then flipping set BOTH units aside -- the piece still with the
-    customer became QUARANTINED stock. The units are named ONCE on the
-    return's record (one compare-and-set) and only those are flipped."""
+    """D92(2) + D95(2) + D122(2): the bill line is 2 units, ONE comes back
+    DAMAGED. Two identical re-presses finish the return together. One holds
+    the record's stock claim and sets ONE unit aside on its return slot; the
+    other places nothing. The piece still with the customer stays SOLD."""
     db, state = native["db"], {}
     _insert_fails_once(monkeypatch, state)
     r = _press(_payload(condition="DAMAGED"), "K-DMG")
     assert r.status_code == 503, r.text
     rid = state["failed"]
     assert _books(db)["units"] == ["SOLD", "SOLD"]
-    gate, real_find = threading.Barrier(2), returns_router._find_stock
-
-    def find(stock_repo, query):
-        rows = real_find(stock_repo, query)
-        if "quarantine_notes" in query:  # both have read; neither has flipped
-            try:
-                gate.wait(5)
-            except threading.BrokenBarrierError:
-                pass
-        return rows
-
-    monkeypatch.setattr(returns_router, "_find_stock", find)
     answers = _two_at_once(monkeypatch, _payload(condition="DAMAGED"), "K-DMG")
     assert sorted(a.status_code for a in answers) == [201, 201], [a.text for a in answers]
     b = _books(db)
     assert b["units"] == ["QUARANTINED", "SOLD"] and b["unit_rows"] == 2 and b["returned_qty"] == 1
     rec = db["returns"].find_one({"_id": f"ret:{rid}"})
-    assert len(rec["quarantined_stock_ids"]) == 1 and rec["damaged_unit_ids"] == rec["quarantined_stock_ids"]
+    aside = db["stock_units"].find_one({"status": "QUARANTINED"})
+    assert rec["quarantined_stock_ids"] == [aside["_id"]] and aside["return_slot"] == f"{rid}|aside|P1|0"
     kept = db["stock_units"].find_one({"status": "SOLD"})
-    assert kept["order_id"] == "ORD-1"  # the customer's other piece keeps its sale
+    assert kept["order_id"] == "ORD-1" and "return_slot" not in kept  # the customer's other piece keeps its sale
     _restock(rid)
     assert _books(db)["units"] == ["QUARANTINED", "SOLD"]
 
@@ -663,33 +664,29 @@ async def _update_stock(db, stock_repo, rid):
         return await returns_router.retry_restock(rid, current_user=_user("STORE_MANAGER"))
 
 
-def test_a_named_unit_another_return_took_is_replaced_by_one_other(native, monkeypatch):
-    """The record names U1 as its DAMAGED unit; another return of the bill put
-    U1 back on the shelf meanwhile. The set-aside names U2 in its place (a
-    compare-and-set on what was named) and flips that one; a second run moves
-    nothing; a record that cannot be read sets nothing aside."""
+def test_a_second_set_aside_of_the_same_piece_moves_no_second_unit(native, monkeypatch):
+    """D122(2): the set-aside carries its return slot. A second run for the
+    same piece (a stale worker with the same snapshot) picks the same slot:
+    its flip of the line's OTHER unit is refused by the database, the piece
+    is credited, and the customer's other unit stays SOLD. A stock that
+    cannot be read sets nothing aside and says so (ok False)."""
     db = native["db"]
-    db["returns"].insert_one({"_id": "ret:RET-X", "return_id": "RET-X", "order_id": "ORD-1", "status": "COMPLETED",
-                              "damaged_unit_ids": ["U1"]})
-    db["stock_units"].update_one({"_id": "U1"}, {"$set": {"status": "AVAILABLE", "order_id": None}})
     lines = [returns_router.ReturnLine(**_payload(condition="DAMAGED")["items"][0])]
     order = db["orders"].find_one({"order_id": "ORD-1"})
 
-    def unreadable(self, flt=None, *a, **k):
-        if self.name == "returns":
-            raise AutoReconnect("returns unreadable")
-        return REAL_FIND_ONE(self, flt, *a, **k)
+    def unreadable(stock_repo, query):
+        raise AutoReconnect("stock unreadable")
 
     with monkeypatch.context() as m:
-        m.setattr(Collection, "find_one", unreadable)
-        assert returns_router._quarantine_damaged_units(lines, "ORD-1", order, "RET-X", "U1") == []
-    assert _books(db)["units"] == ["AVAILABLE", "SOLD"]
-    for moved in (["U2"], []):
-        out = returns_router._quarantine_damaged_units(lines, "ORD-1", order, "RET-X", "U1")
-        assert [u["stock_id"] for u in out] == moved
-    assert db["returns"].find_one({"_id": "ret:RET-X"})["damaged_unit_ids"] == ["U2"]
-    units = {u["_id"]: u["status"] for u in db["stock_units"].find({})}
-    assert units == {"U1": "AVAILABLE", "U2": "QUARANTINED"}
+        m.setattr(returns_router, "_find_stock", unreadable)
+        assert returns_router._quarantine_damaged_units(lines, "ORD-1", order, "RET-X", "U1", moved_ids=set()) == ([], False)
+    assert _books(db)["units"] == ["SOLD", "SOLD"]
+    first, ok = returns_router._quarantine_damaged_units(lines, "ORD-1", order, "RET-X", "U1", moved_ids=set())
+    again, ok2 = returns_router._quarantine_damaged_units(lines, "ORD-1", order, "RET-X", "U1", moved_ids=set())
+    assert ok and ok2 and len(first) == 1 and [u["stock_id"] for u in again] == [first[0]["stock_id"]]
+    units = sorted(u["status"] for u in db["stock_units"].find({}))
+    assert units == ["QUARANTINED", "SOLD"] and db["stock_units"].count_documents({}) == 2
+    assert db["stock_units"].count_documents({"return_slot": "RET-X|aside|P1|0"}) == 1
 
 
 def test_a_record_an_older_build_wrote_is_found_before_the_press_inserts(native, monkeypatch):

@@ -74,10 +74,12 @@ def test_an_error_after_the_credit_lands_keeps_the_hold_and_the_approval(till, m
     monkeypatch.setattr(approvals.ApprovalEngine, "release_consumption",
                         lambda self, rid, **k: released.append(rid), raising=False)
 
-    def _boom(*a, **k):
-        raise RuntimeError("quarantine store down")
+    async def _boom(*a, **k):
+        raise RuntimeError("the record's store is down")
 
-    monkeypatch.setattr(returns_router, "_quarantine_damaged_units", _boom)
+    # D95 / D122: the stock step runs after the record and is fail-soft, so
+    # the error after the credit is the record insert's.
+    monkeypatch.setattr(returns_router, "_own_record_or_refuse", _boom)
     with pytest.raises(RuntimeError):
         _advance_client().post("/api/v1/returns", json=payload, headers=_hdr("STORE_MANAGER"))
     assert _balance(till) == 1800.0  # the credit landed
@@ -281,8 +283,11 @@ def test_an_unpaid_cash_part_is_owed_and_raises_a_pay_task(till, tasks):
     assert [t["method"] for t in doc["refund_tenders"]] == ["STORE_CREDIT"]
     assert [(t["method"], t["status"]) for t in doc["owed_tenders"]] == [("CASH", "OWED")]
     assert round(doc["gst_breakup"]["taxable"] + doc["gst_breakup"]["tax"], 2) == doc["net_refund"]
-    assert [t["dedupe_ref"] for t in tasks] == ["return_cash_owed:RET-P"]
-    assert "Pay customer Rs 600.00 for return RET-P" in tasks[0]["title"]
+    # #1413 (D6): a rebuilt line whose condition was not kept is set aside
+    # by the record's Retry stock step, so the record carries that task too.
+    assert sorted(t["dedupe_ref"] for t in tasks) == ["return_cash_owed:RET-P", "return_restock_blocked:RET-P"]
+    owed_task = [t for t in tasks if t["dedupe_ref"] == "return_cash_owed:RET-P"][0]
+    assert "Pay customer Rs 600.00 for return RET-P" in owed_task["title"]
 
 
 # =========================================================================== #

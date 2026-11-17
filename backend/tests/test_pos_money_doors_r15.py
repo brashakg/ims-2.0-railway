@@ -130,8 +130,13 @@ def test_an_error_after_the_mark_keeps_the_claims_and_the_hold(till, monkeypatch
     def _boom(*a, **k):
         raise RuntimeError("loyalty store down")
 
+    async def _record_boom(*a, **k):
+        raise RuntimeError("the record's store is down")
+
     monkeypatch.setattr("api.routers.loyalty.reverse_for_return", _boom)
-    monkeypatch.setattr(returns_router, "_quarantine_damaged_units", _boom)
+    # D95 / D122: the stock step is fail-soft; the error after the mark is
+    # the record insert's.
+    monkeypatch.setattr(returns_router, "_own_record_or_refuse", _record_boom)
     with pytest.raises(RuntimeError):
         _advance_client().post("/api/v1/returns", json=payload, headers=_hdr("STORE_MANAGER"))
     assert released == [] and written_off == []
@@ -250,10 +255,11 @@ def test_a_recovered_record_keeps_the_return_line_shape(till, tasks):
                     net_amount=1800.0, gross_refund=1800.0, restocking_fee=0.0, round_off=0.0, gst_view=view,
                     return_type="RETURN")
     doc = _complete("RET-S", cash_leg_paid=True)
-    # D85 round 8: a hold that never recorded the unit's condition restocks
-    # nothing by itself from the record (restock False: a person checks it).
+    # D85 round 8 / #1413 D6: a hold that never recorded the unit's condition
+    # keeps none, so its Retry stock step SETS THE PIECE ASIDE for a person to
+    # check (_retry_lines) -- never on sale blind.
     assert doc["items"] == [{"order_item_id": "li1", "item_id": "li1", "product_id": "P1", "return_qty": 1.0,
-                             "sku": "", "product_name": "", "condition": "GOOD", "restock": False}]
+                             "sku": "", "product_name": ""}]
 
 
 # =========================================================================== #

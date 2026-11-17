@@ -150,7 +150,8 @@ def test_the_identical_re_press_after_needs_completing_books_nothing(till, monke
 
 
 def test_an_unsaved_blocked_restock_task_is_never_claimed(till, monkeypatch):
-    """MF4: create_system_task answers None when its insert fails."""
+    """MF4: create_system_task answers None when its insert fails -- the till
+    never says a task was raised; it names the record's own button."""
     payload, rcoll, restocks = _cash_press(till, monkeypatch)
 
     def unreadable(*a, **k):
@@ -162,8 +163,9 @@ def test_an_unsaved_blocked_restock_task_is_never_claimed(till, monkeypatch):
     r = _press(payload, "K-T")
     assert r.status_code == 201 and restocks == [], r.text
     body = r.json()
-    assert "a task was raised" not in body["message"] and "tell the store manager" in body["message"]
-    assert body["stock_note"] and "tell the store manager" in body["stock_note"]
+    assert "a task was raised" not in body["message"] and "Update stock" in body["message"]
+    assert body["stock_note"] and "do not add them by hand" in body["stock_note"]
+    assert returns_router._task_units_not_placed(rcoll.find_one({})) is False  # not saved: not claimed
 
 
 def test_a_blocked_restock_task_already_open_counts_as_raised(monkeypatch):
@@ -206,10 +208,12 @@ def test_a_stock_step_left_open_by_a_stopped_press_gets_one_task(till, monkeypat
     assert first["restock_applied"] is True and second["message"] == "Already restocked" and restocks == [rid]
 
 
-def test_a_stock_step_that_stopped_part_way_is_left_to_a_person(till, monkeypatch, tasks):
-    """D92(5), kept: a worker stopped WHILE placing the units (its claim is
-    older than any press). What it placed is unknown, so the record's Restock
-    adds nothing and says to check each unit -- never a second unit."""
+def test_a_stock_step_that_stopped_part_way_is_finished_by_update_stock(till, monkeypatch, tasks):
+    """D122(3) (it withdraws D92(5)'s hand check): a worker stopped WHILE
+    placing the units (its claim is older than a worker runs). 'Update stock'
+    takes the claim over and runs the step again -- nobody is asked to check
+    or add a unit. (The stock rows are asserted natively:
+    test_d122_stock_step_states_native.)"""
     payload, rcoll, restocks = _cash_press(till, monkeypatch)
     assert _press(payload, "K-M").status_code == 201
     rid = rcoll.find_one({})["return_id"]
@@ -217,7 +221,8 @@ def test_a_stock_step_that_stopped_part_way_is_left_to_a_person(till, monkeypatc
         "restock_applied": False, "stock_pending": True, "restock_in_progress": True,
         "restock_started_at": "2026-01-01T00:00:00+00:00"}})
     out = _retry_restock(rid)
-    assert out["restock_applied"] is False and "Check each unit" in out["message"]
-    assert restocks == [rid]  # only the press's own run: nothing was added again
-    assert [t["dedupe_ref"] for t in tasks] == [f"return_restock_blocked:{rid}"]
-    assert "check each unit" in tasks[0]["description"]
+    assert out["restock_applied"] is True and "by hand" not in out["message"]
+    assert restocks == [rid, rid]  # the step ran again (each unit once: its return slot)
+    assert tasks == []
+    rec = rcoll.find_one({"return_id": rid})
+    assert rec["restock_applied"] is True and rec["stock_pending"] is False and rec["restock_in_progress"] is False

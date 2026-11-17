@@ -957,12 +957,17 @@ async def complete_task(
 
     ref = str(task.get("source_ref") or "")
     if ref.startswith("return_restock_blocked:"):
-        # D109(2): the person who checked a stopped stock step by hand is
-        # recorded on the return BEFORE its task closes -- after its damaged
-        # unit is set aside (409 / 503: the task stays open).
-        from .returns import note_units_checked
+        # D122(5) / D109(3): while the return's units are still out the close
+        # is refused once (409: press Update stock); otherwise the return
+        # records who closed its task (503: the task stays open).
+        from .returns import note_stock_task_closed
 
-        await note_units_checked(ref.split(":", 1)[1], current_user, task)
+        await note_stock_task_closed(ref.split(":", 1)[1], current_user, task)
+    elif ref.startswith("return_cash_owed:"):
+        # D123: a payout already stored settles the return as paid.
+        from .returns import settle_owed_for_task
+
+        settle_owed_for_task(ref.split(":", 1)[1], current_user)
 
     now = datetime.now()
     result = repo.update(

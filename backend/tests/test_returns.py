@@ -439,6 +439,8 @@ def ctx(monkeypatch):
         returns_router, "get_product_repository",
         lambda: _FakeProductRepoForExchange(),
     )
+    # No stock store in these fakes (the press's stock steps fail soft).
+    monkeypatch.setattr(returns_router, "get_stock_repository", lambda: None)
     # Patch the local get_db import target used by _get_db().
     monkeypatch.setattr(
         "api.dependencies.get_db", lambda: fake_db, raising=False
@@ -516,6 +518,20 @@ def test_create_return_records_refund_and_restocks(ctx):
     assert data["restocked"][0]["applied"] is False
     # Persisted.
     assert ctx["returns_coll"].docs[0]["return_id"] == data["return_id"]
+
+
+def test_create_refuses_when_the_stock_repository_cannot_be_built(ctx, monkeypatch):
+    """D82: a stock store that cannot even be opened leaves the return-slot
+    guarantee unknown -- 503 before anything is written (the press used to
+    crash after its money step, a 500)."""
+    def broken():
+        raise AttributeError("stock_units")
+
+    monkeypatch.setattr(returns_router, "get_stock_repository", broken)
+    tok = _staff_token(["CASHIER"])
+    r = ctx["client"].post("/api/v1/returns", json=_payload(), headers={"Authorization": f"Bearer {tok}"})
+    assert r.status_code == 503, r.text
+    assert ctx["returns_coll"].docs == []
 
 
 def test_damaged_item_not_restocked(ctx):

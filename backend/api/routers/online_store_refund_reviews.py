@@ -519,6 +519,11 @@ async def goods_back_refund_review(
         raise HTTPException(status_code=409, detail="The goods of this refund were already put back.")
     _write_audit("SHOPIFY_REFUND_REVIEW_GOODS_BACK", review_id, row, result, current_user)
     if result["status"] not in ("restocked", "stock_in"):
+        if result.get("reason") == "slot_index_missing":
+            # D82(2): the same refusal as the counter return and Update stock.
+            from .returns import RETURN_SLOT_INDEX_MESSAGE
+
+            raise HTTPException(status_code=503, detail=RETURN_SLOT_INDEX_MESSAGE)
         raise HTTPException(
             status_code=503,
             detail=(

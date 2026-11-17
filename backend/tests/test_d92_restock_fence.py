@@ -136,7 +136,9 @@ def test_the_one_insert_decides_who_owns_a_return(till, monkeypatch):
 
 def test_a_press_that_cannot_start_its_stock_step_restocks_nothing_and_says_so(till, monkeypatch, tasks):
     """The claim of the record's stock step cannot be written: the press puts
-    nothing back, says so, and one P1 task names the step that does."""
+    nothing back and says so; the step stays open on the record with its
+    button, and the hourly sweep raises ONE P1 task naming it (D122: never a
+    hand entry)."""
     payload, rcoll, restocks = _cash_press(till, monkeypatch)
     real_claim, failed = rcoll.find_one_and_update, []
 
@@ -149,9 +151,12 @@ def test_a_press_that_cannot_start_its_stock_step_restocks_nothing_and_says_so(t
     monkeypatch.setattr(rcoll, "find_one_and_update", claim)
     r = _advance_client().post("/api/v1/returns", json=payload, headers=_hdr("STORE_MANAGER"))
     assert r.status_code == 201 and restocks == [], r.text
-    assert "NOT put back in stock" in r.json()["message"] and r.json()["restock_applied"] is False
-    assert r.json()["stock_note"] and "a task was raised" in r.json()["stock_note"]
+    assert "NOT back in stock" in r.json()["message"] and r.json()["restock_applied"] is False
+    assert "Update stock" in r.json()["stock_note"] and "do not add them by hand" in r.json()["stock_note"]
     rid = r.json()["return_id"]
+    assert tasks == []  # younger than any press: the sweep raises it once it is not
+    rcoll.update_one({"return_id": rid}, {"$set": {"created_at": "2026-01-01T00:00:00+00:00"}})
+    assert returns_router.sweep_stuck_return_holds() == 1
     raised = [t for t in tasks if t.get("dedupe_ref") == f"return_restock_blocked:{rid}"]
     assert len(raised) == 1 and raised[0]["priority"] == "P1", tasks
     assert rid in raised[0]["title"] and "Update stock" in raised[0]["description"]
@@ -198,7 +203,8 @@ def test_a_press_that_loses_its_insert_to_needs_completing_answers_409(till, mon
     _paused_at_its_insert(till, rcoll, monkeypatch, out, cash_leg_paid)
     r = _advance_client().post("/api/v1/returns", json=payload, headers=_hdr("STORE_MANAGER"))
     assert out["record"]["status"] == "COMPLETED" and out["record"]["stock_pending"] is True
-    assert "Update stock" in out["record"]["message"] and "restock_left_to_counter" not in out["record"]
+    # D7: a record Needs completing wrote is retried there (Retry stock step).
+    assert "Retry stock step" in out["record"]["message"] and out["record"]["stock_step_open"] is True
     assert r.status_code == 409 and r.json()["detail"] == returns_router.RECORD_TAKEN_MESSAGE, r.text
     assert restocks == [] and [d["_id"] for d in rcoll.find({"return_id": out["rid"]})] == [f"ret:{out['rid']}"]
     assert len([t for t in tasks if t.get("dedupe_ref") == f"return_restock_blocked:{out['rid']}"]) == 1, tasks
@@ -290,8 +296,9 @@ def test_a_damaged_unit_is_set_aside_even_when_cash_paid_took_the_record(till, m
     payload["items"][0].update(condition="DAMAGED", restock=False)
     set_aside = []
     monkeypatch.setattr(returns_router, "_quarantine_damaged_units",
-                        lambda lines, oid, order, rid, uid: set_aside.append(rid) or [
-                            {"stock_id": "S-D", "store_id": "TST01", "product_id": "P1"}])
+                        # #1413: the press's slots (moved_ids) and (units, ok).
+                        lambda lines, oid, order, rid, uid, **k: (set_aside.append(rid) or [
+                            {"stock_id": "S-D", "store_id": "TST01", "product_id": "P1"}], True))
     out = {}
     _stall_after_money_out(till, monkeypatch, out)
     r = _advance_client().post("/api/v1/returns", json=payload, headers=_hdr("STORE_MANAGER"))

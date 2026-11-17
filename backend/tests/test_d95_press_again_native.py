@@ -165,7 +165,8 @@ def _stock_unreadable_once(monkeypatch, state):
     real = returns_router._find_stock
 
     def find(stock_repo, query):
-        if "quarantine_notes" in query and _once(state, "stock_failed"):
+        # The read of the bill's SOLD unit, before a unit is put back or set aside.
+        if query.get("status") == "SOLD" and _once(state, "stock_failed"):
             raise AutoReconnect("stock unreadable")
         return real(stock_repo, query)
 
@@ -173,7 +174,7 @@ def _stock_unreadable_once(monkeypatch, state):
 
 
 def test_a_damaged_unit_that_was_not_set_aside_keeps_the_stock_step_open(native, monkeypatch):
-    """One failed stock read while the press names its DAMAGED unit. Before:
+    """One failed stock read while the press sets its DAMAGED unit aside. Before:
     201 with nothing said, the record 'restock applied, nothing pending', the
     unit SOLD for good ('Update stock' answered Already restocked). Now the
     step stays open on the record: the till says so, History shows 'Update
@@ -196,7 +197,8 @@ def test_a_damaged_unit_that_was_not_set_aside_keeps_the_stock_step_open(native,
     assert b["units"] == ["QUARANTINED", "SOLD"] and b["unit_rows"] == 2 and b["restock_tasks"] == ["COMPLETED"], (done, b)
     rec = db["returns"].find_one({"_id": f"ret:{rid}"})
     assert rec["stock_pending"] is False and len(rec["quarantined_stock_ids"]) == 1
-    assert rec["damaged_unit_ids"] == rec["quarantined_stock_ids"]
+    aside = db["stock_units"].find_one({"status": "QUARANTINED"})
+    assert rec["quarantined_stock_ids"] == [aside["_id"]] and aside["return_slot"] == f"{rid}|aside|P1|0"
     assert _restock(rid)["message"] == "Already restocked" and _books(db)["units"] == ["QUARANTINED", "SOLD"]
 
 
@@ -386,11 +388,11 @@ def test_nothing_was_paid_whose_insert_answer_was_lost_still_gives_everything_ba
     assert _press(_payload()).status_code == 201
 
 
-def test_a_stock_step_that_stopped_part_way_still_sets_the_damaged_unit_aside(native, monkeypatch):
-    """D92(2): the set-aside of a DAMAGED unit is never gated on the restock.
-    A worker stopped WHILE placing the units (its claim is stale): 'Update
-    stock' places nothing more -- but the damaged unit is still set aside
-    (before, the function answered before it reached the set-aside)."""
+def test_a_stock_step_that_stopped_part_way_is_finished_by_update_stock(native, monkeypatch):
+    """D122(3): a worker stopped WHILE placing the units (its claim is
+    stale). 'Update stock' takes the claim over and finishes the step on the
+    same return slots -- the damaged unit is set aside, once; nobody is asked
+    to check or add a unit by hand."""
     db, state = native["db"], {}
     real_finish = returns_router._finish_press
 
@@ -405,11 +407,12 @@ def test_a_stock_step_that_stopped_part_way_still_sets_the_damaged_unit_aside(na
     rid = db["returns"].find_one({})["return_id"]
     db["returns"].update_one({"return_id": rid}, {"$set": {
         "restock_in_progress": True, "restock_started_at": "2026-01-01T00:00:00+00:00"}})
+    out = _restock(rid)
+    assert out["restock_applied"] is True and "by hand" not in out["message"], out
     for _ in range(2):
-        out = _restock(rid)
-        assert out["restock_applied"] is False and "stopped part way" in out["message"], out
         b = _books(db)
-        assert b["units"] == ["QUARANTINED", "SOLD"] and b["unit_rows"] == 2, b
+        assert b["units"] == ["QUARANTINED", "SOLD"] and b["unit_rows"] == 2 and b["restock_tasks"] == [], b
+        assert _restock(rid)["message"] == "Already restocked"
     rec = db["returns"].find_one({"return_id": rid})
-    assert len(rec["quarantined_stock_ids"]) == 1 and rec["damaged_unit_ids"] == rec["quarantined_stock_ids"]
-    assert rec["stock_pending"] is True and _books(db)["restock_tasks"] == ["OPEN"]  # a person still checks
+    assert len(rec["quarantined_stock_ids"]) == 1
+    assert (rec["restock_applied"], rec["stock_pending"], rec["restock_in_progress"]) == (True, False, False)

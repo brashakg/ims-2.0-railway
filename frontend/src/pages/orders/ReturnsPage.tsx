@@ -1281,19 +1281,20 @@ function ReturnsDesk({ canComplete }: { canComplete: boolean }) {
                       <tr key={r.return_id || i} className="border-b border-gray-100">
                         <td className="py-2 pr-3 font-mono text-xs text-gray-700">
                           {r.return_id}
-                          {r.stock_pending === true && r.status === 'COMPLETED' && (
+                          {r.stock_pending === true && r.restock_applied !== true && r.status === 'COMPLETED' && (
                             <div className="mt-1 font-sans">
-                              {/* D109(2): a step that stopped part way may have placed some
-                                  units -- a person checks; closing its task clears this. */}
-                              <div className="text-xs text-amber-700">
-                                {r.stock_step_stopped === true ? 'Stock step stopped: check these units by hand'
-                                  : r.restock_applied === true ? 'Damaged unit not set aside in stock'
-                                    : 'Units not back in stock'}
-                              </div>
-                              <button type="button" onClick={() => updateStock(r.return_id)} disabled={stockBusy === r.return_id}
-                                className="mt-1 px-3 min-h-[36px] text-xs rounded-md border border-gray-300 bg-white text-gray-800 hover:bg-gray-50 disabled:opacity-50">
-                                {stockBusy === r.return_id ? 'Updating...' : 'Update stock'}
-                              </button>
+                              {/* D122(3): every unfinished stock step reads the same and IMS
+                                  finishes it (this button, or its hourly sweep) -- never a hand entry. */}
+                              <div className="text-xs text-amber-700">Units not back in stock</div>
+                              {r.recovered ? (
+                                // D7: a record completed in Needs completing is retried there.
+                                <div className="text-xs text-gray-600">Retry stock step is in Needs completing (Accounts / Admin)</div>
+                              ) : (
+                                <button type="button" onClick={() => updateStock(r.return_id)} disabled={stockBusy === r.return_id}
+                                  className="mt-1 px-3 min-h-[36px] text-xs rounded-md border border-gray-300 bg-white text-gray-800 hover:bg-gray-50 disabled:opacity-50">
+                                  {stockBusy === r.return_id ? 'Updating...' : 'Update stock'}
+                                </button>
+                              )}
                             </div>
                           )}
                           {stockMsg[r.return_id] && (

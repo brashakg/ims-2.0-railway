@@ -26,6 +26,7 @@ Real code over the strict fakes of test_pos_money_doors (till). No emoji (cp1252
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 import threading
@@ -553,12 +554,15 @@ def test_a_cash_paid_record_never_tells_a_person_to_add_a_unit_by_hand(till, tas
     doc = _complete("RET-CP", cash_leg_paid=True)
     assert doc["status"] == "COMPLETED" and doc["return_id"] == "RET-CP"
     raised = [t for t in tasks if t.get("dedupe_ref") == "return_restock_blocked:RET-CP"]
-    if legacy_restocking:
-        assert "already shows in stock" in doc["message"] and "do not add it again" in doc["message"]
-        assert doc["restock_left_to_counter"] is True and doc["stock_pending"] is False and raised == []
-    else:
-        assert "NOT back in stock" in doc["message"] and "Do not add them by hand" in doc["message"]
-        assert doc["stock_pending"] is True and len(raised) == 1 and "Update stock" in raised[0]["description"]
+    # The message is piece by piece, read from the stock itself (#1413,
+    # _recovered_stock_note), and never sends a person to add a unit by hand.
+    # D122: a hold mark from an older build ("restocking") changes nothing --
+    # there is no "left to the counter" state; the record's own stock step
+    # places each piece once, on its return slot.
+    msg = doc["message"].replace("Nothing to add by hand.", "").replace("Do not add these by hand", "")
+    assert "by hand" not in msg and "restock_left_to_counter" not in doc
+    assert "Do not add" in doc["message"] or "No piece of this return" in doc["message"]
+    assert doc["stock_pending"] is doc["stock_step_open"] and len(raised) == (1 if doc["stock_pending"] else 0)
     # A second answer writes nothing and raises nothing more.
     again = _complete("RET-CP", cash_leg_paid=False)
     assert again["replayed"] is True and again["message"] == "This return's record already exists."
@@ -703,6 +707,10 @@ def _retry_restock(rid):
     import asyncio
 
     from tests.test_pos_money_doors_r13 import _user
+    # A record completed in Needs completing is retried there (#1413, D7);
+    # an ordinary return at the store's door.
+    if (returns_router._returns_coll().find_one({"return_id": rid}) or {}).get("recovered"):
+        return asyncio.run(returns_router.retry_completed_record_restock(rid, current_user=_user("ACCOUNTANT")))
     return asyncio.run(returns_router.retry_restock(rid, current_user=_user("STORE_MANAGER")))
 
 

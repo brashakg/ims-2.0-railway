@@ -324,6 +324,30 @@ def test_a_doc_that_could_not_be_saved_raises_a_task_and_is_completed_from_the_h
     assert returns.count_documents({"return_id": rid}) == 1
 
 
+@pytest.mark.usefixtures("gst_numbers")
+def test_a_doc_insert_that_raised_while_the_record_exists_raises_no_false_alarm(till, monkeypatch, tasks):
+    """#1413 review: the press's insert raises but the record IS there (its own
+    write with the reply lost, or the one Accounts rebuilt in Needs completing
+    while the press stalled). No P1 'record not saved' task: it would send
+    Accounts after a record that exists."""
+    payload = _two_unit_bill(till, monkeypatch)
+    returns = till["db"].get_collection("returns")
+    real = returns.insert_one
+
+    def landed_then_raised(doc, *a, **k):
+        out = real(doc, *a, **k)
+        if doc.get("status") == "COMPLETED":
+            raise RuntimeError("reply lost")
+        return out
+
+    monkeypatch.setattr(returns, "insert_one", landed_then_raised)
+    r = _advance_client().post("/api/v1/returns", json=payload, headers=_hdr("STORE_MANAGER"))
+    assert r.status_code == 201
+    rid = r.json()["return_id"]
+    assert returns.count_documents({"return_id": rid}) == 1
+    assert [t["dedupe_ref"] for t in tasks] == [], "a false 'record not saved' alarm"
+
+
 def test_the_reconcilers_heal_of_a_return_credit_raises_the_task(till, monkeypatch, tasks):
     till["db"].get_collection("orders").insert_one(_order(refund_holds={}, refund_holds_v=1))
     _customer(till, store_credit=1200.0)

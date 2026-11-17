@@ -57,17 +57,26 @@ describe('Recent returns: units not back in stock', () => {
     expect(screen.queryByText('Units not back in stock')).toBeNull();
   });
 
-  // D109(2): a stock step that stopped part way may have placed some units.
-  it('says to check by hand on a return whose stock step stopped part way', async () => {
+  // D122(3): a step that stopped part way reads as any unfinished step -- IMS
+  // finishes it (this button, or its hourly sweep); nobody checks or adds by hand.
+  it('shows every unfinished stock step the same way, with Update stock', async () => {
     list.mockResolvedValue({ returns: [
-      row({ stock_pending: true, stock_step_stopped: true }),
-      row({ return_id: 'RET-2', stock_pending: true, stock_step_stopped: false, restock_applied: true }),
+      row({ stock_pending: true, restock_in_progress: true }),
+      row({ return_id: 'RET-2', stock_pending: true }),
     ] });
     await openHistory();
-    expect(screen.getByText('Stock step stopped: check these units by hand')).toBeTruthy();
-    expect(screen.getByText('Damaged unit not set aside in stock')).toBeTruthy();
-    expect(screen.queryByText('Units not back in stock')).toBeNull();
-    expect(screen.getAllByRole('button', { name: 'Update stock' })).toHaveLength(2); // no button added or removed
+    expect(screen.getAllByText('Units not back in stock')).toHaveLength(2);
+    expect(screen.queryByText(/by hand/i)).toBeNull();
+    expect(screen.getAllByRole('button', { name: 'Update stock' })).toHaveLength(2);
+  });
+
+  // D7: a record completed in Needs completing is retried there (Accounts / Admin).
+  it('points a record completed in Needs completing to its own Retry stock step', async () => {
+    list.mockResolvedValue({ returns: [row({ stock_pending: true, recovered: { by: 'U9' } })] });
+    await openHistory();
+    expect(screen.getByText('Units not back in stock')).toBeTruthy();
+    expect(screen.getByText('Retry stock step is in Needs completing (Accounts / Admin)')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Update stock' })).toBeNull();
   });
 
   // D109(1): a read that failed is never an empty history.

@@ -2832,6 +2832,11 @@ def post_from_review(db, review: Dict[str, Any]) -> Dict[str, Any]:
 _Held = List[Tuple[Dict[str, Any], float, str, str]]
 
 
+class ReturnSlotIndexMissing(RuntimeError):
+    """D82(2): the unique return-slot indexes are not on the stock (or cannot
+    be read): no Shopify refund door places a unit."""
+
+
 def _restock_booked(
     order: Dict[str, Any], lines: List[Any], refund_id: str,
     restock: Callable[[List[Any]], Dict[str, Any]],
@@ -2849,7 +2854,17 @@ def _restock_booked(
     order-history import, older than IMS stock) is booked the same way but
     never restocked by any door (owner 2026-10-01): its booking raises ONE
     task to add the frames through stock-in (_stock_in_task).
-    None: another door booked those units first (nothing restocked)."""
+    None: another door booked those units first (nothing restocked).
+
+    D82(2): RAISES ReturnSlotIndexMissing, before anything is booked or
+    written, when the unique return-slot indexes are missing or unreadable
+    (returns._return_slot_index_ok): they are what keeps one returned piece
+    to one stock row, for these doors as for the counter."""
+    if not order.get("historical"):
+        from ..routers.returns import _return_slot_index_ok
+
+        if not _return_slot_index_ok():
+            raise ReturnSlotIndexMissing(refund_id)
     held = _hold_returned_qty(order, lines, refund_id)
     if held is None:
         return None
@@ -3099,6 +3114,8 @@ def goods_back(db, review: Dict[str, Any], *, user_id: Optional[str]) -> Dict[st
                     reason = "already_returned"
                 else:
                     result = booked
+    except ReturnSlotIndexMissing:
+        reason = "slot_index_missing"  # D82(2): the door answers the counter's 503
     except Exception:  # noqa: BLE001
         reason = "error"
         logger.warning("[SHOPIFY_REFUND] goods-back restock failed for review=%s", review_id,

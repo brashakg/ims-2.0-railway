@@ -28,11 +28,12 @@ from __future__ import annotations
 
 from api.utils.event_time import utc_now_iso
 
+import contextvars
 import logging
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Path, Query
 from pydantic import BaseModel, Field
@@ -612,7 +613,7 @@ def _units_already_back(
     docs = _already_returned_qty(
         order_id,
         orig_line.get("item_id") or orig_line.get("id"),
-        orig_line.get("ims_product_id") or orig_line.get("product_id"),
+        restock_engine.line_product_id(orig_line),
         own_shopify_refund_id=own_shopify_refund_id,
     )
     if docs is None:
@@ -924,19 +925,58 @@ def _refuse_shipping_line(orig_line: Optional[Dict[str, Any]]) -> None:
         )
 
 
-def _refuse_counter_shipping(lines: List[ReturnLine], order: Optional[Dict[str, Any]]) -> None:
-    """The counter's shipping rule over a return's lines, matched as the
-    pricing matches them -- for the quote (the create runs it per resolved
-    line). The Shopify refund door prices through the same helpers and DOES
-    refund shipping, so the rule lives at the counter doors only."""
+def _returnable_lines(
+    lines: List[ReturnLine], order: Optional[Dict[str, Any]], order_id: Optional[str]
+) -> List[Dict[str, Any]]:
+    """THE counter's eligibility rule for a return's lines, for the quote and
+    the create alike, so the quote never prices what the create refuses: every
+    line must be a line of the original sale (400), never a shipping line
+    (400), and its quantity never more than is still returnable -- purchased
+    less every unit already back (400, naming what is left; 503 when the
+    earlier returns cannot be read). Reads only: the create's atomic claim on
+    the order line still caps two presses racing each other.
+
+    Each line then takes its IDENTITY from the sale, never from the client:
+    the bill line's own id and STOCK product (the Returns screen sends no
+    product, so a GOOD piece was credited and left SOLD; a client-sent one
+    could put another product back in stock), and a blank sku / name is
+    filled from the line. A line whose sale took no stock unit (a lens, a
+    service, a virtual till item: restock_engine.line_stock_product_id) names
+    no product, so nothing is put back, set aside or minted for it. Every
+    later step -- pricing, the saved record, restock, quarantine, the restock
+    retry -- reads these lines, and matches them by the line id.
+
+    Returns ``[{"ret_line", "orig_line"}]`` in the lines' order."""
     idx = _order_line_index(order)
-    for ln in lines:
-        orig = None
-        if ln.order_item_id and str(ln.order_item_id) in idx["by_item"]:
-            orig = idx["by_item"][str(ln.order_item_id)]
-        elif ln.product_id and str(ln.product_id) in idx["by_product"]:
-            orig = idx["by_product"][str(ln.product_id)]
-        _refuse_shipping_line(orig)
+    resolved: List[Dict[str, Any]] = []
+    for ret_line in lines:
+        orig_line = _resolve_original_line(ret_line, idx)
+        if orig_line is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Return line does not match any line on the original order "
+                    f"(order_item_id={ret_line.order_item_id!r}, "
+                    f"product_id={ret_line.product_id!r}). Cannot refund an "
+                    "item that was not on this sale."
+                ),
+            )
+        _refuse_shipping_line(orig_line)
+        _refuse_over_return(order_id, ret_line, orig_line)
+        item_id = orig_line.get("item_id") or orig_line.get("id")
+        stock_product = restock_engine.line_stock_product_id(orig_line)
+        if item_id:
+            ret_line.order_item_id = str(item_id)
+            ret_line.product_id = stock_product
+        elif not stock_product:
+            # A legacy line with no id was matched BY its product and keeps it
+            # (the returnable-quantity book reads it); it still moves no stock.
+            ret_line.restock = False
+        ret_line.sku = ret_line.sku or str(orig_line.get("sku") or "")
+        ret_line.product_name = ret_line.product_name or str(
+            orig_line.get("product_name") or orig_line.get("name") or "")
+        resolved.append({"ret_line": ret_line, "orig_line": orig_line})
+    return resolved
 
 
 def _priced_return_lines(
@@ -2066,6 +2106,69 @@ def sweep_stuck_return_holds() -> int:
     for doc in unplaced:
         if _step_stale(doc.get("restock_started_at") or doc.get("created_at")) and _task_units_not_placed(doc):
             found += 1
+    return found + finish_stopped_stock_steps() + settle_paid_owed_returns()
+
+
+def settle_paid_owed_returns() -> int:
+    """D123, the sweep's read: every return still on the owed list whose
+    payout row is stored is settled as paid (settle_owed_paid). Returns how
+    many it settled."""
+    coll = _returns_coll()
+    if coll is None:
+        return 0
+    try:
+        owed = list(coll.find({"status": "COMPLETED", "owed_amount": {"$gt": 0}, "owed_paid_at": None}))
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[RETURNS] owed returns unreadable: %s", exc)
+        return 0
+    return sum(1 for doc in owed if settle_owed_paid(coll, doc, actor=SWEEP_ACTOR) is None)
+
+
+SWEEP_ACTOR = {"user_id": "system:returns-sweep"}
+
+
+def finish_stopped_stock_steps() -> int:
+    """D122(3): a stock step that stopped part way -- its worker died or
+    stalled, or its closing stamp never landed (S3: claimed, and the claim
+    older than a worker runs) -- on a record nobody presses is FINISHED here,
+    by the same code on the same return slots as 'Update stock'
+    (_run_stock_step): what already moved is read from the stock rows and
+    credited, nothing is placed twice. A Shopify refund's return too. Never a
+    task asking a person to check or add a unit. A step IMS may not finish
+    (the order unreadable, no physical shop, the slot indexes missing) keeps
+    or raises its blocked-restock task and is tried again next hour. Returns
+    the number of stopped steps found."""
+    coll = _returns_coll()
+    if coll is None:
+        return 0
+    try:
+        stopped = list(coll.find(
+            {"restock_in_progress": True, "restock_applied": {"$ne": True}, "status": {"$ne": "NOTHING_PAID"}},
+            {"return_id": 1, "restock_started_at": 1, "restock_store_id": 1, "store_id": 1}))
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[RETURNS] stopped stock steps unreadable: %s", exc)
+        return 0
+    found = 0
+    for doc in stopped:
+        if not doc.get("return_id") or not _step_stale(doc.get("restock_started_at"), _STOCK_CLAIM_STALE_SECONDS):
+            continue  # a live worker holds it
+        found += 1
+        try:
+            # An online order's units go back to the shop the record names
+            # (the press's counter, or where an earlier run landed them).
+            step = _run_stock_step(coll, doc["return_id"], SWEEP_ACTOR, doc.get("restock_store_id"))
+            logger.info("[RETURNS] sweep ran the stopped stock step of %s: %s", doc["return_id"], step.get("message"))
+        except Exception as exc:  # noqa: BLE001 -- stays S1 / S3: tried again next tick
+            logger.error("[RETURNS] sweep could not finish the stock step of %s: %s", doc["return_id"],
+                         getattr(exc, "detail", exc))
+            continue
+        try:
+            import asyncio
+
+            # This runs in the scheduler's worker thread (no event loop here).
+            asyncio.run(_announce_set_aside(step.get("set_aside_units"), doc.get("store_id"), SWEEP_ACTOR))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[RETURNS] set-aside follow-up of %s not raised: %s", doc["return_id"], exc)
     return found
 
 
@@ -2286,9 +2389,9 @@ def _step_done(store, step: str) -> None:
         logger.error("[RETURNS] give-back step %s not stamped done: %s", step, exc)
 
 
-def _step_stale(at: Any) -> bool:
-    """A claim older than the reconciler's timeout: its act is lost, not
-    running (an unstamped legacy claim counts as old)."""
+def _step_stale(at: Any, seconds: Optional[int] = None) -> bool:
+    """A claim older than the reconciler's timeout (or ``seconds``): its act
+    is lost, not running (an unstamped legacy claim counts as old)."""
     from datetime import timedelta
 
     from api.utils.event_time import parse_event_utc_naive
@@ -2296,7 +2399,8 @@ def _step_stale(at: Any) -> bool:
     from .customers import PENDING_TIMEOUT_SECONDS
 
     when = parse_event_utc_naive(at) if at else None
-    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=PENDING_TIMEOUT_SECONDS)
+    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
+        seconds=PENDING_TIMEOUT_SECONDS if seconds is None else seconds)
     return when is None or when <= cutoff
 
 
@@ -2718,44 +2822,144 @@ def _line_unit_first(
     return sorted(candidates, key=rank)
 
 
+def _with_removed_lines(order: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The order with the goods an edit took off the bill (`removed_lines`)
+    after its billed lines, so a removed line's own unit and product are
+    found too (decision D43; the counter return door reads them the same way)."""
+    if not order or not order.get("removed_lines"):
+        return order
+    return {**order, "items": [*(order.get("items") or []), *(order.get("removed_lines") or [])]}
+
+
+class _SlotTaken(Exception):
+    """The return slot a write carried is already held (decision D45a): a
+    concurrent attempt of this return moved this piece. `holder` is its unit."""
+
+    def __init__(self, holder: Dict[str, Any]):
+        super().__init__(str(holder.get("stock_id") or holder.get("_id")))
+        self.holder = holder
+
+
+class _ClaimLost(Exception):
+    """D79: this Retry stock step's claim expired and another retry took the
+    return over. It writes no further unit (_check_restock_fence)."""
+
+
+# D79 (#1413 round 1, P1-A): the Retry stock step's claim renewal, set by
+# _retry_claimed for as long as it moves stock; unset everywhere else (the
+# press and the Shopify doors hold no restock claim). A context variable so
+# the one rule reaches every unit write of the retry -- the put-back, the
+# mint, the set-aside -- without a parameter through each helper.
+_RESTOCK_FENCE: contextvars.ContextVar = contextvars.ContextVar("restock_fence", default=None)
+
+
+def _check_restock_fence() -> None:
+    """Right before a claimed retry writes a unit: its claim must still be its
+    own, and is renewed (no taker can start for another full claim period).
+    Raises _ClaimLost when it was taken over: the stale retry stops."""
+    fence = _RESTOCK_FENCE.get()
+    if fence is not None:
+        fence()
+
+
+def _credit_landed(row: Dict[str, Any], result: Dict[str, Any], landed_stores: List[str],
+                   holder: Dict[str, Any], return_id: str) -> None:
+    """A piece whose slot another attempt already filled (_SlotTaken): it is
+    back, on the holder's record -- counted, never moved again, its audit row
+    the other attempt's."""
+    store = holder.get("store_id")
+    for stores in (landed_stores, row["store_ids"]):
+        if store and store not in stores:
+            stores.append(store)
+    minted = holder.get("source_type") == "RETURN" and holder.get("source_id") == return_id
+    row["minted" if minted else "reactivated"] += 1
+    row["quantity"] += 1
+    result["restock_stock_ids"].append(str(holder.get("stock_id") or holder.get("_id")))
+
+
+def _slot_holder(stock_repo: Any, slot: Optional[str]) -> Optional[Dict[str, Any]]:
+    """The unit holding return slot `slot`, or None: the one it is on now, or
+    the one that keeps it in its history (`return_slots`) after a later return
+    of that unit wrote its own."""
+    coll = getattr(stock_repo, "collection", None)
+    if not slot or coll is None:
+        return None
+    return coll.find_one({"$or": [{"return_slot": slot}, {"return_slots": slot}]})
+
+
+def _own_moved_units(stock_repo: Any, return_id: str, ids: Optional[set] = None) -> List[Dict[str, Any]]:
+    """The units THIS return stamped: flipped (`returned_by_return_id`) or
+    minted (`source_id`) -- every return_slot write carries one of the two.
+    `ids` keeps only those, by str(stock_id or _id): a legacy unit has only a
+    BSON _id. RAISES when they cannot be read."""
+    rows = [*_find_stock(stock_repo, {"returned_by_return_id": return_id}),
+            *_find_stock(stock_repo, {"source_type": "RETURN", "source_id": return_id})]
+    if ids is None:
+        return rows
+    return [u for u in rows if str(u.get("stock_id") or u.get("_id")) in ids]
+
+
+def _return_slot_keys(stock_repo: Any, return_id: str, kind: str,
+                      units: List[Dict[str, Any]], moved_ids: Optional[set]) -> List[str]:
+    """One key per unit still to move: "<return>|<kind>|<product>|<n>", the
+    lowest n the return's units do not hold yet (decision D45a). Every put-back
+    or set-aside carries its key in `return_slot`, unique in the database
+    (uniq_stock_unit_return_slot), so one piece can never become two stock
+    records: two live retries of a return read the same pieces still out and
+    pick the same keys, and the second write of a key fails instead of
+    flipping a second unit or minting a second record.
+
+    Pieces of one product in one return are interchangeable and credited per
+    product (_units_still_out), so n counts per product, not per line. The
+    keys held are read from `moved_ids` -- the units the retry already
+    counted as moved, the same snapshot its pieces-still-out came from (a
+    unit that landed after it is not in it, and its key is the one this
+    retry picks too). The press passes an empty snapshot: nothing of a fresh
+    return moved before it, and a unit a concurrent Retry stock step of its
+    rebuilt record put back is exactly the slot the press must collide on.
+    With no snapshot (None, the Shopify doors, serialised per line by their
+    booking) they are read from every unit this return moved. RAISES when
+    they cannot be read."""
+    held = {u.get("return_slot") for u in _own_moved_units(stock_repo, return_id, moved_ids)}
+    keys: List[str] = []
+    for u in units:
+        n = 0
+        while (key := f"{return_id}|{kind}|{u.get('product_id')}|{n}") in held:
+            n += 1
+        held.add(key)
+        keys.append(key)
+    return keys
+
+
 def _reactivate_original_unit(
     stock_repo: Any,
     product_id: str,
     store_id: Optional[str],
     order_id: Optional[str],
     used_ids: set,
-    exact_order_only: bool = False,
     own_stock_id: Optional[str] = None,
     named_ids: Optional[set] = None,
     set_aside: Optional[Dict[str, Any]] = None,
-    only_ids: Optional[set] = None,
+    return_id: Optional[str] = None,
+    slot: Optional[str] = None,
 ) -> Optional[str]:
     """Find the original serialized unit sold for this product and flip it back
     to AVAILABLE. Returns its stock_id, or None when no candidate is found.
     ``set_aside`` (F21-3, a DAMAGED return) is merged over the flip instead:
-    the unit comes back QUARANTINED, off sale, never left SOLD. ``only_ids``:
-    the units the return's record names (_reserve_damaged_units) -- no other
-    unit is a candidate.
+    the unit comes back QUARANTINED, off sale, never left SOLD.
 
-    Preference order (most-specific first):
-      1. a unit for (product_id, store_id) tied to THIS order_id with status
-         SOLD - i.e. the exact unit that was sold on this order;
-      2. any SOLD unit for (product_id, store_id).
-    Within a step, ``own_stock_id`` (the unit the returned order line names)
-    comes first and units ``named_ids`` holds for other lines come last
-    (_line_unit_first).
+    ONLY a unit for (product_id, store_id) tied to THIS order_id with status
+    SOLD -- the unit this bill sold. ``own_stock_id`` (the unit the returned
+    order line names) comes first and units ``named_ids`` holds for other
+    lines come last (_line_unit_first).
 
-    ``exact_order_only`` DROPS step 2. It MUST be set whenever the store was not
-    the store the sale was booked against -- i.e. the F9 online-order redirect.
-    Step 2 is only safe when the caller's store IS the store the sale happened
-    at (an ordinary counter return): there, "some SOLD unit of this product at
-    this shop" is a reasonable stand-in for a lost row. On the redirected path
-    it is not: the sale was booked against the ONLINE store, so step 1 misses
-    for every historical import, and step 2 would then grab an UNRELATED
-    walk-in customer's SOLD unit -- flipping a frame that is on somebody's face
-    to AVAILABLE, erasing that customer's sale lineage, and still leaving the
-    frame that actually came back with no stock row. The caller mints instead,
-    which is the honest record for goods whose original row is untraceable.
+    Never "some SOLD unit of this product at this shop" (decision D5,
+    2026-11-11; it was the counter's stand-in for a lost row, and already
+    barred on an online order): that unit is another customer's -- a frame on
+    somebody's face flipped to AVAILABLE, their sale lineage erased. With no
+    unit of its own the caller mints, the honest record for goods whose
+    original row is untraceable, and the return says a new label is needed
+    (_new_label_note).
 
     IMPORTANT: only status=="SOLD" units are eligible. Earlier code used
     `$ne: AVAILABLE`, which would happily resurrect DAMAGED / SCRAPPED /
@@ -2769,6 +2973,25 @@ def _reactivate_original_unit(
     unit to reactivate" and the caller mints, so a failure read as None
     minted a phantom AVAILABLE unit beside the one still SOLD. The write is
     itself filtered on SOLD and read back on an error (_flip_sold_unit).
+
+    Decision D43 (the Retry stock step): a unit ANOTHER line of the bill
+    names is never flipped -- that frame is still with the customer. The
+    flip stamps `returned_by_return_id`, so a retry reads what THIS return
+    already moved from the stock itself (_units_moved_by_return) and never
+    asks for that piece again (_units_still_out). A line whose own unit an
+    EARLIER return took back (a quantity-2 line naming one scanned unit)
+    takes the bill's next SOLD unit, as before.
+
+    `slot` (_return_slot_keys, decision D45a) is written with the flip; a
+    flip refused because another unit already holds it raises _SlotTaken:
+    a concurrent attempt of this return moved this piece, never a second unit.
+
+    The flip is fenced on the unit's OWNERSHIP as it was read (#1413 round 1,
+    P1-A, D79): it lands only while the unit is still SOLD on THIS bill. A
+    retry that stalled after reading its candidate, while its taker put the
+    piece back and a new customer bought and paid for it, must never unsell
+    that new bill -- the unit is SOLD again, but on the new order. A claimed
+    retry also checks its claim right before each write (_check_restock_fence).
     """
     if stock_repo is None or not product_id:
         return None
@@ -2784,16 +3007,15 @@ def _reactivate_original_unit(
         q["order_id"] = order_id
         q.update(sold_only)
         candidates = _find_stock(stock_repo, q)
-    if not candidates and not exact_order_only:
-        q = dict(base)
-        q.update(sold_only)
-        candidates = _find_stock(stock_repo, q)
 
+    own = str(own_stock_id) if own_stock_id else ""
     failed = False
     for unit in _line_unit_first(candidates, own_stock_id, named_ids or set()):
         sid = unit.get("stock_id") or unit.get("_id")
-        if not sid or sid in used_ids or (only_ids is not None and sid not in only_ids):
+        if not sid or sid in used_ids:
             continue
+        if str(sid) in (named_ids or set()) and str(sid) != own:
+            continue  # another line's piece: still with the customer (D43)
         # P1-C CLEAN RESALE LINEAGE: the unit is going BACK on the sellable
         # shelf, so it must NOT keep the attribution of the sale it was returned
         # from. Strip the stale order_id / sold_at / sold_to_customer_id (else an
@@ -2804,6 +3026,7 @@ def _reactivate_original_unit(
         # so the history is preserved; a later sale (claim_one_available) then
         # stamps the NEW order_id onto a clean unit.
         prior_order_id = unit.get("order_id") or order_id
+        _check_restock_fence()
         try:
             ok = _flip_sold_unit(
                 stock_repo,
@@ -2819,11 +3042,23 @@ def _reactivate_original_unit(
                     # Preserve the lineage for audit / reconciliation.
                     "returned_from_order_id": prior_order_id,
                     "prior_sold_order_id": prior_order_id,
+                    # Which return moved it, written with the flip (D43).
+                    **({"returned_by_return_id": return_id} if return_id else {}),
+                    # An earlier return's set-aside reason (kept by the lift,
+                    # the unit resold) never makes THIS put-back read as a
+                    # set-aside (_units_moved_by_return); a set-aside writes its own.
+                    "quarantine_reason": None,
+                    **({"return_slot": slot} if slot else {}),
                     **(set_aside or {}),
                 },
                 id_field="stock_id" if unit.get("stock_id") else "_id",
+                # Still sold on THIS bill (P1-A): never a resold unit.
+                expect={"order_id": unit.get("order_id")},
             )
         except Exception as exc:  # noqa: BLE001
+            holder = _slot_holder(stock_repo, slot) if type(exc).__name__ == "DuplicateKeyError" else None
+            if holder:
+                raise _SlotTaken(holder) from exc
             logger.warning("[RETURNS] stock reactivate failed: %s", exc)
             failed = True
             continue
@@ -2855,21 +3090,31 @@ def _unsell(stock_repo: Any, sid: Any) -> None:
 
 def _flip_sold_unit(
     stock_repo: Any, sid: Any, fields: Dict[str, Any], *, id_field: str = "stock_id",
+    expect: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """Flip unit `sid` back to AVAILABLE only while it is still SOLD (a write
     filtered on status SOLD): True flipped, False no longer SOLD (another
     return took it first). RAISES when the write failed. A write that raised
     is read back: committed with its reply lost, it is this flip -- counted
     as not landed, the retry found no SOLD unit and minted a second one. A
-    fake repository without a collection keeps its update (False: failed)."""
+    fake repository without a collection keeps its update (False: failed).
+
+    `expect`: the fields the unit must still carry (its order, P1-A), in the
+    same filter, so a unit resold since it was read is never touched. A
+    `return_slot` is also added to the unit's `return_slots`, which keeps it
+    for good (uniq_stock_unit_return_slots): a later return of the unit that
+    writes its own slot never frees this one for a second record."""
     coll = getattr(stock_repo, "collection", None)
     if coll is None:
         if not stock_repo.update(sid, fields):
             raise RuntimeError("stock reactivate failed: the SOLD unit stays SOLD")
         return True
     try:
-        return coll.update_one({id_field: sid, "status": "SOLD"},
-                               {"$set": {**fields, "updated_at": datetime.now()}}).matched_count > 0
+        update: Dict[str, Any] = {"$set": {**fields, "updated_at": datetime.now()}}
+        if fields.get("return_slot"):
+            update["$addToSet"] = {"return_slots": fields["return_slot"]}
+        return coll.update_one({**(expect or {}), id_field: sid, "status": "SOLD"},
+                               update).matched_count > 0
     except Exception:  # noqa: BLE001
         # ponytail: a read-back that also fails leaves it open (a second unit
         # is possible only on two misses in a row).
@@ -3283,8 +3528,8 @@ def _raise_restock_blocked_task(
     refund_id: Optional[str] = None,
     stock_in_failed: bool = False,
     counter_stopped: bool = False,
-    stopped_midway: bool = False,
-    damaged: bool = False,
+    in_panel: bool = False,
+    close_refused: bool = False,
 ) -> bool:
     """Put a BLOCKED restock in front of a human, with its real cause and ONE
     action, naming the order staff can look up (its number) and only the
@@ -3301,13 +3546,13 @@ def _raise_restock_blocked_task(
 
     `counter_stopped` (D95): the return's record exists but its stock step
     never finished (its press stopped, or Needs completing wrote the record):
-    the action is the record's own button, Update stock (Returns > History). `stopped_midway`: a worker stopped WHILE placing the units, so
-    IMS places nothing more by itself -- a person checks each unit. The task
-    carries payload.stopped_midway (closing it records the check, D109(2));
-    an open task raised BEFORE the step stopped is rewritten to say so --
-    nobody closes a 'press Update stock' task and is recorded as having
-    checked. `damaged`: the return has a DAMAGED piece -- never added by
-    hand: closing the task sets it aside (note_units_checked).
+    the action is the record's own button -- 'Update stock' (Returns >
+    History), or for a record Needs completing wrote (`in_panel`, D7) 'Retry
+    stock step' there. IMS then finishes the step itself, each unit once on
+    its return slot (D122): no task ever asks anyone to check or add a unit
+    by hand. `close_refused` (D122(5)): someone tried to close the task with
+    the units still out -- an open task is rewritten to this text and
+    carries payload.close_refused, so the close is refused once only.
 
     Without this the fail-loud branch is one Railway log line while real goods
     sit on the counter with no stock row -- developer-only recovery on a live
@@ -3335,20 +3580,13 @@ def _raise_restock_blocked_task(
                     "for the shop's store manager to add the frame(s) through "
                     "stock-in, and closes this task")
         never = "Never add these units by hand as well - IMS would count them twice."
-        if counter_stopped and stopped_midway:
-            cause = "IMS stopped part way while placing them, so it places nothing more by itself"
-            action = ("check each unit of this return on the shelf and in IMS stock: add one by hand only if "
-                      "it is not in stock, then close this task")
-            if damaged:
-                action = ("check each unit of this return on the shelf and in IMS stock: add a GOOD one by "
-                          "hand only if it is not in stock, then close this task. Never add the DAMAGED piece "
-                          "by hand: IMS sets it aside when you close this task (if it cannot, the task stays "
-                          "open - press 'Update stock' on this return in Returns > History, then close it)")
-            never = "Never add a unit that already shows in stock - IMS would count it twice."
-        elif counter_stopped:
-            cause = "the counter's stock step did not run (the return was finished without it)"
-            action = ("open Returns > History and press 'Update stock' on this return; IMS then puts "
-                      "each unit back once (a damaged one is set aside)")
+        if counter_stopped:
+            cause = "its stock step did not finish (the return is recorded, its units are not placed)"
+            action = (("ask Accounts or the IMS admin to open Returns > Needs completing and press 'Retry stock "
+                       "step' on this return" if in_panel else
+                       "open Returns > History and press 'Update stock' on this return")
+                      + "; IMS then puts each unit back once (a damaged or opened one is set aside) and "
+                        "closes this task")
         elif stock_in_failed:
             cause = "IMS could not save the historical order's stock-in task"
             action = (f"{rerun}. This order predates IMS stock, so the re-run {stock_in}")
@@ -3384,20 +3622,14 @@ def _raise_restock_blocked_task(
             f"Items: {lines or 'see the return'}."
         )
         payload: Dict[str, Any] = {"return_id": return_id, "order_id": order_id}
-        if counter_stopped and stopped_midway:
-            title = f"Return {return_id} (order {ref}): stock step stopped - check {len(units)} unit(s) by hand"
-            description = (
-                f"The refund for return {return_id} (order {ref}) is recorded, but IMS does not know which "
-                f"of its returned goods are back in stock: {cause}. Do this: {action}. {never} "
-                f"Items: {lines or 'see the return'}."
-            )
-            payload["stopped_midway"] = True
+        if close_refused:
+            payload["close_refused"] = True
             tasks = getattr(repo, "collection", None)
             if tasks is not None:
                 tasks.update_many(
                     {"source_ref": task_ref, "status": {"$in": sorted(_ACTIVE)},
-                     "payload.stopped_midway": {"$ne": True}},
-                    {"$set": {"title": title, "description": description, "payload.stopped_midway": True}})
+                     "payload.close_refused": {"$ne": True}},
+                    {"$set": {"title": title, "description": description, "payload.close_refused": True}})
         created = create_system_task(
             repo,
             title=title,
@@ -3438,6 +3670,333 @@ def _refund_takes_goods_back(refund_id: str) -> bool:
         return False
 
 
+def _units_still_out(
+    units: List[Dict[str, Any]], already_back: Optional[Dict[str, float]],
+    moved_ids: Optional[set] = None, line_units: Optional[Dict[str, str]] = None,
+) -> List[Dict[str, Any]]:
+    """A plan's units (to put back, or to set aside) less the ones already
+    dealt with: what is still to do. The restock, the set-aside, the recovery
+    door's stock note and the panel read it -- one rule.
+
+    Each moved unit is credited ONCE (decision D43). First a unit whose bill
+    line names it (`line_units` {order item id: stock id}) and that THIS
+    return already moved (`moved_ids`, _units_moved_by_return) takes that
+    line's slot; then the rest of `already_back` {product id: units}
+    (_landed_units, the moved counts) takes the remaining slots of the
+    product, those of lines that name no unit first. A unit moved by an
+    EARLIER return is no credit here: the
+    line's next SOLD unit is still out (a quantity-2 line that names one
+    scanned unit)."""
+    left = dict(already_back or {})
+    moved = set(moved_ids or ())
+    rest: List[Dict[str, Any]] = []
+    for u in units or []:
+        own = (line_units or {}).get(str(u.get("order_item_id") or ""))
+        if own and own in moved:
+            moved.discard(own)
+            pid = str(u.get("product_id"))
+            left[pid] = left.get(pid, 0) - 1
+        else:
+            rest.append(u)
+    # The rest of the credit is units no line names (a first-available unit,
+    # a minted one): it goes to the slots of lines that name no unit first.
+    credited: set = set()
+    for i in sorted(range(len(rest)),
+                    key=lambda i: bool((line_units or {}).get(str(rest[i].get("order_item_id") or "")))):
+        pid = str(rest[i].get("product_id"))
+        if left.get(pid, 0) >= 1:
+            left[pid] -= 1
+            credited.add(i)
+    return [u for i, u in enumerate(rest) if i not in credited]
+
+
+def _units_moved_by_return(return_id: str) -> Tuple[Dict[str, float], Dict[str, float], set, set]:
+    """({product id: units put back}, {product id: units set aside}, the ids
+    put back, the ids set aside) that THIS return already moved, read from
+    the stock itself (decision D43): a unit
+    it flipped carries `returned_by_return_id`, a unit it minted its
+    `source_id`, and an older flip its stock_audit row. So a record whose
+    `restocked` rows were never saved (the press died, or Needs completing
+    rebuilt it) never moves a unit twice. RAISES when the stock cannot be
+    read: an unread answer is never "nothing moved yet". With no stock
+    repository at all nothing can move either (the restock records intent,
+    unapplied), so the answer is empty."""
+    stock_repo = get_stock_repository()
+    if stock_repo is None:
+        return {}, {}, set(), set()
+    units: Dict[str, Tuple[Dict[str, Any], Optional[str]]] = {
+        str(u.get("stock_id") or u.get("_id")): (u, None) for u in _own_moved_units(stock_repo, return_id)}
+    db = _get_db()
+    audit = db.get_collection("stock_audit") if db is not None else None
+    for row in (list(audit.find({"return_id": return_id})) if audit is not None else []):
+        sid = str(row.get("stock_id") or "")
+        if sid in units:
+            # THIS return's own row says what it did with a stamped unit too:
+            # its quarantine_reason may be an earlier return's.
+            units[sid] = (units[sid][0], row.get("new_status") or units[sid][1])
+        elif sid:
+            for u in _find_stock(stock_repo, {"stock_id": sid}):
+                units[sid] = (u, row.get("new_status"))
+    back: Dict[str, float] = {}
+    aside: Dict[str, float] = {}
+    back_ids: set = set()
+    aside_ids: set = set()
+    for sid, (u, audited) in units.items():
+        set_aside = (audited == "QUARANTINED") if audited else str(
+            u.get("quarantine_reason") or "").startswith("CUSTOMER_RETURN_")
+        pool = aside if set_aside else back
+        (aside_ids if set_aside else back_ids).add(sid)
+        pid = str(u.get("product_id"))
+        pool[pid] = pool.get(pid, 0.0) + 1
+    return back, aside, back_ids, aside_ids
+
+
+def _with_recorded_ids(doc: Dict[str, Any], back_ids: set, aside_ids: set) -> Tuple[set, set]:
+    """The moved ids read from the stock, plus the ones the record itself
+    kept (restock_stock_ids / quarantined_stock_ids: an older press stamped
+    no unit), so a line's own unit is credited to its line."""
+    return ({*back_ids, *map(str, doc.get("restock_stock_ids") or [])},
+            {*aside_ids, *map(str, doc.get("quarantined_stock_ids") or [])})
+
+
+def _plus(a: Dict[str, float], b: Dict[str, float]) -> Dict[str, float]:
+    """Per product, two counts of DIFFERENT units added."""
+    return {k: a.get(k, 0.0) + b.get(k, 0.0) for k in {*a, *b}}
+
+
+def _condition_not_kept(doc: Optional[Dict[str, Any]]) -> bool:
+    """A rebuilt record from a press that kept no condition (before the press
+    kept it): its pieces are set aside blind, so EVERY unit the return
+    already moved -- put back or set aside -- is one of them (D43)."""
+    return _rebuilt(doc) and any(isinstance(it, dict) and not it.get("condition")
+                                 for it in (doc or {}).get("items") or [])
+
+
+def _back_since_record(return_id: str, doc: Dict[str, Any], landed: Dict[str, float],
+                       moved_back: Dict[str, float], back_ids: set) -> Dict[str, float]:
+    """Per product, the pieces this return put back -- the retry and the
+    panel read it (one rule): the larger of what the record's `restocked`
+    rows say landed (`landed`; an older record's rows may count a unit the
+    stock cannot trace) and the stock's count (`moved_back`, `back_ids`,
+    _units_moved_by_return), PLUS every unit a retry put back after the
+    record was saved -- a back slot of this return, its id not on the record
+    (rows and ids are saved together). Those are never inside the larger-of:
+    a taker reads the landing of the attempt it took over as one more piece
+    back, never as the gap's, so it never moves a second unit (D45a).
+    RAISES when the stock cannot be read."""
+    recorded = set(map(str, doc.get("restock_stock_ids") or []))
+    fresh: Dict[str, float] = {}
+    stock_repo = get_stock_repository()
+    for u in _own_moved_units(stock_repo, return_id, back_ids) if stock_repo is not None else []:
+        if (str(u.get("stock_id") or u.get("_id")) not in recorded
+                and str(u.get("return_slot") or "").startswith(f"{return_id}|back|")):
+            pid = str(u.get("product_id"))
+            fresh[pid] = fresh.get(pid, 0.0) + 1
+    return {k: max(landed.get(k, 0.0), moved_back.get(k, 0.0) - fresh.get(k, 0.0)) + fresh.get(k, 0.0)
+            for k in {*landed, *moved_back}}
+
+
+def _rebuilt(doc: Optional[Dict[str, Any]]) -> bool:
+    """A record Needs completing REBUILT (from the credit line or the held
+    refund), not the one the press composed: its `restocked` rows were never
+    kept, so what the press already moved is read from the stock itself
+    (_units_moved_by_return), and its lines are read with _retry_lines."""
+    return (((doc or {}).get("recovered") or {}).get("source") or "unsaved doc") != "unsaved doc"
+
+
+def _piece_product(it: Dict[str, Any], orig: Optional[Dict[str, Any]], rebuilt: bool,
+                   order: Optional[Dict[str, Any]]) -> Optional[str]:
+    """The stock product of a returned line, for every record, the panel and
+    the retry alike (one rule): its BILL line's (line_stock_product_id -- a
+    record saved before the line took its product still names its piece, a
+    line that was never stock names none). A rebuilt line not on the bill
+    names none; a line whose bill could not be read keeps its own."""
+    if orig:
+        return restock_engine.line_stock_product_id(orig)
+    if rebuilt and order is not None:
+        return None
+    return it.get("product_id")
+
+
+def _recovered_stock_state(
+    doc: Dict[str, Any], order: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """A record's pieces by what happened to each, from its own stock state
+    (the completion message and the panel's open-stock-step list read it):
+    `damaged` {name: pieces} -- the pieces to SET ASIDE (damaged or opened;
+    on a rebuilt record, a piece whose condition was not kept) --, `held`
+    (GOOD, kept out by the return), `out` {name: pieces} -- the GOOD pieces
+    NOT back in stock --, `aside_out` -- while the stock step is open, the
+    pieces to set aside that still read sold --, `back` / `aside` (how many are dealt
+    with) and `open`: its stock step is still retryable (POST
+    /returns/{id}/complete-record/restock deals with each piece once).
+
+    A line is read with the product of its BILL line (line_stock_product_id):
+    a record saved before the line took its product still names its piece,
+    and a line that was never stock (a lens, a service) names none. A REBUILT
+    record (no restocked rows kept), and any record whose step is open, reads
+    what already moved from the stock itself (_units_moved_by_return), with
+    the retry's own credit (_units_still_out); an unreadable answer leaves
+    the step open (the retry reads it again and moves nothing on a failed
+    read)."""
+    rebuilt = _rebuilt(doc)
+    order = _with_removed_lines(order)
+    by_item = _order_line_index(order)["by_item"]
+    good: List[Dict[str, Any]] = []
+    damaged: Dict[str, int] = {}
+    aside_units: List[Dict[str, Any]] = []
+    held: Dict[str, int] = {}
+    for it in doc.get("items") or []:
+        if not isinstance(it, dict):
+            continue
+        orig = by_item.get(str(it.get("order_item_id") or it.get("item_id") or ""))
+        line = {**it, "product_id": _piece_product(it, orig, rebuilt, order)}
+        try:
+            qty = int(round(float(line.get("return_qty") or 0)))
+        except (TypeError, ValueError):
+            qty = 0
+        if not line["product_id"] or qty <= 0:
+            continue
+        # A rebuilt line keeps no name: the bill line's.
+        line["sku"] = line.get("sku") or (orig or {}).get("sku") or ""
+        name = str(line["sku"] or line.get("product_name") or (orig or {}).get("product_name")
+                   or line["product_id"])
+        condition = str(line.get("condition") or ("OPENED" if rebuilt else "GOOD")).upper()
+        if condition in _SET_ASIDE_CONDITIONS:
+            damaged[name] = damaged.get(name, 0) + qty
+            aside_units += [{"product_id": line["product_id"], "sku": name,
+                             "order_item_id": line.get("order_item_id")}] * qty
+        elif restock_engine.should_restock(line):
+            good.append(line)
+        else:
+            held[name] = held.get(name, 0) + qty
+
+    # Dealt with: the units that landed, and an online order's units its claim
+    # never covered (they never left a shop: nothing goes back for them).
+    dealt = _landed_units(doc.get("restocked"))
+    for row in doc.get("restocked") or []:
+        if isinstance(row, dict) and row.get("never_claimed"):
+            pid = str(row.get("product_id"))
+            dealt[pid] = dealt.get(pid, 0.0) + float(row.get("never_claimed") or 0)
+    moved_back: Dict[str, float] = {}
+    moved_aside: Dict[str, float] = {}
+    back_ids: set = set()
+    aside_ids: set = set()
+    step_open = not doc.get("restock_applied")
+    credit = dealt
+    if step_open:
+        try:
+            moved_back, moved_aside, back_ids, aside_ids = _units_moved_by_return(str(doc.get("return_id")))
+            credit = _back_since_record(str(doc.get("return_id")), doc, dealt, moved_back, back_ids)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[RETURNS] %s: what moved could not be read: %s", doc.get("return_id"), exc)
+        back_ids, aside_ids = _with_recorded_ids(doc, back_ids, aside_ids)
+    line_units = _order_line_units(order)[0]
+    out: Dict[str, int] = {}
+    for u in _units_still_out(restock_engine.plan_restock(good).get("units", []), credit,
+                              back_ids, line_units):
+        name = str(u.get("sku") or u.get("product_name") or u.get("product_id"))
+        out[name] = out.get(name, 0) + 1
+    aside_out: Dict[str, int] = {}
+    # The same credit the retry gives (_retry_claimed): a blind rebuilt
+    # record's pieces include the ones its press already put back.
+    blind = _condition_not_kept(doc)
+    if step_open:
+        for u in _units_still_out(aside_units, _plus(moved_aside, moved_back) if blind else moved_aside,
+                                  aside_ids | back_ids if blind else aside_ids, line_units):
+            aside_out[u["sku"]] = aside_out.get(u["sku"], 0) + 1
+    back = max(len(doc.get("restock_stock_ids") or []), int(sum(moved_back.values())))
+    aside = max(len(doc.get("quarantined_stock_ids") or []), int(sum(moved_aside.values())))
+    return {"damaged": damaged, "held": held, "out": out, "aside_out": aside_out,
+            "back": back, "aside": aside,
+            # The pieces to set aside that are dealt with: on a blind record
+            # the ones its press put back are those pieces too.
+            "aside_dealt": aside + (back if blind else 0),
+            "open": bool(out or aside_out) and not doc.get("restock_applied")}
+
+
+def _named(counts: Dict[str, int]) -> str:
+    return ", ".join(f"{n} x {name}" for name, n in sorted(counts.items()))
+
+
+def _recovered_stock_note(doc: Dict[str, Any], order: Optional[Dict[str, Any]] = None) -> str:
+    """What a completed record tells staff about its pieces, PIECE BY PIECE,
+    from the record's own stock state (_recovered_stock_state) -- never from
+    the one restock_applied flag (it is also True when nothing was put back:
+    an older imported order, an opened piece, a line saved with no product).
+
+    It says, each part only when it has pieces:
+      * what IS dealt with: the units back in stock and the ones set aside,
+        damaged or opened;
+      * a HISTORICAL order's pieces: IMS puts none back by rule and the store
+        manager's stock-in task covers them (raise_stock_in_task) -- never a
+        second entry beside that task;
+      * each GOOD piece NOT back in stock, by name, with its ONE action: the
+        panel's Retry stock step while the restock is open
+        (_raise_restock_blocked_task's rule: a hand entry beside the retry is
+        one frame counted twice); a record whose stock step reads finished
+        has no retry, and still no hand entry;
+      * while the stock step is open, each piece to set aside that still
+        reads sold: the Retry stock step sets it aside, once (D7, D43);
+      * each DAMAGED or OPENED piece not set aside (it still reads sold; no
+        screen sets a sold piece aside);
+      * the GOOD pieces the return itself kept out of stock (restock
+        switched off)."""
+    state = _recovered_stock_state(doc, order)
+    damaged, held, out, aside_out = state["damaged"], state["held"], dict(state["out"]), state["aside_out"]
+    historical = bool(doc.get("historical") or (order or {}).get("historical"))
+    via_task = 0
+    if doc.get("restock_applied") and historical:
+        via_task, out = sum(out.values()), {}
+
+    back, aside = state["back"], state["aside"]
+    not_aside = 0 if aside_out else max(0, sum(damaged.values()) - state["aside_dealt"])
+    done = ", ".join(part for part in (
+        f"{back} piece(s) back in stock" if back else "",
+        f"{aside} set aside (damaged or opened)" if aside else "") if part)
+    parts = [f"Already dealt with: {done}."] if done else []
+    if via_task:
+        parts.append(f"{via_task} piece(s) are from an older imported order: IMS put none back - the "
+                     "stock-in task raised for the store manager covers them, so do not add them a "
+                     "second time.")
+    if out and state["open"]:
+        parts.append(f"NOT back in stock: {_named(out)}. Do not add these by hand - IMS would count "
+                     "them twice. Press Retry stock step on this return (Returns > Needs completing): "
+                     "IMS puts each piece back once."
+                     + (" This is an older imported order, so the retry adds no stock row itself: it "
+                        "raises one stock-in task for the store manager." if historical else ""))
+    elif out:
+        parts.append(f"NOT back in stock: {_named(out)}. This record's stock step is closed, so Retry "
+                     "stock step cannot put them back, and a hand entry would leave each piece with "
+                     "two stock records: ask the IMS admin to put them back.")
+    if aside_out:
+        parts.append(f"Still reading sold: {_named(aside_out)} (damaged or opened, or its condition was "
+                     "not kept). Keep it off the shelf and press Retry stock step: IMS sets it aside in "
+                     "Quarantine for the store manager to check, once.")
+    if not_aside:
+        parts.append("Damaged or opened and NOT set aside by IMS: "
+                     + (_named(damaged) if not state["aside_dealt"] else f"{not_aside} of {_named(damaged)}")
+                     + ". It still reads sold: keep it off the shelf and tell the IMS admin.")
+    if held:
+        parts.append(f"Left out of stock, as the return said (not for resale): {_named(held)}.")
+    if not (via_task or out or aside_out or not_aside or held):
+        parts.append("Nothing to add by hand." if done
+                     else "No piece of this return is waiting to go back into stock.")
+    return " ".join(parts)
+
+
+def _new_label_note(restocked: Any) -> str:
+    """What a return says when a piece went back under a NEW stock record
+    (minted: its own sold record was not found, decision D5): the label has
+    to be printed before the piece is on the shelf. Empty when none was."""
+    minted = sum(int(row.get("minted") or 0) for row in restocked or [] if isinstance(row, dict))
+    if not minted:
+        return ""
+    return (f"{minted} piece(s) went back into stock under a NEW barcode, because the sold record of "
+            "this bill was not found. Before it goes on the shelf, print the new label: Inventory, "
+            "open the product, Labels.")
+
+
 def _restock_good_items(
     items: List[ReturnLine],
     store_id: Optional[str],
@@ -3448,7 +4007,7 @@ def _restock_good_items(
     processing_store_id: Optional[str] = None,
     order: Optional[Dict[str, Any]] = None,
     already_back: Optional[Dict[str, float]] = None,
-    fence: Optional[Callable[[], bool]] = None,
+    moved_ids: Optional[set] = None,
 ) -> Dict[str, Any]:
     """Put GOOD-condition returned units BACK into sellable serialized stock.
 
@@ -3475,10 +4034,9 @@ def _restock_good_items(
 
     `already_back` {product id: units}: what an earlier attempt of this
     return put back (_landed_units); those units are not restocked again.
-
-    `fence` (D79): asked before EACH unit is written -- the caller's stock
-    claim must still be its own and younger than the timeout (_claim_live).
-    False: this and every later unit is left out, nothing is applied.
+    `moved_ids`: the units this return already put back (the Retry stock
+    step, _units_moved_by_return) -- a line whose own unit is among them is
+    dealt with, each unit credited once (_units_still_out).
 
     Returns a dict with `restocked` (per-line summary for the return doc),
     `restock_stock_ids` (every stock row touched), `applied`, `skipped`, and the
@@ -3506,13 +4064,8 @@ def _restock_good_items(
         result["applied"] = True
         return result
 
-    units = plan.get("units", [])
-    left = dict(already_back or {})
-    for u in list(units):
-        pid = str(u.get("product_id"))
-        if left.get(pid, 0) >= 1:
-            left[pid] -= 1
-            units.remove(u)
+    line_units, named_ids = _order_line_units(order)
+    units = _units_still_out(plan.get("units", []), already_back, moved_ids, line_units)
     if not units:
         # Nothing resellable -> trivially "applied" (no work left to retry).
         result["applied"] = True
@@ -3596,18 +4149,7 @@ def _restock_good_items(
     #     line split 1+1 across two shops sends one unit to each), and
     #   * a per-PRODUCT default for anything the breakdown does not cover.
     # The physical-store path never runs this block at all.
-    # exact_order_only must be keyed on "is the store I am searching the store
-    # the sale was booked against?", not merely on "did I redirect?". A legacy
-    # ONLINE order carrying NO store_id key at all resolves to the caller's own
-    # shop, is judged physical, and would otherwise reach the order-agnostic
-    # fallback and grab an unrelated walk-in's SOLD unit. Channel/source is the
-    # cheap, precise tell for that population.
     is_redirected = bool(routing["redirected_from"])
-    is_online_order = (
-        is_redirected
-        or str((order or {}).get("channel") or "").strip().upper() == "ONLINE"
-        or bool((order or {}).get("shopify_order_id"))
-    )
     # Multi-location PR 5: a routed online order's units are exactly the ones
     # its claim SOLD to it. A line the claim never covered (a stock miss, a
     # short or empty claim) never left any shop: nothing goes back for it,
@@ -3639,13 +4181,15 @@ def _restock_good_items(
             if hit["store_id"]:
                 per_product_default[pid] = hit["store_id"]
 
-    # We have a stock repo - actually re-add each unit.
-    line_units, named_ids = _order_line_units(order)
+    # We have a stock repo - actually re-add each unit, each under its own
+    # return slot (decision D45a).
+    slots = iter(_return_slot_keys(stock_repo, return_id, "back", units, moved_ids))
     used_ids: set = set()
     per_line_applied: Dict[str, Dict[str, Any]] = {}
     landed_stores: List[str] = []
     all_ok = True
     for u in units:
+        slot = next(slots)
         pid = u.get("product_id")
         row = per_line_applied.setdefault(
             pid,
@@ -3664,15 +4208,6 @@ def _restock_good_items(
                 "store_ids": [],
             },
         )
-        if fence is not None and not fence():
-            # D79: the claim these units are placed under aged out (or is no
-            # longer this worker's): the step reads as stopped to everyone
-            # else and a person may be adding units by hand, so this worker
-            # writes no unit from here on.
-            logger.error("[RETURNS] stock claim of %s is no longer held: no further unit placed", return_id)
-            all_ok = False
-            row["applied"] = False
-            break
         # Never the online store: every source here is filtered through
         # _first_physical_store / _fulfilment_unit_queue, and target_store is
         # physical too (an UNRESOLVED route returned early above).
@@ -3690,17 +4225,22 @@ def _restock_good_items(
                 unit_store,
                 order_id,
                 used_ids,
-                # MUST-FIX 1: on the redirected path the sale was booked against
-                # the ONLINE store, so the order-scoped lookup legitimately
-                # misses (every historical import). Without this flag the
-                # order-AGNOSTIC fallback would grab an unrelated walk-in
-                # customer's SOLD unit at this shop -- flipping a frame that is
-                # on somebody's face to AVAILABLE and erasing their sale. Mint
-                # instead; that is the honest record.
-                exact_order_only=is_online_order,
                 own_stock_id=line_units.get(str(u.get("order_item_id") or "")),
                 named_ids=named_ids,
+                return_id=return_id,
+                slot=slot,
             )
+        except _SlotTaken as taken:
+            _credit_landed(row, result, landed_stores, taken.holder, return_id)
+            continue
+        except _ClaimLost:
+            # Taken over (D79): this stale retry writes nothing more, but the
+            # pieces it already landed are reported -- a Shopify door's booking
+            # of them (_restock_booked) must stay; the caller answers 409.
+            result["claim_lost"] = True
+            all_ok = False
+            row["applied"] = False
+            break
         except Exception as exc:  # noqa: BLE001
             # A stock read or write that failed is no answer: never a mint
             # beside a unit that may still be SOLD (a phantom). Not applied,
@@ -3729,12 +4269,25 @@ def _restock_good_items(
                 user_id=user_id,
             )
             continue
-        # Mint a fresh AVAILABLE serialized unit.
+        # This bill has no SOLD unit of its own for the piece: mint a fresh
+        # AVAILABLE serialized unit, never another bill's (decision D5).
         # P1-C: stamp returned_from_order_id (the sale this return reverses) so
         # the minted unit has a forward audit link to its origin -- without it a
         # fresh return-unit has NO connection back to the reversed sale. It
         # carries NO order_id / sold_at (it is unsold shelf stock); a later sale
         # stamps the new order_id cleanly.
+        try:
+            _check_restock_fence()
+        except _ClaimLost:
+            result["claim_lost"] = True  # as above: stop, the landed pieces reported
+            all_ok = False
+            row["applied"] = False
+            break
+        except Exception as exc:  # noqa: BLE001 -- the renew failed: no mint unfenced
+            logger.warning("[RETURNS] restock claim not renewed, unit not minted: %s", exc)
+            all_ok = False
+            row["applied"] = False
+            continue
         try:
             created = stock_repo.create(
                 {
@@ -3756,11 +4309,25 @@ def _restock_good_items(
                     # because the order billed to a stockless online store.
                     "restocked_from_store_id": routing["redirected_from"],
                     "restock_route_reason": routing["reason"],
+                    # One record per piece (D45a): a second mint of the slot is refused.
+                    "return_slot": slot,
+                    "return_slots": [slot],
                 }
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[RETURNS] stock mint failed: %s", exc)
             created = None
+        if not created:
+            # Refused (the repository answers None): the slot's holder is
+            # the piece, moved by a concurrent attempt -- or by this mint,
+            # its reply lost.
+            try:
+                holder = _slot_holder(stock_repo, slot)
+            except Exception:  # noqa: BLE001
+                holder = None
+            if holder:
+                _credit_landed(row, result, landed_stores, holder, return_id)
+                continue
         if created:
             new_id = created.get("stock_id") or created.get("_id")
             row["minted"] += 1
@@ -3802,77 +4369,9 @@ def _restock_good_items(
     return result
 
 
-def _units_by_id(stock_repo: Any, ids: List[Any]) -> Dict[Any, Dict[str, Any]]:
-    """The stock rows of these unit ids (a legacy unit without stock_id is
-    known by its _id), each read ONCE by its own id: a row is never seen
-    half way through another writer's flip."""
-    if not ids:
-        return {}
-    rows = _find_stock(stock_repo, {"$or": [{"stock_id": {"$in": list(ids)}}, {"_id": {"$in": list(ids)}}]})
-    return {(u.get("stock_id") or u.get("_id")): u for u in rows}
-
-
-def _reserve_damaged_units(coll, stock_repo, return_id: str, lines: List[ReturnLine], order_id: str,
-                           order: Optional[Dict[str, Any]], note: str) -> Optional[List[Any]]:
-    """THE units a return sets aside as DAMAGED, named ONCE on its record
-    (``damaged_unit_ids``) by a compare-and-set on what was named before.
-    Every door that runs the set-aside -- the press, a second request of the
-    same press, the press that lost its record to Needs completing, the
-    record's Update stock -- flips only the units named here, so two of them
-    at once never set aside two units for one returned piece (counting and
-    then flipping did: the piece still with the customer became QUARANTINED
-    stock).
-
-    A named unit stays named while it is this return's (it carries the note)
-    or can still become it (SOLD on this order); one another return of the
-    bill took meanwhile is replaced, on the same compare-and-set. None: the
-    record or the stock cannot be read, or the record is not there -- nothing
-    is set aside on a guess (the record's Update stock does it)."""
-    line_units, named_ids = _order_line_units(order)
-
-    def _sid(unit):
-        return unit.get("stock_id") or unit.get("_id")
-
-    for _ in range(4):
-        try:
-            rec = coll.find_one({"return_id": return_id}) if coll is not None else {}
-            if rec is None:
-                return None
-            current = rec.get("damaged_unit_ids")
-            named = _units_by_id(stock_repo, current or [])
-            desired: List[Any] = []
-            for line in lines:
-                good = [sid for sid in (current or [])
-                        if (named.get(sid) or {}).get("product_id") == line.product_id
-                        and (named[sid].get("quarantine_notes") == note
-                             or (named[sid].get("status") == "SOLD" and named[sid].get("order_id") == order_id))]
-                left = int(round(line.return_qty)) - len([sid for sid in good if sid not in desired])
-                pool = list(good)
-                if left > 0:
-                    # Set aside already (a build before the units were named), then this order's SOLD units.
-                    pool += [_sid(u) for u in _find_stock(
-                        stock_repo, {"product_id": line.product_id, "quarantine_notes": note})]
-                    pool += [_sid(u) for u in _line_unit_first(
-                        _find_stock(stock_repo, {"product_id": line.product_id, "order_id": order_id,
-                                                 "status": "SOLD"}),
-                        line_units.get(str(line.order_item_id or "")), named_ids)]
-                left = int(round(line.return_qty))
-                for sid in pool:
-                    if left <= 0:
-                        break
-                    if sid and sid not in desired:
-                        desired.append(sid)
-                        left -= 1
-            if coll is None or desired == current:
-                return desired
-            if coll.update_one({"return_id": return_id, "damaged_unit_ids": current},
-                               {"$set": {"damaged_unit_ids": desired}}).matched_count:
-                return desired
-        except Exception as exc:  # noqa: BLE001 -- unknown: nothing set aside on a guess
-            logger.warning("[RETURNS] damaged units of %s not named, none set aside: %s", return_id, exc)
-            return None
-    logger.warning("[RETURNS] damaged units of %s not named (too many writers at once), none set aside", return_id)
-    return None
+# The conditions a returned piece is SET ASIDE for (QUARANTINED, off sale):
+# never put back on sale, never left reading SOLD.
+_SET_ASIDE_CONDITIONS = ("DAMAGED", "OPENED")
 
 
 def _quarantine_damaged_units(
@@ -3881,117 +4380,102 @@ def _quarantine_damaged_units(
     order: Optional[Dict[str, Any]],
     return_id: str,
     user_id: Optional[str],
-) -> List[Dict[str, Any]]:
+    already_aside: Optional[Dict[str, float]] = None,
+    moved_ids: Optional[set] = None,
+) -> Tuple[List[Dict[str, Any]], bool]:
     """F21-3: a returned piece marked DAMAGED comes back QUARANTINED -- off
-    sale, tracked, ready to go to the supplier -- never left SOLD. Only the
-    unit THIS order sold (exact_order_only: never another customer's piece);
+    sale, tracked, ready to go to the supplier -- never left SOLD. So does an
+    OPENED piece (decision D6, 2026-11-11): it is in the shop, so stock shows
+    it, off sale until the manager has looked at it (it used to stay SOLD).
+    Only the unit THIS order sold (never another customer's piece);
     a line whose sold unit cannot be found (a historical import) moves
-    nothing. Fail-soft per unit. Returns the units set aside BY THIS RUN.
-
-    Idempotent AND atomic per return (D92(2), D95(2)): the units are named
-    once on the return's record (_reserve_damaged_units) and only those are
-    flipped, each by a write filtered on SOLD -- the press, a second request
-    of it and the record's stock step may all run this at once, and a line
-    of several units keeps its other units SOLD. Stock or a record that
-    cannot be read sets nothing aside (never on a guess).
+    nothing. Fail-soft per unit. Returns (the units set aside, ok): ok is
+    False when a stock read or write failed, so the piece still reads SOLD
+    and the return's stock step stays open for the retry (D7).
 
     The unit stays quarantined at the shop it was sold from (an online
-    order's damaged piece handed in at another counter is not moved)."""
-    lines = [it for it in items or [] if it.condition == "DAMAGED" and it.product_id]
+    order's damaged piece handed in at another counter is not moved).
+
+    `already_aside` {product id: units} and `moved_ids` (the Retry stock
+    step, _units_moved_by_return): the units this return already set aside
+    are not set aside again, each credited once (_units_still_out)."""
+    lines = [it for it in items or [] if it.condition in _SET_ASIDE_CONDITIONS and it.product_id]
     if not order_id or not lines:
-        return []
+        return [], True
     try:
         stock_repo = get_stock_repository()
     except Exception:  # noqa: BLE001
         stock_repo = None
     if stock_repo is None:
-        return []
+        return [], True
     line_units, named_ids = _order_line_units(order)
+    slots = _units_still_out(
+        [{"product_id": line.product_id, "order_item_id": line.order_item_id, "line": line}
+         for line in lines for _ in range(int(round(line.return_qty)))],
+        already_aside, moved_ids, line_units)
+    try:
+        keys = _return_slot_keys(stock_repo, return_id, "aside", slots, moved_ids)
+    except Exception as exc:  # noqa: BLE001 -- unread is never "nothing held"
+        logger.warning("[RETURNS] damaged units not set aside, return slots unread: %s", exc)
+        return [], False
     used: set = set()
     out: List[Dict[str, Any]] = []
-    note = f"Damaged, customer return {return_id}"[:200]
-    coll = _returns_coll()
-    for _ in range(3):  # again only when another return of the bill took a named unit meanwhile
-        reserved = _reserve_damaged_units(coll, stock_repo, return_id, lines, order_id, order, note)
-        if not reserved:
-            break
-        for line in lines:
-            while True:
-                try:
-                    sid = _reactivate_original_unit(
-                        stock_repo, line.product_id, None, order_id, used,
-                        exact_order_only=True,
-                        own_stock_id=line_units.get(str(line.order_item_id or "")),
-                        named_ids=named_ids,
-                        only_ids=set(reserved),
-                        set_aside={
-                            "status": "QUARANTINED",
-                            "quarantine_reason": "CUSTOMER_RETURN_DAMAGED",
-                            "quarantine_at": datetime.now(timezone.utc),
-                            "quarantine_by": user_id,
-                            "quarantine_generation": uuid.uuid4().hex,
-                            "quarantine_notes": note,
-                            "quarantine_label_printed": False,
-                        },
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("[RETURNS] damaged unit not set aside: %s", exc)
-                    break
-                if not sid:
-                    break
-                try:
-                    unit = (_find_stock(stock_repo, {"stock_id": sid}) or [{}])[0]
-                except Exception:  # noqa: BLE001 -- the flip landed; only the shop is unknown
-                    unit = {}
-                out.append({"stock_id": sid, "store_id": unit.get("store_id"),
-                            "product_id": line.product_id})
-                _audit_stock_transition(sid, "SOLD", "QUARANTINED", return_id,
-                                        unit.get("store_id"), user_id)
-                try:
-                    from ..services import item_events as ie
-
-                    ie.record_post_write_event(
-                        _get_db(), event_type=ie.ItemEventType.QUARANTINE_IN,
-                        actor_id=user_id or "", stock_id=sid,
-                        from_state=ie.StockState.SOLD, to_state=ie.StockState.QUARANTINED,
-                        store_id=unit.get("store_id"), product_id=line.product_id,
-                        source_type="RETURN", source_id=return_id,
-                        payload={"quarantine_reason": "CUSTOMER_RETURN_DAMAGED"},
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("[RETURNS] damaged unit ledger row failed: %s", exc)
+    ok = True
+    for slot, key in zip(slots, keys):
+        line = slot["line"]
         try:
-            rows = _units_by_id(stock_repo, reserved)
-            if all((rows.get(sid) or {}).get("quarantine_notes") == note for sid in reserved):
-                break  # every named unit is this return's now (set aside here or by another run)
-        except Exception as exc:  # noqa: BLE001 -- unknown: stop here, never a second guess
-            logger.warning("[RETURNS] damaged units of %s unreadable after the set-aside: %s", return_id, exc)
-            break
-    return out
+            sid = _reactivate_original_unit(
+                stock_repo, line.product_id, None, order_id, used,
+                own_stock_id=line_units.get(str(line.order_item_id or "")),
+                named_ids=named_ids,
+                return_id=return_id,
+                slot=key,
+                set_aside={
+                    "status": "QUARANTINED",
+                    "quarantine_reason": f"CUSTOMER_RETURN_{line.condition}",
+                    "quarantine_at": datetime.now(timezone.utc),
+                    "quarantine_by": user_id,
+                    "quarantine_generation": uuid.uuid4().hex,
+                    "quarantine_notes": f"{line.condition.capitalize()}, customer return {return_id}"[:200],
+                    "quarantine_label_printed": False,
+                },
+            )
+        except _ClaimLost:
+            raise  # taken over: this stale retry writes nothing more (D79)
+        except _SlotTaken as taken:  # a concurrent attempt set this piece aside (D45a)
+            h = taken.holder
+            out.append({"stock_id": str(h.get("stock_id") or h.get("_id")), "store_id": h.get("store_id"),
+                        "product_id": line.product_id, "reason": f"CUSTOMER_RETURN_{line.condition}"})
+            continue
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[RETURNS] damaged unit not set aside: %s", exc)
+            ok = False
+            continue
+        if not sid:
+            continue  # no SOLD unit of this bill left for it (a historical import)
+        try:
+            unit = (_find_stock(stock_repo, {"stock_id": sid}) or [{}])[0]
+        except Exception:  # noqa: BLE001 -- the flip landed; only the shop is unknown
+            unit = {}
+        out.append({"stock_id": sid, "store_id": unit.get("store_id"),
+                    "product_id": line.product_id,
+                    "reason": f"CUSTOMER_RETURN_{line.condition}"})
+        _audit_stock_transition(sid, "SOLD", "QUARANTINED", return_id,
+                                unit.get("store_id"), user_id)
+        try:
+            from ..services import item_events as ie
 
-
-def _damaged_set_aside_done(return_id: str, items: Any) -> bool:
-    """D95(2): is the set-aside of this return's DAMAGED units DONE -- its
-    units named on its record and every named unit carrying this return's
-    quarantine note? False when they were never named (the record or the
-    stock could not be read, too many writers), a named unit is not set
-    aside, or it cannot be read: the stock step then stays open on the
-    record (its button, its task). A line whose sold unit does not exist (a
-    historical import) names nothing and is done."""
-    if not any((it.get("condition") if isinstance(it, dict) else it.condition) == "DAMAGED" for it in items or []):
-        return True
-    try:
-        coll, stock_repo = _returns_coll(), get_stock_repository()
-        rec = coll.find_one({"return_id": return_id}, {"damaged_unit_ids": 1}) if coll is not None else None
-        named = (rec or {}).get("damaged_unit_ids")
-        if named is None or stock_repo is None:
-            return False
-        rows = _units_by_id(stock_repo, named)
-        note = f"Damaged, customer return {return_id}"[:200]
-        return all((rows.get(sid) or {}).get("quarantine_notes") == note for sid in named)
-    except Exception as exc:  # noqa: BLE001 -- unknown: the step stays open
-        logger.warning("[RETURNS] damaged units of %s unreadable, its stock step stays open: %s", return_id, exc)
-        return False
+            ie.record_post_write_event(
+                _get_db(), event_type=ie.ItemEventType.QUARANTINE_IN,
+                actor_id=user_id or "", stock_id=sid,
+                from_state=ie.StockState.SOLD, to_state=ie.StockState.QUARANTINED,
+                store_id=unit.get("store_id"), product_id=line.product_id,
+                source_type="RETURN", source_id=return_id,
+                payload={"quarantine_reason": f"CUSTOMER_RETURN_{line.condition}"},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[RETURNS] damaged unit ledger row failed: %s", exc)
+    return out, ok
 
 
 def _reason_summary(items: List[ReturnLine]) -> str:
@@ -4453,7 +4937,9 @@ async def quote_return(
         raise HTTPException(status_code=400, detail="No returnable lines supplied")
 
     resolved_order_id = body.order_id or order.get("order_id")
-    _refuse_counter_shipping(active_lines, order)
+    # The create's own line rule: never a figure for a line or a quantity the
+    # create would refuse (a return made elsewhere since this form opened).
+    _returnable_lines(active_lines, order, resolved_order_id)
     priced_lines, gross_refund, refund_round_off = _price_return(
         active_lines, order, resolved_order_id
     )
@@ -4732,9 +5218,11 @@ COUNTER_COMPLETED_MESSAGE = "The counter completed this return; nothing to do he
 # A record whose stock step is still open, said on the till's done screen.
 STOCK_PENDING_NOTE = ("Its units are NOT back in stock yet: press 'Update stock' on this return in "
                       "Returns > History - do not add them by hand")
-# A DAMAGED unit whose set-aside did not happen: the same button finishes it.
-DAMAGED_PENDING_NOTE = ("Its damaged unit is NOT set aside in stock yet: press 'Update stock' on this return in "
-                        "Returns > History - do not change its stock by hand")
+# Another request holds the stock step right now (if it stops, the next press
+# or the hourly sweep finishes it).
+STOCK_RUNNING_NOTE = ("Its units are being put back in stock by another request. If 'Update stock' still "
+                      "shows on this return in Returns > History in a few minutes, press it - do not add "
+                      "them by hand")
 # D109(1): a read that failed is said, never shown as "no returns".
 HISTORY_UNREADABLE_MESSAGE = "Could not load returns. Retry."
 RETURN_UNREADABLE_MESSAGE = "Could not read the return - try again."
@@ -4807,163 +5295,42 @@ def _replayed(stored: Dict[str, Any]) -> Dict[str, Any]:
 
 def _stock_lines(items: Any) -> List[Dict[str, Any]]:
     """The returned lines whose units IMS still has to place: a GOOD one goes
-    back on the shelf, a DAMAGED one is set aside."""
+    back on the shelf, a DAMAGED or OPENED one is set aside. A line that
+    names no stock product (a lens, a service) places nothing."""
     out = []
     for it in items or []:
         d = it if isinstance(it, dict) else it.model_dump()
-        cond = str(d.get("condition") or "GOOD")
-        if float(d.get("return_qty") or 0) > 0 and ((cond == "GOOD" and d.get("restock", True)) or cond == "DAMAGED"):
+        cond = str(d.get("condition") or "GOOD").upper()
+        try:
+            qty = float(d.get("return_qty") or 0)
+        except (TypeError, ValueError):
+            qty = 0
+        if qty > 0 and d.get("product_id") and (cond in _SET_ASIDE_CONDITIONS or restock_engine.should_restock(d)):
             out.append({"product_id": d.get("product_id"), "sku": d.get("sku") or "",
                         "product_name": d.get("product_name") or ""})
     return out
 
 
-# --------------------------------------------------------------------------- #
-# THE STOCK STEP of a return's record: every state, who opens it, who closes
-# it, and what finishes it when the closing write is lost or the worker dies.
-# A = restock_applied, P = stock_pending, I = restock_in_progress (+ its
-# restock_started_at). One native test per row: test_d95_stock_step_states_native.
-#
-#  R1 nothing to place  A no  P no          record insert (no GOOD / DAMAGED line). Final.
-#  R2 pending           A no  P yes I no    opened: the press's record insert; Needs completing's
-#                                           record; a claimer that could not place everything
-#                                           (its stamp names the units that did land).
-#                                           closed: _claim_restock (the press's _finish_press, or
-#                                           'Update stock' = retry_restock) -> R3.
-#                                           finisher: the sweep's P1 task names 'Update stock'.
-#  R3 claim held        A no  P yes I yes   opened: _claim_restock (one worker).
-#                                           closed: that worker's ONE closing stamp -> R2 / R5 / R6,
-#                                           written only while the claim is still its own and
-#                                           younger than the timeout (_close_claim, D79); it checks
-#                                           the same before each unit it writes (_claim_live).
-#                                           stamp lost, worker dead, or stalled past the timeout -> R4.
-#  R4 stopped part way  A no  P yes I old   what landed is unknown: IMS places no GOOD unit again
-#                                           (D92(5)) -- nor does the stalled holder if it wakes.
-#                                           finisher: a PERSON -- the P1 task ('check each unit'; a
-#                                           task raised before the step stopped is rewritten to say
-#                                           so), the History label 'Stock step stopped: check these
-#                                           units by hand'. Completing the task sets a DAMAGED unit
-#                                           aside FIRST (D92(2)) and only then -> R7 (D109(2)); it
-#                                           cannot: 503, the task, the label and 'Update stock'
-#                                           stay, and that button sets the unit aside too.
-#  R5 damaged open      A yes P yes         opened: a closing stamp with a DAMAGED unit not set aside.
-#                                           closed: the set-aside, with NO claim (idempotent on the
-#                                           units named on the record): 'Update stock', or the
-#                                           identical re-press -> R6. Stamp lost -> still R5: the
-#                                           same button finds the unit set aside and closes it.
-#  R6 done              A yes P no          'Already restocked'. Final.
-#  R7 checked by hand   A no  P no  I yes   stock_checked_by / _at; its DAMAGED units are set
-#                                           aside. Final: IMS adds nothing, no stamp reopens it.
-#  R8 left to counter   restock_left_to_counter (a hold from before D95): IMS adds
-#                       nothing, a person checks (D92(5)). Final.
-#
-# A is never written back to "no" once it is "yes": only the holder of the
-# claim writes it, and the claim is only taken while it is "no".
-# --------------------------------------------------------------------------- #
-def _claim_restock(coll, return_id: str) -> Optional[Dict[str, Any]]:
-    """THE atomic claim of putting a record's GOOD units back: the press
-    right after its record has landed, and the record's Restock, take the same
-    one, so only one worker ever places them. Taken only while they are NOT
-    back (restock_applied is not True) -- so whoever holds it has nothing on
-    the record to lose, and its closing stamp writes what it placed. None:
-    they are back already, another worker holds it, or the claim could not be
-    written (nothing is placed here).
-
-    A DAMAGED unit still to be set aside once the GOOD ones are back
-    (restock_applied True + stock_pending True) takes NO claim: the set-aside
-    names its units on the record and flips only those, so any number of runs
-    at once move one unit once (_quarantine_damaged_units) -- and a claim
-    there had one fail-soft write to give it back (lost: a dead button)."""
-    try:
-        return coll.find_one_and_update(
-            {"return_id": return_id, "restock_applied": {"$ne": True}, "restock_in_progress": {"$ne": True},
-             # A record written before D95 whose press was putting the units back.
-             "restock_left_to_counter": {"$ne": True}},
-            {"$set": {"restock_in_progress": True, "restock_started_at": utc_now_iso()}},
-            return_document=ReturnDocument.AFTER)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[RETURNS] restock claim of %s failed: %s", return_id, exc)
-        return None
+# Closing a blocked-restock task by hand (D122(5), D109(3)): what its 409 / 503 say.
+TASK_UNITS_STILL_OUT_MESSAGE = ("This return's units are still NOT back in stock, so this task stays open and has "
+                                "changed (open it again to read it). Press 'Update stock' on the return: IMS puts "
+                                "each unit back once and closes this task. Do not add them by hand.")
+CLOSE_NOT_RECORDED_MESSAGE = "The return could not be updated just now - the task stays open. Try again."
 
 
-def _own_claim(claim: Dict[str, Any]) -> Dict[str, Any]:
-    """The record while ``claim`` is still the stock claim on it: taken at
-    that moment, not given back, not closed by a person's check (R7)."""
-    return {"return_id": claim.get("return_id"), "restock_in_progress": True,
-            "restock_started_at": claim.get("restock_started_at"), "stock_checked_at": None}
+async def note_stock_task_closed(return_id: str, current_user: dict, task: Optional[Dict[str, Any]] = None) -> None:
+    """A person closes a return's blocked-restock task by hand (the tasks
+    router calls this BEFORE the task closes).
 
+    * D122(5): while the return's units are still out, the close is refused
+      ONCE (409) and the task is rewritten to name the one action -- press
+      Update stock (IMS places each unit once, on its return slot). Nobody is
+      asked to check or add a unit by hand, and closing the task never marks
+      the stock step as done: the return keeps its label and its button, and
+      the hourly sweep still finishes a step that stopped part way.
+    * D109(3): the return records who closed its task and when.
 
-def _claim_live(coll, claim: Dict[str, Any]) -> bool:
-    """D79: may the holder of ``claim`` still write a unit? Only while the
-    claim is younger than the timeout (after it everyone else reads the step
-    as stopped and a person may be adding units by hand) and the record still
-    carries it. Unreadable: no."""
-    if _step_stale(claim.get("restock_started_at")):
-        return False
-    try:
-        return coll.find_one(_own_claim(claim), {"_id": 1}) is not None
-    except Exception as exc:  # noqa: BLE001 -- unknown: nothing is written on a guess
-        logger.warning("[RETURNS] stock claim of %s unreadable: %s", claim.get("return_id"), exc)
-        return False
-
-
-def _close_claim(coll, claim: Dict[str, Any], change: Dict[str, Any]) -> bool:
-    """D79: THE closing stamp of a stock claim, written only by the worker
-    that still holds it (_claim_live's rule, in the write's own filter). False:
-    the claim aged out or a person closed the step -- nothing was written,
-    the step stays as it reads (R4: a person checks; R7: checked). Raises
-    what the write raises."""
-    if _step_stale(claim.get("restock_started_at")):
-        return False
-    return bool(coll.update_one(_own_claim(claim), change).matched_count)
-
-
-def stock_step_stopped(doc: Optional[Dict[str, Any]]) -> bool:
-    """A worker stopped WHILE putting this return's GOOD units back: its
-    claim is older than any press runs and its closing stamp never landed.
-    What it placed is not known, so IMS places nothing more by itself
-    (D92(5)): a person checks each unit."""
-    doc = doc or {}
-    return bool(doc.get("stock_pending") and doc.get("restock_in_progress") and not doc.get("restock_applied")
-                and _step_stale(doc.get("restock_started_at")))
-
-
-def _say_stock_step(doc: Dict[str, Any]) -> None:
-    """D109(2): what Returns > History says of an open stock step. A stopped
-    one reads 'Stock step stopped: check these units by hand', never 'Units
-    not back in stock' (some may be)."""
-    if doc.get("stock_pending"):
-        doc["stock_step_stopped"] = stock_step_stopped(doc)
-
-
-# Completing a blocked-restock task (D109(2)): what its 409 / 503 say.
-STEP_STOPPED_TASK_MESSAGE = ("IMS stopped part way while placing this return's units, so this task has changed "
-                             "(open it again to read it). Now check each unit of the return on the shelf and in "
-                             "IMS stock - add a GOOD one by hand only if it is not in stock, never a damaged "
-                             "piece - then close this task again.")
-DAMAGED_NOT_ASIDE_TASK_MESSAGE = ("The damaged unit of this return could not be set aside in stock just now, so "
-                                  "the task stays open. Try again; if it still fails, press 'Update stock' on "
-                                  "this return in Returns > History, then close this task.")
-CHECK_NOT_RECORDED_MESSAGE = "Your check could not be recorded on the return - the task stays open. Try again."
-
-
-async def note_units_checked(return_id: str, current_user: dict, task: Optional[Dict[str, Any]] = None) -> None:
-    """D109(2): a person completes the blocked-restock task of a return whose
-    stock step stopped part way -- the only finisher that state has. In order:
-
-    * the task must have ASKED for the hand check. One raised before the step
-      stopped says 'press Update stock': it is rewritten to say what to check
-      and the close is refused once (409) -- a check nobody was asked to make
-      is never recorded;
-    * a DAMAGED unit of the return is set aside (D92(2): never gated on the
-      restock). Not done: 503, the task stays open and the return keeps its
-      label and its 'Update stock' -- the label is never cleared over a
-      damaged unit that is still SOLD;
-    * the return records who checked and when, and stops saying its units
-      are pending (R7).
-
-    Any other return is left as it is (its 'Update stock' still works). 503
-    when it cannot be read or recorded: the task stays open, press again."""
+    503 when the return cannot be read or written: the task stays open."""
     coll = _returns_coll()
     if coll is None or not return_id:
         return
@@ -4971,24 +5338,20 @@ async def note_units_checked(return_id: str, current_user: dict, task: Optional[
         doc = coll.find_one({"return_id": return_id})
     except Exception as exc:  # noqa: BLE001
         logger.error("[RETURNS] return %s unreadable while its task is closed: %s", return_id, exc)
-        raise HTTPException(status_code=503, detail=CHECK_NOT_RECORDED_MESSAGE) from exc
-    if not stock_step_stopped(doc):
+        raise HTTPException(status_code=503, detail=CLOSE_NOT_RECORDED_MESSAGE) from exc
+    if not doc:
         return
-    if not ((task or {}).get("payload") or {}).get("stopped_midway"):
-        if not _task_units_not_placed(doc, pressed=True):
-            raise HTTPException(status_code=503, detail=CHECK_NOT_RECORDED_MESSAGE)
-        raise HTTPException(status_code=409, detail=STEP_STOPPED_TASK_MESSAGE)
-    if not await _set_aside_recorded(coll, doc, current_user):
-        raise HTTPException(status_code=503, detail=DAMAGED_NOT_ASIDE_TASK_MESSAGE)
+    if (doc.get("stock_pending") and not doc.get("restock_applied")
+            and not ((task or {}).get("payload") or {}).get("close_refused")):
+        if not _task_units_not_placed(doc, refused=True):
+            raise HTTPException(status_code=503, detail=CLOSE_NOT_RECORDED_MESSAGE)
+        raise HTTPException(status_code=409, detail=TASK_UNITS_STILL_OUT_MESSAGE)
     try:
-        coll.update_one(
-            {"return_id": return_id, "stock_pending": True, "restock_in_progress": True,
-             "restock_applied": {"$ne": True}, "restock_started_at": doc.get("restock_started_at")},
-            {"$set": {"stock_pending": False, "stock_checked_by": current_user.get("user_id"),
-                      "stock_checked_at": utc_now_iso()}})
+        coll.update_one({"return_id": return_id}, {"$set": {
+            "stock_task_closed_by": current_user.get("user_id"), "stock_task_closed_at": utc_now_iso()}})
     except Exception as exc:  # noqa: BLE001
-        logger.error("[RETURNS] units of %s checked by hand, not recorded: %s", return_id, exc)
-        raise HTTPException(status_code=503, detail=CHECK_NOT_RECORDED_MESSAGE) from exc
+        logger.error("[RETURNS] task of %s closed by hand, not recorded: %s", return_id, exc)
+        raise HTTPException(status_code=503, detail=CLOSE_NOT_RECORDED_MESSAGE) from exc
 
 
 _HOLD_LOST = ("This took too long and another refund or return of this bill may have been "
@@ -5490,6 +5853,9 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
     # isinstance guard: when this endpoint is called directly (unit tests), the
     # default is the FastAPI Header(...) object, not a str -- don't .strip() it.
     idem_key = idempotency_key.strip() if isinstance(idempotency_key, str) else ""
+    # Of the press AS SENT: taken before its lines take the sale's identity
+    # (_returnable_lines), so a retry of the same press matches it.
+    idem_fingerprint = _return_fingerprint(body) if idem_key else None
     replay = _recorded_press(idem_key, body, current_user)
     if replay:
         return _replay_answer(replay)
@@ -5623,29 +5989,22 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
             ),
         )
 
-    line_idx = _order_line_index(order)
     resolved_order_id = body.order_id or order.get("order_id")
 
     # Resolve every line + validate the cumulative cap BEFORE touching money or
-    # claiming anything, so a bad line rejects with nothing reserved. Resolution
-    # is stashed for the atomic claim that runs only AFTER every 400/422 input
-    # check passes (so a validation error never leaves a phantom reservation).
-    resolved_lines: List[Dict[str, Any]] = []
-    for ret_line in active_lines:
-        orig_line = _resolve_original_line(ret_line, line_idx)
-        if orig_line is None:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Return line does not match any line on the original order "
-                    f"(order_item_id={ret_line.order_item_id!r}, "
-                    f"product_id={ret_line.product_id!r}). Cannot refund an "
-                    "item that was not on this sale."
-                ),
-            )
-        _refuse_shipping_line(orig_line)
-        _refuse_over_return(resolved_order_id, ret_line, orig_line)
-        resolved_lines.append({"ret_line": ret_line, "orig_line": orig_line})
+    # claiming anything, so a bad line rejects with nothing reserved (the rule
+    # the quote runs too). Resolution is stashed for the atomic claim that runs
+    # only AFTER every 400/422 input check passes (so a validation error never
+    # leaves a phantom reservation).
+    resolved_lines = _returnable_lines(active_lines, order, resolved_order_id)
+    # D82: the unique return-slot indexes ARE the guarantee that one returned
+    # piece becomes one stock record (D45a) -- for this press as for the Retry
+    # stock step. Missing or unreadable: refuse BEFORE anything is written
+    # (hold, claim, credit, stock), never run unguarded.
+    if not _return_slot_index_ok():
+        raise HTTPException(status_code=503, detail=(
+            "Returns are paused: the database check that keeps one returned piece to one stock record "
+            "is not installed. Nothing was changed. Tell head office."))
 
     # 0b. SERIAL-MISMATCH HARD-BLOCK (E3 acceptance #8, return half). Runs after
     #     the quantity guard and BEFORE any money math / atomic claim, so a
@@ -5973,7 +6332,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
             # Round 12: the record Needs completing writes carries the press's
             # key, so an identical re-press is refused (409), never a new return.
             "idempotency_key": idem_key or None,
-            "idempotency_fingerprint": _return_fingerprint(body) if idem_key else None,
+            "idempotency_fingerprint": idem_fingerprint,
         }
 
     def _issue_credit_or_fail(
@@ -6263,14 +6622,17 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         "credit_amount": credit_amount,
         "collect_amount": collect_amount,
         "settlement": settlement,
-        # The stock step (GOOD units back on the shelf, DAMAGED ones set
-        # aside) runs AFTER this insert has won and stamps its result here
-        # (_finish_press); until then it is pending.
+        # The stock step (GOOD units back on the shelf, DAMAGED / OPENED ones
+        # set aside) runs AFTER this insert has won and stamps its result
+        # here (_finish_press); until then it is pending.
         "restocked": [],
         "restock_applied": False,
         "restock_stock_ids": [],
         "stock_pending": bool(_stock_lines(active_lines)),
-        # F21-3: the DAMAGED pieces this return set aside (QUARANTINED).
+        # The counter the goods were handed back at: where an ONLINE order's
+        # units go when the order names no shop, whoever finishes the step.
+        "processing_store_id": current_user.get("active_store_id"),
+        # F21-3: the DAMAGED / OPENED pieces this return set aside (QUARANTINED).
         "quarantined_stock_ids": [],
         # F9 audit stamp: WHICH store the returned units were put back on, and
         # -- when the order billed to a stockless ONLINE store -- what it was
@@ -6309,7 +6671,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         # POS-14: stamp the idempotency key so a duplicate POST with the same key
         # is caught by the guard at the top of this handler without double-refunding.
         "idempotency_key": (idem_key or None),
-        "idempotency_fingerprint": _return_fingerprint(body) if idem_key else None,
+        "idempotency_fingerprint": idem_fingerprint,
         # This press's own mark on its record: a lost acknowledgement reads
         # it back as its own (D95(3)).
         "press_token": uuid.uuid4().hex,
@@ -6378,8 +6740,9 @@ def _replay_answer(replay: Dict[str, Any]) -> Dict[str, Any]:
                            and _points_waived(replay.get("order_id"))),
             # D95(2): the press stopped before it placed the units (its
             # record says so): the till is told, never silent.
-            stock_note=(DAMAGED_PENDING_NOTE if replay.get("restock_applied") else STOCK_PENDING_NOTE)
-            if replay.get("stock_pending") else None),
+            stock_note=((STOCK_RUNNING_NOTE if replay.get("restock_in_progress") else STOCK_PENDING_NOTE)
+                        if replay.get("stock_pending") and not replay.get("restock_applied")
+                        else _new_label_note(replay.get("restocked")))),
         "_idempotent_replay": True,
     }
 
@@ -6396,72 +6759,21 @@ def _unconfirmed_press_doc(order: Optional[Dict[str, Any]], idem_key: str) -> Op
     return None
 
 
-async def _set_aside_damaged(lines: List[ReturnLine], order: Optional[Dict[str, Any]], doc: Dict[str, Any],
-                             current_user: dict) -> List[Dict[str, Any]]:
-    """F21-3: a DAMAGED piece comes back QUARANTINED (tracked, can go to the
-    supplier), and the task agent raises its 7-day follow-up. D92(2): never
-    gated on who owns the record or its restock -- it moves only the unit THIS
-    order sold (exact_order_only) out of SOLD, so a second run moves nothing."""
-    units = _quarantine_damaged_units(lines, doc.get("order_id"), order, doc["return_id"],
-                                      current_user.get("user_id"))
-    for unit in units:
+async def _announce_set_aside(units: Any, store_id: Optional[str], current_user: dict) -> None:
+    """F21-3: each piece a return set aside (QUARANTINED) is told to the task
+    agent, which raises its 7-day follow-up. Fail-soft."""
+    for unit in units or []:
         try:
             from agents.registry import dispatch_event
 
             await dispatch_event(
                 "stock.quarantined",
-                {"stock_id": unit["stock_id"], "store_id": unit["store_id"] or doc.get("store_id"),
-                 "reason": "CUSTOMER_RETURN_DAMAGED", "actor_id": current_user.get("user_id")},
+                {"stock_id": unit["stock_id"], "store_id": unit.get("store_id") or store_id,
+                 "reason": unit.get("reason") or "CUSTOMER_RETURN_DAMAGED", "actor_id": current_user.get("user_id")},
                 source="returns_router",
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[RETURNS] stock.quarantined dispatch failed: %s", exc)
-    return units
-
-
-async def _set_aside_recorded(coll, doc: Dict[str, Any], current_user: dict) -> bool:
-    """D92(2): the DAMAGED units of a recorded counter return are set aside,
-    never gated on its restock (only the units the record names move, once)
-    and noted on the record. True: it has none, or every one is set aside."""
-    lines = [ReturnLine(**{"unit_price": 0.0, **it}) for it in (doc.get("items") or [])]
-    if doc.get("shopify_refund_id") or not any(ln.condition == "DAMAGED" for ln in lines):
-        return True
-    rid = doc.get("return_id")
-    aside = await _set_aside_damaged(lines, _load_order_for_restock(doc.get("order_id")), doc, current_user)
-    if aside:
-        try:
-            coll.update_one({"return_id": rid}, {"$addToSet": {
-                "quarantined_stock_ids": {"$each": [u["stock_id"] for u in aside]}}})
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[RETURNS] quarantined units of %s not noted on its record: %s", rid, exc)
-    return _damaged_set_aside_done(rid, lines)
-
-
-STOCK_STOPPED_NOTE = ("IMS took too long placing its units and stopped part way: check each unit by hand - a "
-                      "task says how (add one only if it is not in stock)")
-
-
-async def _stopped_step_answer(coll, doc: Dict[str, Any], current_user: dict) -> Dict[str, Any]:
-    """What 'Update stock' answers on a step that stopped part way (R4), or
-    that a person has since checked (R7). A worker stopped WHILE placing the
-    units (its claim is older than any press runs): what it placed is not
-    known, so IMS places nothing more -- a second run could add a unit twice
-    (D92(5)). Its one finisher is a person: the task is there for whoever
-    pressed, even if an earlier one was closed, and says what to check;
-    completing it records the check on the return (D109(2),
-    note_units_checked). D92(2): a DAMAGED unit is still set aside."""
-    _task_units_not_placed(doc, pressed=True)
-    await _set_aside_recorded(coll, doc, current_user)
-    return {
-        "return_id": doc.get("return_id"),
-        "restock_applied": False,
-        "restock_stock_ids": doc.get("restock_stock_ids", []),
-        "message": ("IMS stopped part way while placing this return's units and a person has since "
-                    "checked them by hand, so it adds nothing here."
-                    if doc.get("stock_checked_at") else
-                    "IMS stopped part way while placing this return's units, so it adds nothing here. "
-                    "Check each unit: add one by hand only if it is not in stock."),
-    }
 
 
 async def _own_record_or_refuse(coll, doc: Dict[str, Any], held: Dict[str, Any], active_lines: List[ReturnLine],
@@ -6472,8 +6784,9 @@ async def _own_record_or_refuse(coll, doc: Dict[str, Any], held: Dict[str, Any],
       token: only the acknowledgement was lost): it goes on to place the
       units and answers 201.
     * A record Needs completing wrote: 409, never 201 -- the cash is never
-      handed over twice. A DAMAGED unit is still set aside (D92(2)) and
-      noted on that record.
+      handed over twice. A DAMAGED / OPENED unit is still set aside (D92(2)),
+      on its return slot (the slot that record's Retry stock step picks, so
+      it moves once), and noted on that record.
     * Not known either way (the insert raised and the record cannot be read,
       or reads as absent): 503. The doc rides on the hold, so the identical
       re-press makes the SAME insert again (_unconfirmed_press_doc)."""
@@ -6488,8 +6801,10 @@ async def _own_record_or_refuse(coll, doc: Dict[str, Any], held: Dict[str, Any],
         return
     held["unclear"] = True  # finished from Needs completing: nothing is given back here
     logger.error("[RETURNS] return %s was completed from Needs completing while its press ran: 409", rid)
-    if stored.get("status") == "COMPLETED":
-        units = await _set_aside_damaged(active_lines, order, doc, current_user)
+    if stored.get("status") == "COMPLETED" and _return_slot_index_ok():
+        units, _ = _quarantine_damaged_units(active_lines, order_id, order, rid, current_user.get("user_id"),
+                                             moved_ids=set())
+        await _announce_set_aside(units, doc.get("store_id"), current_user)
         if units:
             try:
                 coll.update_one({"return_id": rid}, {"$addToSet": {
@@ -6499,15 +6814,26 @@ async def _own_record_or_refuse(coll, doc: Dict[str, Any], held: Dict[str, Any],
     raise HTTPException(status_code=409, detail=RECORD_TAKEN_MESSAGE)
 
 
+class _NoRecord:
+    """No returns collection (no database: in-memory doubles). The stock step
+    still runs, as its only worker; there is no record to stamp."""
+
+    def update_one(self, *_a: Any, **_k: Any) -> Any:
+        from types import SimpleNamespace
+
+        return SimpleNamespace(matched_count=1)
+
+
 async def _finish_press(coll, doc: Dict[str, Any], active_lines: List[ReturnLine],
                         order: Optional[Dict[str, Any]], current_user: dict) -> Dict[str, Any]:
     """D95(2): everything a counter press does AFTER its record insert has
-    won -- the loyalty reversal, the restock, the quarantine -- each
-    idempotent by its own key and stamped on the record as done. A press that
-    stops in here leaves the record saying what is pending: the loyalty sweep
-    settles the points; the record's Restock (its task: sweep_stuck_return_holds)
-    places the units. Also run by the identical re-press of an unconfirmed
-    record."""
+    won -- the loyalty reversal, then THE stock step of the record
+    (_run_stock_step: the one claim, return slots and closing stamp every
+    finisher uses, D122). A press that stops in here leaves the record saying
+    what is pending: the loyalty sweep settles the points; the next 'Update
+    stock' press or the hourly sweep finishes the stock step by running the
+    same slots again. Also run by the identical re-press of an unconfirmed
+    record. D122(4): the answer says what the stored record says."""
     return_id, order_id, store_id = doc["return_id"], doc.get("order_id"), doc.get("store_id")
     customer_id = doc.get("customer_id")
     points_share = round(float(doc.get("points_paid_share") or 0.0), 2)
@@ -6545,185 +6871,67 @@ async def _finish_press(coll, doc: Dict[str, Any], active_lines: List[ReturnLine
                 "[RETURNS] loyalty reversal exception for %s: %s", return_id, exc
             )
 
-    # Restock resellable (GOOD) units back into serialized stock (fail-soft),
-    # under THE claim of the record's stock step (_claim_restock): the
-    # record's Restock, pressed meanwhile, never places them a second time.
-    restock_result: Dict[str, Any] = {
-        "restocked": [],
-        "restock_stock_ids": [],
-        "applied": False,
-        "skipped": [],
-        # F9 routing stamp; None until the restock actually resolves a store, so
-        # a failed / blocked restock never claims the units landed anywhere.
-        "restock_store_id": None,
-        "restock_store_ids": [],
-        "restock_store_redirected_from": None,
-        "restock_store_reason": None,
-    }
-    claim = _claim_restock(coll, return_id) if coll is not None else None
-    claimed = coll is None or claim is not None
-    # Not claimed: another request of this very press holds the stock step (or
-    # finished it), or the claim could not be written. What the record says
-    # decides the answer -- never "not put back" beside units that are back.
-    other: Dict[str, Any] = {}
-    if not claimed:
-        try:
-            other = coll.find_one({"return_id": return_id}) or {}
-        except Exception as exc:  # noqa: BLE001 -- unknown: said so below
-            logger.warning("[RETURNS] stock step of %s unreadable: %s", return_id, exc)
-        if other.get("restock_applied"):
-            restock_result.update(
-                restocked=other.get("restocked") or [], applied=True,
-                restock_stock_ids=other.get("restock_stock_ids") or [],
-                restock_store_id=other.get("restock_store_id"),
-                restock_store_ids=other.get("restock_store_ids") or [],
-                restock_store_redirected_from=other.get("restock_store_redirected_from"),
-                restock_store_reason=other.get("restock_store_reason"))
-    # The units an earlier holder of this claim already put back (an 'Update
-    # stock' that placed some and gave the claim back): never placed again,
-    # and never dropped from the record -- the rule the record's Restock
-    # follows (retry_restock).
-    earlier = (claim or {}).get("restocked") or []
-    earlier_ids = list((claim or {}).get("restock_stock_ids") or [])
+    # THE stock step, under the record's claim: GOOD units back on the shelf,
+    # DAMAGED / OPENED ones set aside, each on its return slot. Fail-soft: a
+    # failure never breaks the return -- the step stays open on the record.
+    # F9: the counter the goods were handed back at is the fallback physical
+    # store when an online order carries no fulfilment stamp.
+    step: Dict[str, Any] = {}
+    counter = current_user.get("active_store_id")
     try:
-        if claimed:
-            restock_result = _restock_good_items(
-                active_lines,
-                store_id,
-                return_id,
-                order_id=order_id,
-                user_id=current_user.get("user_id"),
-                # F9: the counter the goods were handed back at -- the fallback
-                # physical store when the online order carries no fulfilment stamp.
-                processing_store_id=current_user.get("active_store_id"),
-                # Already resolved by the press; saves the online branch a second fetch.
-                order=order,
-                already_back=_landed_units(earlier),
-                # D79: no unit once this press's claim aged out.
-                fence=(lambda: _claim_live(coll, claim)) if claim is not None else None,
-            )
-    except Exception as exc:  # noqa: BLE001
-        # A stock-write failure must never break the return record - leave
-        # applied=False so it can be retried later.
-        logger.warning("[RETURNS] restock failed (recorded, not applied): %s", exc)
-    quarantined = await _set_aside_damaged(active_lines, order, doc, current_user)
-    # D95(2): the stock step is done only when the DAMAGED units are really
-    # set aside too -- a set-aside that did not happen keeps it open.
-    damaged_done = _damaged_set_aside_done(return_id, active_lines)
-    restocked = restock_result.get("restocked", [])
-    restock_applied = bool(restock_result.get("applied"))
-    restock_stock_ids = restock_result.get("restock_stock_ids", [])
-    if claim is not None and (earlier or earlier_ids):
-        restocked = _merge_restocked(earlier, restocked)
-        restock_stock_ids = list(dict.fromkeys(earlier_ids + list(restock_stock_ids)))
-    # F9: the PHYSICAL store the units actually landed on (== store_id for an
-    # ordinary counter return; the redirected shop for an online-order return;
-    # None when the restock was blocked / failed and nothing landed anywhere).
-    restock_store_id = restock_result.get("restock_store_id")
-    # Full set when a multi-shop split sent units to more than one shop (the
-    # single-valued field is then None so nobody is told the wrong shop).
-    restock_store_ids = restock_result.get("restock_store_ids", [])
-
-    # Online oversell guard (council B11): a GOOD-condition return puts stock
-    # back on the shelf, so the online AVAILABLE count goes UP -- re-push it to
-    # Shopify. Gated (IMS_SHOPIFY_WRITES + DISPATCH_MODE) + fail-soft: never
-    # blocks the return. No online mapping for a SKU -> no-op.
-    if restock_applied and restocked:
-        try:
-            from ..services.online_stock_writeback import writeback_after_restock
-
-            restocked_skus = [
-                r.get("sku") for r in restocked if isinstance(r, dict) and r.get("sku")
-            ]
-            # F9: hand the write-back the PHYSICAL store the units landed on.
-            # (Quantities are pooled all-store either way, but the summary /
-            # sync_runs context must never name the stockless online store.)
-            writeback_after_restock(
-                None,
-                restocked_skus,
-                restock_store_id or (restock_store_ids[0] if restock_store_ids else None),
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("[RETURNS] online write-back skipped: %s", exc)
-
-    # Each step's result is stamped on the record. A stamp that cannot be
-    # written leaves the step reading as pending: the sweep re-runs the
-    # (idempotent) reversal, and the record's Restock says to check the units.
-    # D84: the return's audit row, before the press answers 201.
-    audited = _audit_return_created(doc)
-    sets: Dict[str, Any] = {"loyalty_reversal_failed": loyalty_reversal_failed, "audited": audited}
-    stamp: Dict[str, Any] = {"$set": sets}
-    if quarantined:
-        stamp["$addToSet"] = {"quarantined_stock_ids": {"$each": [u["stock_id"] for u in quarantined]}}
-    if claimed:
-        sets.update({
-            "restocked": restocked,
-            "restock_applied": restock_applied,
-            "restock_stock_ids": restock_stock_ids,
-            "restock_in_progress": False,
-            "restock_completed_at": utc_now_iso(),
-            "stock_pending": bool(_stock_lines(active_lines)) and not (restock_applied and damaged_done),
-            "restock_store_id": restock_store_id,
-            "restock_store_ids": restock_store_ids,
-            "restock_store_redirected_from": restock_result.get("restock_store_redirected_from"),
-            "restock_store_reason": restock_result.get("restock_store_reason"),
-        })
-    elif restock_applied:
-        # Another request put the GOOD units back and stamped them (never
-        # written over here): only the DAMAGED units' set-aside, which takes
-        # no claim, is this request's to report.
-        sets["stock_pending"] = bool(_stock_lines(active_lines)) and not damaged_done
-    # D79: the stock step's stamp is this press's to write only while its
-    # claim is still its own and younger than the timeout (_close_claim).
-    # Otherwise the step reads as stopped (R4) or checked (R7) and stays so:
-    # only what is not the stock step's is stamped.
-    stopped = False
-    if coll is not None:
-        for _ in range(2):
-            try:
-                if claim is not None and not stopped and not _close_claim(coll, claim, stamp):
-                    stopped = True
-                    logger.error("[RETURNS] stock claim of %s was no longer held at its stamp", return_id)
-                    stamp = {**stamp, "$set": {"loyalty_reversal_failed": loyalty_reversal_failed,
-                                               "audited": audited}}
-                if claim is None or stopped:
-                    coll.update_one({"return_id": return_id}, stamp)
-                break
-            except Exception as exc:  # noqa: BLE001
-                logger.error("[RETURNS] stock / points result of %s not stamped on its record: %s", return_id, exc)
-
-    stock_note = None  # shown on the till's done screen when set
-    units = _stock_lines(active_lines)
-    if stopped:
-        # A person finishes it: the task says what to check (R4). None is
-        # raised on a record a person has already checked (R7).
-        now_reads = {**doc, "stock_pending": bool(units), "restock_in_progress": True}
-        try:
-            now_reads = coll.find_one({"return_id": return_id}) or now_reads
-        except Exception as exc:  # noqa: BLE001 -- unknown: the task is raised (deduped on an open one)
-            logger.warning("[RETURNS] stopped stock step of %s unreadable: %s", return_id, exc)
-        _task_units_not_placed(now_reads, pressed=True)
-        stock_note = STOCK_STOPPED_NOTE if units else None
-    elif restock_applied and not damaged_done:
-        # The step stays open on the record (its button, its task: the sweep).
-        stock_note = DAMAGED_PENDING_NOTE
-    elif not claimed and units and not restock_applied:
-        if other.get("restock_in_progress"):
-            # Another request holds the stock step right now: it places the
-            # units (if it stops, the sweep raises the task for its button).
-            stock_note = ("Its units are being put back in stock by another request. If 'Update stock' still "
-                          "shows on this return in Returns > History in a few minutes, press it - do not add "
-                          "them by hand")
+        if coll is None:
+            step = _retry_claimed(_NoRecord(), {"return_id": return_id}, dict(doc), current_user, counter,
+                                  order=order)
         else:
-            # The stock step could not be started here (its claim was not
-            # confirmed): no unit was placed by this press; one P1 task
-            # carries the real step.
-            _raised = _raise_restock_blocked_task(
-                return_id, order_id, store_id, units, current_user.get("active_store_id") or store_id,
-                counter_stopped=True, historical=doc.get("historical"), order_number=doc.get("order_number"))
-            stock_note = ("Its units were NOT put back in stock (IMS could not start its stock step just now): "
-                          + ("a task was raised to put them back - do not add them by hand" if _raised
-                             else "tell the store manager - do not add them by hand"))
+            step = _run_stock_step(coll, return_id, current_user, counter, order=order)
+    except _ClaimLost:
+        # This press stalled past the claim's age and another finisher (an
+        # 'Update stock' press, the sweep) took the step over: it finishes it.
+        logger.error("[RETURNS] stock step of %s was taken over while its press ran", return_id)
+    except HTTPException as exc:
+        logger.error("[RETURNS] stock step of %s not run by its press: %s", return_id, exc.detail)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[RETURNS] restock failed (recorded, not applied): %s", exc)
+    await _announce_set_aside(step.pop("set_aside_units", None), store_id, current_user)
+
+    # D84: the return's audit row, before the press answers 201. What is not
+    # the stock step's is stamped here; a stamp that cannot be written leaves
+    # the points flagged for the sweep (the reversal is idempotent).
+    audited = _audit_return_created(doc)
+    rec: Optional[Dict[str, Any]] = {**doc, **{k: step[k] for k in (
+        "restocked", "restock_applied", "restock_stock_ids", "restock_store_id", "restock_store_ids",
+        "restock_store_redirected_from", "restock_store_reason") if k in step}}
+    if coll is not None:
+        try:
+            coll.update_one({"return_id": return_id},
+                            {"$set": {"loyalty_reversal_failed": loyalty_reversal_failed, "audited": audited}})
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[RETURNS] points / audit result of %s not stamped on its record: %s", return_id, exc)
+        # D122(4): the answer is read off the stored record -- a closing stamp
+        # whose reply was lost, or another request's, reads as what it wrote.
+        try:
+            rec = coll.find_one({"return_id": return_id})
+        except Exception as exc:  # noqa: BLE001 -- unknown: said so below
+            logger.warning("[RETURNS] stock step of %s unreadable after its press: %s", return_id, exc)
+            rec = None
+
+    units = _stock_lines(active_lines)
+    if rec is None:
+        rec = doc
+        stock_note = ("IMS could not confirm whether its units are back in stock: if 'Update stock' shows on this "
+                      "return in Returns > History, press it - do not add them by hand") if units else None
+    elif rec.get("restock_applied") or not units:
+        # Said on the screen: a piece that went back under a new barcode.
+        stock_note = _new_label_note(rec.get("restocked"))
+    elif rec.get("restock_in_progress"):
+        # Another request holds the step (or this press's closing stamp did
+        # not land): the next press or the hourly sweep finishes it.
+        stock_note = STOCK_RUNNING_NOTE
+    else:
+        # The step stays open on the record, with its button. A blocked
+        # restock has raised its task, with its cause; any other open step
+        # gets ONE task naming the button from the hourly sweep.
+        stock_note = STOCK_PENDING_NOTE
 
     if not audited and doc.get("idempotency_key"):
         # D84: the audit row could not be written. Nothing is paid on a 503;
@@ -6731,12 +6939,7 @@ async def _finish_press(coll, doc: Dict[str, Any], active_lines: List[ReturnLine
         # (_replay_answer). A press without a key cannot be pressed again (it
         # would be a new return): reading its record repairs it (_repair_audit).
         raise HTTPException(status_code=503, detail=RECORD_NOT_CONFIRMED_MESSAGE)
-    return _press_answer(
-        {**doc, "restocked": restocked, "restock_applied": restock_applied, "restock_stock_ids": restock_stock_ids,
-         "restock_store_id": restock_store_id, "restock_store_ids": restock_store_ids,
-         "restock_store_redirected_from": restock_result.get("restock_store_redirected_from"),
-         "restock_store_reason": restock_result.get("restock_store_reason")},
-        points_waived=points_waived, stock_note=stock_note)
+    return _press_answer(rec, points_waived=points_waived, stock_note=stock_note)
 
 
 def _audit_once(log_id: str, row: Dict[str, Any]) -> bool:
@@ -6872,7 +7075,7 @@ def _press_answer(rec: Dict[str, Any], *, points_waived: bool, stock_note: Optio
         # cannot tell "routed by the fulfilment breakdown" from "fell back to
         # the counter". The persisted doc and the retry response both carry it.
         "restock_store_reason": rec.get("restock_store_reason"),
-        "stock_note": stock_note,
+        "stock_note": stock_note or "",
         "message": message,
     }
 
@@ -6938,12 +7141,35 @@ async def needs_completing(current_user: dict = Depends(require_roles(*_COMPLETE
         for doc in coll.find({"status": "COMPLETED", "owed_amount": {"$gt": 0}, "owed_paid_at": None}):
             if not can_access_store_scoped(doc.get("store_id"), current_user):
                 continue
+            # D123: a payout already stored (its press answered 503 and was
+            # never pressed again) settles the return here -- it is not owed.
+            if settle_owed_paid(coll, doc) is None:
+                continue
             owed.append({"return_id": doc.get("return_id"), "order_id": doc.get("order_id"),
                          "order_number": doc.get("order_number"), "store_id": doc.get("store_id"),
                          "owed_amount": round(float(doc.get("owed_amount") or 0), 2),
                          "owed_tenders": doc.get("owed_tenders") or []})
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail="Could not read the owed returns - try again.") from exc
+    # Completed records with pieces still reading sold ("Retry stock step"):
+    # GOOD ones to put back and ones to set aside, named until the retry
+    # deals with each.
+    stock_open: List[Dict[str, Any]] = []
+    try:
+        for doc in coll.find({"status": "COMPLETED", "recovered": {"$ne": None},
+                              "restock_applied": {"$ne": True}}):
+            if not can_access_store_scoped(doc.get("store_id"), current_user):
+                continue
+            state = _recovered_stock_state(doc, _load_order_for_restock(doc.get("order_id")))
+            if state["open"]:
+                stock_open.append({"return_id": doc.get("return_id"), "order_id": doc.get("order_id"),
+                                   "order_number": doc.get("order_number"), "store_id": doc.get("store_id"),
+                                   "pieces": _named(state["out"]),
+                                   # Damaged or opened (or condition not kept):
+                                   # the retry sets these aside, never on sale.
+                                   "aside_pieces": _named(state["aside_out"])})
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail="Could not read the open stock steps - try again.") from exc
     # Till store-credit / gift-voucher payments taken but never on their bill
     # (the unbilled tasks' list): each has one action, "Give back this
     # unbilled payment" (money review 20).
@@ -6969,7 +7195,8 @@ async def needs_completing(current_user: dict = Depends(require_roles(*_COMPLETE
                                  leg.get("voucher"), order, leg["key"])})
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail="Could not read the unbilled payments - try again.") from exc
-    return {"items": sorted(out, key=lambda r: str(r.get("at") or "")), "owed": owed, "unbilled": unbilled}
+    return {"items": sorted(out, key=lambda r: str(r.get("at") or "")), "owed": owed, "unbilled": unbilled,
+            "stock_open": stock_open}
 
 
 class GiveBackBody(BaseModel):
@@ -7044,7 +7271,6 @@ async def list_returns(
 
     for doc in returns:
         _repair_audit(doc)  # D84: only a record that says its audit row is not written
-        _say_stock_step(doc)
     return {"returns": returns, "total": total}
 
 
@@ -7066,7 +7292,6 @@ async def get_return(
     # store-scoped caller, so guessing an ID cannot reveal customer/refund data.
     doc = in_reach_or_404(doc, current_user, "Return not found")
     _repair_audit(doc)  # D84: a record whose audit row was never written gets it on a read
-    _say_stock_step(doc)
     return doc
 
 
@@ -7279,11 +7504,10 @@ async def complete_return_record(
             "items": [{"order_item_id": ln.get("item_id"), "item_id": ln.get("item_id"),
                        "product_id": ln.get("ims_product_id") or ln.get("product_id"),
                        "return_qty": float(ln.get("qty") or 0),
-                       # Its Restock (retry_restock) puts back only a unit the
-                       # press called GOOD and restockable; an unknown one, never.
                        "sku": ln.get("sku") or "", "product_name": ln.get("product_name") or "",
-                       "condition": ln.get("condition") or "GOOD",
-                       "restock": bool(ln.get("restock")) if ln.get("condition") else False}
+                       # As returned, when the press kept it (_retry_lines): a
+                       # piece whose condition was not kept is set aside (D6).
+                       **{k: ln[k] for k in ("condition", "restock") if ln.get(k) is not None}}
                       for ln in (spec.get("lines") or facts.get("lines") or [])],
             "replacement_items": [],
             "gross_refund": base.get("gross_refund") or facts.get("gross_refund") or net,
@@ -7314,22 +7538,21 @@ async def complete_return_record(
             "loyalty_reversal_failed": True,
         }
         source = "credit line" if credit_landed else "held refund"
-    if hold.get("restocking"):
-        # A hold written before D95 whose press was already putting the units
-        # back: its Restock never adds them again (a person checks each unit).
-        doc["restock_left_to_counter"] = True
     if owed:
         doc.update(owed_tenders=owed_legs, owed_amount=owed)
     # D95(4): the press never places a unit before its own record has landed,
     # so a record written here means its units are NOT placed yet: the stock
-    # step stays open on the record, with its task and its button.
-    units_out = bool(_stock_lines(doc.get("items"))) and not doc.get("restock_applied") \
-        and not doc.get("restock_left_to_counter")
+    # step stays open on the record, with its task and the panel's Retry
+    # stock step (D7). What is still out is read piece by piece, from the
+    # stock itself (_recovered_stock_state). A doc kept by an older build's
+    # press, which restocked BEFORE its insert, keeps that press's answer.
+    units_out = bool(_recovered_stock_state(doc, order)["open"])
     doc.update(status="COMPLETED", created_at=created_at, drawer_at=moved_at, stock_pending=units_out,
                audited=False,  # D84: True once its RETURN_RECORD_COMPLETED row is written
                recovered=dict(recovered, source=source, redated_from=redate.get("redated_from"),
                               redated_cross_fy=redate.get("redated_cross_fy")))
-    doc.pop("restock_in_progress", None)
+    for stale_mark in ("restock_in_progress", "restock_claim", "restock_started_at"):
+        doc.pop(stale_mark, None)
     try:
         # D95(1): THE insert-once every writer of this return's record makes.
         # The counter's own record already there: nothing is written here.
@@ -7342,39 +7565,32 @@ async def complete_return_record(
     # acknowledgement lost): its tasks and its audit row follow.
     if owed:
         _task_cash_owed(return_id, owed, store_id, order_id)
-    stock_task = _task_units_not_placed(doc) if units_out else None
+    if units_out:
+        _task_units_not_placed(doc)
     if redate.get("redated_from"):
         _audit_credit_event("RETURN_RECORD_REDATED", {"entry_id": f"return:{return_id}", "store_id": store_id,
                                                       "order_id": order_id})
     _audit_complete_or_503(doc)
-    if doc.get("restock_left_to_counter"):
-        stock_message = (" Before putting any of its units back in stock by hand, check that unit first: if it "
-                         "already shows in stock, the counter put it back - do not add it again.")
-    elif units_out:
-        stock_message = (" Its units are NOT back in stock yet: " + (
-            "a task was raised - " if stock_task else "tell the store manager - ")
-            + "press 'Update stock' on this return in Returns > History. Do not add them by hand.")
-    else:
-        stock_message = ""
-    return {**doc, "message": "Return record completed." + stock_message
-            + (f" The customer is owed Rs {owed:.2f} - a task was raised." if owed else "")}
+    return {**doc, "message": "Return record completed. " + _recovered_stock_note(doc, order)
+            + (f" The customer is owed Rs {owed:.2f} - a task was raised." if owed else ""),
+            # The panel offers Retry stock step exactly when the message does.
+            "stock_step_open": units_out}
 
 
-def _task_units_not_placed(doc: Dict[str, Any], *, pressed: bool = False) -> bool:
+def _task_units_not_placed(doc: Dict[str, Any], *, refused: bool = False) -> bool:
     """D95(4): ONE P1 task for a record whose returned units are not placed
     yet (its press stopped, or Needs completing wrote it), naming the button
     that places them -- no unit is left without a task and a button. The
     record remembers it was raised (the stock sweep never raises it again
-    once a person closed it). ``pressed``: a person pressed 'Update stock' on
-    a step that stopped part way -- the task is there for them even if an
-    earlier one was closed (deduped on an open one)."""
+    once a person closed it). ``refused`` (D122(5)): a person tried to close
+    the task with the units still out -- the open task is rewritten to name
+    the button and marked, so the close is refused once only."""
     rid = doc.get("return_id")
-    if not doc.get("stock_pending") or (doc.get("stock_task_raised") and not pressed):
+    if not doc.get("stock_pending") or (doc.get("stock_task_raised") and not refused):
         return bool(doc.get("stock_task_raised"))
     raised = _raise_restock_blocked_task(
         rid, doc.get("order_id"), doc.get("store_id"), _stock_lines(doc.get("items")), doc.get("store_id"),
-        counter_stopped=True, stopped_midway=bool(doc.get("restock_in_progress")),
-        damaged=any(isinstance(it, dict) and it.get("condition") == "DAMAGED" for it in doc.get("items") or []),
+        counter_stopped=True, in_panel=bool(doc.get("recovered")), close_refused=refused,
         historical=doc.get("historical") if isinstance(doc.get("historical"), bool) else None,
         order_number=doc.get("order_number"))
     if raised:
@@ -7449,29 +7665,83 @@ async def mark_owed_paid(
                 raise HTTPException(status_code=503, detail=(
                     "The payment could not be booked - press again (it is booked once).")) from exc
             payout, first = stored, False
-    method = payout.get("method") or body.method
-    # Its audit row, from the STORED payment under a fixed id: a re-press after
-    # a lost answer writes the row its first press never reached, once. D84:
-    # the row BEFORE the return is marked paid -- not written, the return
-    # stays on the owed list and the re-press replays the stored payment.
-    if not _audit_once(f"return_owed_paid:{return_id}", {
-            "action": "RETURN_RECORD_COMPLETED", "entity_type": "return", "entity_id": return_id,
+    # The return is settled as paid FROM the stored payment (its audit row,
+    # then its mark, then its task): the one rule every reader of an owed
+    # return runs too (D123), so a 503 here that nobody presses again never
+    # leaves a paid return on the owed list.
+    problem = settle_owed_paid(coll, doc, payout, current_user)
+    if problem == "audit":
+        raise HTTPException(status_code=503, detail=(
+            "The payment is booked, but its audit entry could not be written. Press again."))
+    if problem:
+        raise HTTPException(status_code=503, detail=(
+            "The payment is booked but the return could not be marked - press again."))
+    return {"return_id": return_id, "owed_paid": owed, "method": payout.get("method") or body.method,
+            "cash_paid_from": payout.get("cash_paid_from"),
+            "replayed": not first, "message": f"Rs {owed:.2f} booked as paid to the customer."}
+
+
+def settle_owed_paid(coll, doc: Dict[str, Any], payout: Optional[Dict[str, Any]] = None,
+                     actor: Optional[dict] = None) -> Optional[str]:
+    """D123: THE rule that settles a return's owed cash as paid, read through
+    its STORED payout row (fixed id ``payout:<return id>``, written first by
+    'Cash owed - now paid'). Every reader of an owed return runs it -- that
+    door, the owed list (Needs completing), closing the 'Pay customer' task,
+    the hourly sweep -- so a payout whose press answered 503 and was never
+    pressed again still takes the return off the owed list and closes its
+    task (the D110 rule: every reader settles).
+
+    In the door's order (D84): the audit row under its fixed id FIRST, then
+    the mark on the return, then the task. None: settled (now or earlier).
+    "unpaid": no payout row -- the cash is still owed. "unread" / "audit" /
+    "mark": not settled this time; the return stays owed and the next reader
+    tries again. ``payout``: the row, when the caller already holds it."""
+    rid = doc.get("return_id")
+    if doc.get("owed_paid_at"):
+        return None
+    if payout is None:
+        try:
+            payout = coll.find_one({"_id": f"payout:{rid}"})
+        except Exception as exc:  # noqa: BLE001 -- unknown: still shown as owed
+            logger.warning("[RETURNS] payout row of %s unreadable: %s", rid, exc)
+            return "unread"
+        if payout is None:
+            return "unpaid"
+    owed = round(float(doc.get("owed_amount") or 0), 2)
+    method = payout.get("method")
+    if not _audit_once(f"return_owed_paid:{rid}", {
+            "action": "RETURN_RECORD_COMPLETED", "entity_type": "return", "entity_id": rid,
             "store_id": doc.get("store_id"), "user_id": payout.get("created_by"),
             "details": {"owed_paid": owed, "method": method, "cash_paid_from": payout.get("cash_paid_from"),
                         "note": payout.get("note") or ""},
             "created_at": payout.get("created_at")}):
-        raise HTTPException(status_code=503, detail=(
-            "The payment is booked, but its audit entry could not be written. Press again."))
+        return "audit"
     try:
-        coll.update_one({"return_id": return_id, "status": "COMPLETED", "owed_paid_at": None},
+        coll.update_one({"return_id": rid, "status": "COMPLETED", "owed_paid_at": None},
                         {"$set": {"owed_paid_at": payout.get("created_at"), "owed_paid_by": payout.get("created_by"),
                                   "owed_paid_method": method, "owed_paid_from": payout.get("cash_paid_from")}})
-    except Exception as exc:  # noqa: BLE001 -- the payout stands; a re-press marks the return
-        raise HTTPException(status_code=503, detail=(
-            "The payment is booked but the return could not be marked - press again.")) from exc
-    _close_task(f"return_cash_owed:{return_id}", current_user, f"Paid Rs {owed:.2f} by {method}")
-    return {"return_id": return_id, "owed_paid": owed, "method": method, "cash_paid_from": payout.get("cash_paid_from"),
-            "replayed": not first, "message": f"Rs {owed:.2f} booked as paid to the customer."}
+    except Exception as exc:  # noqa: BLE001 -- the payout stands; the next reader marks the return
+        logger.warning("[RETURNS] return %s paid, not marked: %s", rid, exc)
+        return "mark"
+    _close_task(f"return_cash_owed:{rid}", actor or {"user_id": payout.get("created_by")},
+                f"Paid Rs {owed:.2f} by {method}")
+    return None
+
+
+def settle_owed_for_task(return_id: str, current_user: dict) -> None:
+    """D123: someone closes the 'Pay customer' task -- a return whose payout
+    is already stored is settled as paid first (fail-soft: the task closes
+    either way, as it always could)."""
+    coll = _returns_coll()
+    if coll is None or not return_id:
+        return
+    try:
+        doc = coll.find_one({"return_id": return_id, "status": "COMPLETED"})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[RETURNS] owed return %s unreadable while its task is closed: %s", return_id, exc)
+        return
+    if doc and round(float(doc.get("owed_amount") or 0), 2) > 0:
+        settle_owed_paid(coll, doc, actor=current_user)
 
 
 def _close_task(dedupe_ref: str, current_user: dict, note: str) -> None:
@@ -7707,45 +7977,191 @@ async def retry_restock(
     return_id: str = Path(..., description="Return ID"),
     current_user: dict = Depends(require_roles(*_RETURN_ROLES)),
 ):
-    """Re-run restock for a return whose units never made it back to stock.
+    """'Update stock' (Returns > History): run the stock step of a return
+    whose units never made it back to stock, or finish one that stopped part
+    way (_run_stock_step -- the one claim, return slots and closing stamp the
+    counter press, the Needs completing panel and the hourly sweep use too).
+    Idempotent and race-safe: one piece is one stock row however many times,
+    and by however many workers, it is run. No money moves here.
 
-    Idempotent + race-safe: a SINGLE atomic find_one_and_update claims the
-    return for restock. If `restock_applied` is already True the claim fails
-    and we report "Already restocked" -- unless the record still says a
-    DAMAGED unit is to be set aside (stock_pending): that runs here, with no
-    claim (it names its units on the record and moves only those). If another
-    worker is currently mid-restock (`restock_in_progress`=True) the claim
-    also fails and we report that; one that stopped part way is left to a
-    person (D92(5)). Otherwise we run the stock writes and persist the new
-    state.
-
-    Why this matters: the old code read the doc, checked applied=False, did
-    stock writes, then wrote applied=True. Two concurrent retries both saw
-    applied=False, both did stock writes, both wrote applied=True -> the same
-    unit got minted/reactivated twice. The claim+commit guards both layers.
-
-    Also lets a transient DB failure during create() be retried without
-    re-recording any money movement.
+    A record completed in Returns > Needs completing is refused here (403):
+    its retry is the panel's, for Accounts and Admin (decision D7).
     """
-    coll = _returns_coll()
-    if coll is None:
-        raise HTTPException(status_code=503, detail=RETURN_UNREADABLE_MESSAGE)
-    # Another shop's return is never claimed, restocked or described: the
-    # same 404 as GET /returns/{id}, before any flag or unit moves. A read
-    # that failed is said (503), never "not found".
+    # The retrier's own counter: where an online order's goods were handed back.
+    answer = _retry_restock(return_id, current_user, current_user.get("active_store_id"))
+    await _announce_set_aside(answer.pop("set_aside_units", None), None, current_user)
+    return answer
+
+
+# The slot a unit carries now, and every slot it ever carried (P1-A).
+_RETURN_SLOT_INDEXES = ("uniq_stock_unit_return_slot", "uniq_stock_unit_return_slots")
+RETURN_SLOT_INDEX_MESSAGE = (
+    "The Retry stock step is paused: the database check that keeps one returned piece to "
+    "one stock record is not installed. Nothing was changed. Tell head office.")
+
+
+def _return_slot_index_ok() -> bool:
+    """Is uniq_stock_unit_return_slot on the stock? It IS the D45(a)
+    guarantee (_return_slot_keys): without it a stalled retry and its taker
+    can both move one piece. ensure_indexes builds it fail-soft, so every
+    door that reaches a return's stock write checks first and refuses when
+    it is missing or cannot be read: the stock step before every claim
+    (_run_stock_step), the counter press before its first write (D82), and
+    the Shopify refund doors (D82(2), shopify_refund._restock_booked). An
+    in-memory double (no pymongo collection) runs in one process and has no
+    index to check."""
+    from pymongo.collection import Collection
+
     try:
-        owner = coll.find_one({"return_id": return_id}, {"_id": 0, "store_id": 1})
+        # No stock repository (no database): nothing can be written, nothing
+        # can double. One that cannot even be built is unknown: refused below.
+        stock_repo = get_stock_repository()
+        coll = getattr(stock_repo, "collection", None)
+        if stock_repo is None or not isinstance(coll, Collection):
+            return True
+        names = coll.index_information() or {}
+        ok = all(n in names for n in _RETURN_SLOT_INDEXES)
+    except Exception:  # noqa: BLE001
+        ok = False
+    if not ok:
+        logger.critical("[RETURNS] return stock write REFUSED: a unique index of %s "
+                        "is missing (or unreadable) on stock_units -- rebuild it (ensure_indexes)",
+                        ", ".join(_RETURN_SLOT_INDEXES))
+    return ok
+
+
+# --------------------------------------------------------------------------- #
+# THE STOCK STEP of a return's record (D122): every state, who opens it, who
+# closes it, and what finishes it when the closing write is lost or the worker
+# dies. The finisher is always IMS -- a press or the hourly sweep running the
+# SAME code on the SAME return slots -- never a person adding a unit.
+#
+# Marks on the returns record: A = restock_applied, P = stock_pending (a
+# counter record's "step open" flag: its History label, button and task),
+# I = restock_in_progress with restock_started_at (renewed before every unit
+# write) and T = restock_claim (the holder's token).
+# Marks on the stock rows: every unit a return moves carries its return slot
+# "<return>|back|<product>|<n>" (put back on the shelf: a flip of the bill's
+# SOLD unit, or a mint) or "<return>|aside|<product>|<n>" (set aside:
+# QUARANTINED) in return_slot + return_slots, unique in the database
+# (uniq_stock_unit_return_slot / _slots), with returned_by_return_id (flip)
+# or source_id (mint). A flip also matches only a unit still SOLD on THIS
+# bill. So a write whose slot is used changes nothing -- also after the unit
+# was sold again -- whoever makes it and however late (D122(2)).
+# One native test per row: test_d122_stock_step_states_native.
+#
+#  S0 nothing to place   A no  P no  I no   the record insert of a return with no stock line. The
+#                                           press's own step finds nothing and stamps S4. Final
+#                                           either way (no label, no button).
+#  S1 open               A no  (P yes) I no opened: the record insert (the press, Needs completing,
+#                                           a Shopify refund door that left its restock open); a
+#                                           holder that could not place everything (its stamp
+#                                           names what landed); a holder that gave the claim back.
+#                                           closed: _claim_restock -> S2.
+#                                           finisher: the press's own _finish_press right after its
+#                                           insert; then 'Update stock' / 'Retry stock step' (the
+#                                           sweep raises ONE P1 task naming the button for a
+#                                           counter record nobody pressed; a blocked restock
+#                                           carries its own task with its cause).
+#  S2 claim held         A no  I yes T      opened: _claim_restock (one worker; token T).
+#                                           closed: that worker's ONE closing stamp, matched on T
+#                                           (_close_claim) -> S1 (not everything placed) or S4.
+#                                           stamp landed, reply lost: sent again under T it matches
+#                                           again and writes the same values -> the answer is the
+#                                           stored record's (D122(4)).
+#                                           stamp never landed: the claim is given back (-> S1) or,
+#                                           if that fails too, ages -> S3.
+#  S3 stopped part way   A no  I yes, old   the worker died, stalled, or its stamp never landed and
+#                                           the claim aged (_STOCK_CLAIM_STALE_SECONDS).
+#                                           finisher: IMS. The next 'Update stock' / 'Retry stock
+#                                           step' press, or the hourly sweep for a record nobody
+#                                           presses (a Shopify refund's too), takes the claim over
+#                                           (_claim_restock, a new token) -> S2 and runs the step
+#                                           again: what already moved is read from the stock rows
+#                                           and credited; a piece is written only on a slot no row
+#                                           holds. The old holder, if it wakes: its next unit write
+#                                           hits a used slot or a unit no longer SOLD on this bill
+#                                           (nothing changes), its renew and its stamp miss on T.
+#  S4 done               A yes P no         'Already restocked'. Final: no claim is ever taken on
+#                                           it again, so A is never written back to "no" -- except
+#                                           a Shopify refund whose 'applied' rested on a booking a
+#                                           stale retry then gave up (_reopen_by_booking -> S1).
+#  blocked               S1 + its P1 task   IMS may not place the units yet (the order unreadable,
+#                                           no physical shop for an online order, the slot indexes
+#                                           missing: 503). The task names the cause and the re-run;
+#                                           never a hand entry.
+# --------------------------------------------------------------------------- #
+# A claim older than this is a worker that stopped; a younger one is running
+# (it renews before every unit write). The age decides only WHO CONTINUES --
+# whether a write is safe is decided on the stock row (the slot).
+_STOCK_CLAIM_STALE_SECONDS = 120
+
+
+def _claim_restock(coll, return_id: str) -> Optional[Dict[str, Any]]:
+    """THE atomic claim of a record's stock step -- the press right after its
+    record has landed, 'Update stock', 'Retry stock step' and the sweep take
+    the same one, so one worker at a time places its units. Taken while the
+    step is open and unclaimed (S1), or TAKEN OVER from a holder that stopped
+    (S3: its claim is older than _STOCK_CLAIM_STALE_SECONDS; compared in Python on
+    parsed UTC, matched on the exact marks read). Each claim carries a new
+    token: every later write of its holder to the record -- the renew, the
+    release, the closing stamp -- lands only while the claim is still its
+    own. None: the step is done, a live worker holds it, or the claim could
+    not be written (nothing is placed here)."""
+    take = {"$set": {"restock_in_progress": True, "restock_started_at": utc_now_iso(),
+                     "restock_claim": uuid.uuid4().hex, "restock_booking_released": False}}
+    open_step = {"return_id": return_id, "restock_applied": {"$ne": True}}
+    try:
+        claim = coll.find_one_and_update({**open_step, "restock_in_progress": {"$ne": True}}, take,
+                                         return_document=ReturnDocument.AFTER)
+        if claim is None:
+            held = coll.find_one({**open_step, "restock_in_progress": True},
+                                 {"restock_started_at": 1, "restock_claim": 1})
+            if held is not None and _step_stale(held.get("restock_started_at"), _STOCK_CLAIM_STALE_SECONDS):
+                claim = coll.find_one_and_update(
+                    {**open_step, "restock_in_progress": True,
+                     "restock_started_at": held.get("restock_started_at"),
+                     "restock_claim": held.get("restock_claim")},
+                    take, return_document=ReturnDocument.AFTER)
+        return claim
     except Exception as exc:  # noqa: BLE001
-        logger.warning("[RETURNS] restock retry lookup failed: %s", exc)
-        raise HTTPException(status_code=503, detail=RETURN_UNREADABLE_MESSAGE) from exc
-    in_reach_or_404(owner, current_user, "Return not found")
+        logger.warning("[RETURNS] restock claim of %s failed: %s", return_id, exc)
+        return None
 
-    # Atomic claim: succeed only if NOT already applied AND NOT in progress
-    # (the one claim the counter press takes for its own stock step too).
+
+def _close_claim(coll, mine: Dict[str, Any], sets: Dict[str, Any]) -> bool:
+    """THE closing stamp of a stock claim: ``sets`` plus the claim given back,
+    matched on the holder's token (``mine``). True: the stamp is on the
+    record. False: the claim was taken over -- nothing was written. D122(4):
+    a stamp that landed with its reply lost is sent again and matches again
+    (the token stays on the record, the values are the same), so it reads as
+    closed, never as stopped. RAISES when neither try got an answer."""
+    stamp = {"$set": {**sets, "restock_in_progress": False}}
+    last: Optional[Exception] = None
+    for _ in range(2):
+        try:
+            return bool(getattr(coll.update_one(mine, stamp), "matched_count", 1))
+        except Exception as exc:  # noqa: BLE001
+            last = exc
+            logger.warning("[RETURNS] closing stamp of %s got no answer: %s", mine.get("return_id"), exc)
+    raise last  # type: ignore[misc]
+
+
+def _run_stock_step(coll, return_id: str, current_user: dict, processing_store_id: Optional[str],
+                    order: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """THE stock step of a return's record, for every finisher (the state
+    table above): claim it, place each unit once on its return slot
+    (_retry_claimed), stamp the result. Returns the door's answer -- also
+    when the step is not this caller's to run (done, or held by a live
+    worker). RAISES 503 when the slot indexes are missing (nothing is
+    claimed), _ClaimLost when it was taken over while it ran, and whatever
+    else failed after giving the claim back (D43: a record is never left
+    reading "in progress" by a worker that knows it stopped)."""
+    if not _return_slot_index_ok():
+        raise HTTPException(status_code=503, detail=RETURN_SLOT_INDEX_MESSAGE)
     claim = _claim_restock(coll, return_id)
-
     if claim is None:
-        # Either applied, in-progress, or no such return. Distinguish by reading.
+        # Done, held by a live worker, or no such return. Distinguish by reading.
         try:
             doc = coll.find_one({"return_id": return_id}, {"_id": 0})
         except Exception as exc:  # noqa: BLE001
@@ -7753,75 +8169,165 @@ async def retry_restock(
             raise HTTPException(status_code=503, detail=RETURN_UNREADABLE_MESSAGE) from exc
         if not doc:
             raise HTTPException(status_code=404, detail="Return not found")
-        if doc.get("restock_applied") and doc.get("stock_pending"):
-            # D95(2): the GOOD units are back; the step is open only for a
-            # DAMAGED unit that was not set aside. Nothing is restocked again
-            # and NO claim is taken: the set-aside moves only the units named
-            # on the record, once, however many presses run -- so a stamp
-            # lost here leaves the same button working (it finds the unit set
-            # aside and closes the step), never "Already restocked" with the
-            # unit still SOLD.
-            lines = [ReturnLine(**{"unit_price": 0.0, **it}) for it in (doc.get("items") or [])]
-            units = await _set_aside_damaged(lines, _load_order_for_restock(doc.get("order_id")), doc, current_user)
-            done = _damaged_set_aside_done(return_id, lines)
-            change: Dict[str, Any] = {"$set": {"restock_in_progress": False, "stock_pending": not done}}
-            if units:
-                change["$addToSet"] = {"quarantined_stock_ids": {"$each": [u["stock_id"] for u in units]}}
-            stamped = True
-            try:
-                coll.update_one({"return_id": return_id, "restock_applied": True}, change)
-            except Exception as exc:  # noqa: BLE001 -- the step reads as open: pressed again, it moves nothing more
-                stamped = False
-                logger.warning("[RETURNS] set-aside of %s not stamped on its record: %s", return_id, exc)
-            if done and stamped:
-                _close_task(f"return_restock_blocked:{return_id}", current_user, "The damaged unit is set aside.")
-            return {
-                "return_id": return_id,
-                "restock_applied": True,
-                "restock_stock_ids": doc.get("restock_stock_ids", []),
-                "stock_pending": not (done and stamped),
-                "message": ("Stock updated: the damaged unit is set aside" if done and stamped else
-                            "The damaged unit is set aside, but the return could not be updated just now - "
-                            "press Update stock again" if done else
-                            "The damaged unit could not be set aside just now - press Update stock again"),
-            }
-        if doc.get("restock_applied"):
-            return {
-                "return_id": return_id,
-                "restock_applied": True,
-                "restock_stock_ids": doc.get("restock_stock_ids", []),
-                "message": "Already restocked",
-            }
-        if doc.get("restock_left_to_counter"):
-            return {
-                "return_id": return_id,
-                "restock_applied": False,
-                "restock_stock_ids": doc.get("restock_stock_ids", []),
-                "message": ("The counter was putting this return's units back when its record was completed, "
-                            "so IMS adds nothing here. Check each unit: add one by hand only if it is not in stock."),
-            }
-        if doc.get("restock_in_progress") and _step_stale(doc.get("restock_started_at")):
-            return await _stopped_step_answer(coll, doc, current_user)
-        # Someone else is mid-restock; tell the caller to retry shortly.
         return {
             "return_id": return_id,
-            "restock_applied": False,
+            "restock_applied": bool(doc.get("restock_applied")),
             "restock_stock_ids": doc.get("restock_stock_ids", []),
-            "message": "Restock in progress - retry shortly",
+            "message": "Already restocked" if doc.get("restock_applied") else "Restock in progress - retry shortly",
         }
+    mine = {"return_id": return_id, "restock_claim": claim.get("restock_claim")}
 
+    def _renew() -> None:
+        # Every unit write of this worker first renews its claim, and only
+        # while the claim is still its own (the token): a worker that stalled
+        # past a takeover writes no further unit (_ClaimLost). This decides
+        # who continues; the slot on the stock row decides what is safe.
+        res = coll.update_one(mine, {"$set": {"restock_started_at": utc_now_iso()}})
+        if not getattr(res, "matched_count", 1):
+            raise _ClaimLost(return_id)
+
+    fence = _RESTOCK_FENCE.set(_renew)
+    try:
+        return _retry_claimed(coll, mine, claim, current_user, processing_store_id, order=order)
+    except _ClaimLost:
+        logger.warning("[RETURNS] stock step of %s stopped: its claim was taken over", return_id)
+        raise
+    except Exception:
+        # The claim goes back whatever failed (a line that cannot be read, an
+        # unreadable stock answer): the record keeps its button.
+        try:
+            coll.update_one(mine, {"$set": {"restock_in_progress": False}})
+        except Exception:  # noqa: BLE001
+            logger.error("[RETURNS] restock claim of %s NOT released", return_id)
+        raise
+    finally:
+        _RESTOCK_FENCE.reset(fence)
+
+
+def _retry_restock(return_id: str, current_user: dict, processing_store_id: Optional[str],
+                   panel: bool = False) -> Dict[str, Any]:
+    """retry_restock's work, for both of its doors. `processing_store_id`: the
+    physical shop an ONLINE order's units go back to when the order names none
+    (_resolve_restock_store) -- the store door's own counter; never the shop
+    of a head-office user who was not where the goods were handed back.
+
+    `panel`: the Needs completing door (Accounts / Admin, decision D7). A
+    record completed there is retried THERE only; the store door refuses it."""
+    coll = _returns_coll()
+    if coll is None:
+        raise HTTPException(status_code=503, detail=RETURN_UNREADABLE_MESSAGE)
+    # Another shop's return is never claimed, restocked or described: the
+    # same 404 as GET /returns/{id}, before any flag or unit moves. A read
+    # that failed is said (503), never "not found".
+    try:
+        owner = coll.find_one({"return_id": return_id},
+                              {"_id": 0, "store_id": 1, "recovered": 1, "status": 1})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[RETURNS] restock retry lookup failed: %s", exc)
+        raise HTTPException(status_code=503, detail=RETURN_UNREADABLE_MESSAGE) from exc
+    in_reach_or_404(owner, current_user, "Return not found")
+    if owner.get("recovered") and not panel:
+        raise HTTPException(status_code=403, detail=(
+            "This return was completed in Returns > Needs completing: its Retry stock step is there, "
+            "for Accounts and Admin."))
+    if owner.get("status") == "NOTHING_PAID":
+        raise HTTPException(status_code=409, detail=(
+            "Nothing was paid on this return and its goods were never taken back: it has no stock step."))
+    try:
+        return _run_stock_step(coll, return_id, current_user, processing_store_id)
+    except _ClaimLost:
+        raise HTTPException(status_code=409, detail=(
+            "Another Retry stock step took this return over while this one was waiting, so this one "
+            "stopped and moved nothing more. Refresh the return to see its stock step."))
+
+
+def _reopen_by_booking(coll: Any, return_id: str, write: Any) -> None:
+    """A Shopify refund's retry whose units did not all land, and whose claim
+    was taken over meanwhile (`write`, its own record write, matched
+    nothing). Its booking may already have made the taker save 'applied' on
+    it (restock_applied_by_booking: the taker found this refund's mark on
+    the order and restocked less for it). The un-booked pieces are out of
+    stock, so that record is reopened: the Retry stock step stays (D7), and
+    the next retry books them again. A taker still running keeps its claim
+    -- its own landed pieces still reach the record -- and is told instead
+    (restock_booking_released): it reopens what it saves on a booking
+    (_reopen_if_released). Never a unit moved here: the bookings keep every
+    door from putting a piece back twice.
+
+    ORDER MATTERS: the flag first, then the reopen. The taker's save and its
+    _reopen_if_released can land between the two writes; flag-first, every
+    interleaving ends reopened (a save before the flag is caught by the
+    reopen, a save after it by the taker's own check). Reopen-first, a save
+    between them matched neither and the record stayed 'applied' with the
+    piece SOLD (#1413 round 9 review)."""
+    if getattr(write, "matched_count", 1):
+        return
+    coll.update_one(
+        {"return_id": return_id, "restock_in_progress": True},
+        {"$set": {"restock_booking_released": True}})
+    coll.update_one(
+        {"return_id": return_id, "restock_applied_by_booking": True},
+        {"$set": {"restock_applied": False, "restock_applied_by_booking": False}})
+
+
+def _reopen_if_released(coll: Any, return_id: str) -> None:
+    """A taker that saved 'applied' on a booking a stale retry released while
+    it ran (_reopen_by_booking's flag): reopened, as that retry would have."""
+    coll.update_one(
+        {"return_id": return_id, "restock_booking_released": True,
+         "restock_applied_by_booking": True, "restock_in_progress": False},
+        {"$set": {"restock_applied": False, "restock_applied_by_booking": False,
+                  "restock_booking_released": False}})
+
+
+def _retry_lines(doc: Dict[str, Any], order: Optional[Dict[str, Any]]) -> List[ReturnLine]:
+    """A return's lines for its stock step. No money moves here, so a line
+    with no price reads Rs 0. A record Needs completing REBUILT (_rebuilt)
+    keeps only the bill line, product and quantity (complete_return_record):
+    its piece is its bill line's (line_stock_product_id, the press's rule;
+    a removed line's too, _with_removed_lines), and a piece whose condition
+    was not kept is SET ASIDE for the manager to check, never put on sale
+    blind (decision, the D6 rule for a piece nobody has looked at)."""
+    rebuilt = _rebuilt(doc)
+    by_item = _order_line_index(order)["by_item"]
+    out: List[ReturnLine] = []
+    for it in doc.get("items") or []:
+        if not isinstance(it, dict):
+            continue
+        fields = set(ReturnLine.model_fields)
+        data = {k: v for k, v in it.items() if k in fields and v is not None}
+        data.setdefault("unit_price", 0.0)
+        orig = by_item.get(str(it.get("order_item_id") or it.get("item_id") or ""))
+        data["product_id"] = _piece_product(it, orig, rebuilt, order)
+        if rebuilt:
+            data["sku"] = data.get("sku") or str((orig or {}).get("sku") or "")
+            data["product_name"] = data.get("product_name") or str((orig or {}).get("product_name") or "")
+            data["condition"] = it.get("condition") or "OPENED"
+        out.append(ReturnLine(**data))
+    return out
+
+
+def _retry_claimed(coll: Any, mine: Dict[str, Any], claim: Dict[str, Any], current_user: dict,
+                   processing_store_id: Optional[str], order: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """The stock step once its claim is held (_run_stock_step). `mine`: the
+    record while the claim is still this worker's -- the filter of every
+    write to it. `order`: the bill, when the caller (the press) already read
+    it. An online order's units go back to the counter the goods were handed
+    in at when the record kept it (the press's), else `processing_store_id`."""
+    return_id = mine["return_id"]
+    processing_store_id = claim.get("processing_store_id") or processing_store_id
     # We hold the claim. Already-restocked units are tracked in restock_stock_ids
     # on the doc; we re-run plan_restock fresh, then mark sold+commit.
     existing_ids = list(claim.get("restock_stock_ids") or [])
-    # A record completed in Needs completing keeps no price (restock needs none).
-    lines = [ReturnLine(**{"unit_price": 0.0, **it}) for it in (claim.get("items") or [])]
 
     # F9: the order is the ONLY record of which physical shop shipped each unit.
     # Load it ONCE here and hand it to the router, so this door runs on VERIFIED
-    # routing evidence exactly like the Shopify confirm door does.
+    # routing evidence exactly like the Shopify confirm door does. With its
+    # removed lines: a removed line's own unit comes first too (D43).
     claim_store = claim.get("store_id")
     claim_order_id = claim.get("order_id")
-    retry_order = _load_order_for_restock(claim_order_id)
+    retry_order = _with_removed_lines(order if order is not None else _load_order_for_restock(claim_order_id))
+    lines = _retry_lines(claim, retry_order)
 
     # THIS DOOR IS THE RECOVERY PATH. _raise_restock_blocked_task and the refund
     # -review banner both send the operator here, so it must hold the SAME rule
@@ -7851,7 +8357,7 @@ async def retry_restock(
             claim_order_id,
             claim_store,
             blocked_units,
-            current_user.get("active_store_id"),
+            processing_store_id,
             unread="the order",
             historical=claim.get("historical") if isinstance(claim.get("historical"), bool) else None,
             order_number=claim.get("order_number"),
@@ -7869,7 +8375,7 @@ async def retry_restock(
             "restock_store_reason": _RESTOCK_ROUTE_UNRESOLVED,
         }
         try:
-            _close_claim(coll, claim, {"$set": blocked_update})
+            coll.update_one(mine, {"$set": blocked_update})
         except Exception as exc:  # noqa: BLE001
             logger.warning("[RETURNS] blocked-retry persist failed: %s", exc)
         return {
@@ -7899,7 +8405,7 @@ async def retry_restock(
         lines, _, unknown = _cap_restock_to_returnable(lines, retry_order, str(refund_id))
         if unknown:
             try:
-                _close_claim(coll, claim, {"$set": {"restock_in_progress": False}})
+                coll.update_one(mine, {"$set": {"restock_in_progress": False}})
             except Exception:  # noqa: BLE001
                 pass
             return {
@@ -7909,7 +8415,7 @@ async def retry_restock(
                 "message": "Could not read the stock just now - nothing was restocked. Retry shortly.",
             }
 
-    def _restock(retry_lines, already_back=None):
+    def _restock(retry_lines, already_back=None, moved_ids=None):
         return _restock_good_items(
             retry_lines,
             claim_store,
@@ -7919,34 +8425,76 @@ async def retry_restock(
             user_id=current_user.get("user_id"),
             # F9: same online-store redirect as the create path -- a retry must
             # never be the door that mints a phantom unit on BV/WO-ONLINE-01.
-            processing_store_id=current_user.get("active_store_id"),
+            processing_store_id=processing_store_id,
             # VERIFIED evidence (non-None was checked above).
             order=retry_order,
             already_back=already_back,
-            # D79: no unit once this worker's claim aged out.
-            fence=lambda: _claim_live(coll, claim),
+            moved_ids=moved_ids,
         )
 
+    set_aside: List[Dict[str, Any]] = []
+    aside_ok = True
+    by_booking = False
+    # What the STOCK says this return already moved (a worker that died
+    # before its stamp left it on the rows only): kept on the record too.
+    back_ids: set = set()
+    aside_ids: set = set()
     try:
         if refund_id and retry_order is not None:
             # None: another door just put the units back -- nothing left to do.
+            # A mark of this refund already on the order (read before this
+            # retry booked anything) made the cap restock less for it. Either
+            # way the record's 'applied' rests on a booking this retry did not
+            # land: if it was a stale retry of this record whose writes then
+            # failed, that retry reopens the record (_reopen_by_booking).
+            from ..services.shopify_refund import _booked_for
+
+            booked_before = _booked_for(retry_order, str(refund_id))
             restock_result = _restock_booked(
                 retry_order, lines, str(refund_id), _restock,
-                processing_store_id=current_user.get("active_store_id"),
-            ) or {"applied": True}
+                processing_store_id=processing_store_id,
+            )
+            by_booking = restock_result is None or booked_before
+            restock_result = restock_result or {"applied": True}
         else:
             # Only the units still out: re-run, the units an earlier attempt
-            # put back went again -- a counter order's order-agnostic fallback
-            # flipped another customer's SOLD unit to AVAILABLE, or minted.
-            restock_result = _restock(lines, _landed_units(claim.get("restocked")))
+            # put back went again -- no SOLD unit of the bill was left for
+            # them, so each was minted a second time. "Earlier" is read from
+            # the stock as well as the doc (D43): a press that died before
+            # its doc was saved, or a rebuilt record, keeps no restocked rows.
+            moved_back, moved_aside, back_ids, aside_ids = _units_moved_by_return(return_id)
+            back_ids, aside_ids = _with_recorded_ids(claim, back_ids, aside_ids)
+            if not (retry_order or {}).get("historical"):
+                # A piece to set aside (damaged, opened, or -- on a rebuilt
+                # record -- its condition not kept) still reading SOLD. A
+                # blind rebuilt record's pieces include the ones its press
+                # already put back (_condition_not_kept): never a second unit.
+                blind = _condition_not_kept(claim)
+                set_aside, aside_ok = _quarantine_damaged_units(
+                    lines, claim_order_id, retry_order, return_id, current_user.get("user_id"),
+                    already_aside=_plus(moved_aside, moved_back) if blind else moved_aside,
+                    moved_ids=aside_ids | back_ids if blind else aside_ids)
+            restock_result = _restock(lines, _back_since_record(
+                return_id, claim, _landed_units(claim.get("restocked")), moved_back, back_ids), back_ids)
+        if restock_result.get("claim_lost"):
+            # Taken over mid-loop (D79): the pieces it landed stayed booked
+            # (_restock_booked read them); it stops here with 409.
+            raise _ClaimLost(return_id)
     except Exception as exc:  # noqa: BLE001
         # Even on failure we MUST release the in-progress flag so a future
         # retry isn't deadlocked.
         logger.warning("[RETURNS] restock retry stock writes failed: %s", exc)
         try:
-            _close_claim(coll, claim, {"$set": {"restock_in_progress": False}})
+            released = coll.update_one(mine, {"$set": {"restock_in_progress": False}})
+            if refund_id:
+                _reopen_by_booking(coll, return_id, released)
         except Exception:  # noqa: BLE001
             pass
+        if isinstance(exc, _ClaimLost):
+            # Taken over (D79): its release missed on the token (the taker's
+            # claim stands) and a booking it un-did reopened the taker's
+            # record (_reopen_by_booking) -- the caller answers 409.
+            raise
         raise HTTPException(status_code=500, detail="Restock retry failed")
 
     # Merge stock_ids: any units we already had (from a partial earlier run)
@@ -7954,7 +8502,7 @@ async def retry_restock(
     new_ids = list(restock_result.get("restock_stock_ids", []))
     merged_ids: List[str] = []
     seen: set = set()
-    for sid in existing_ids + new_ids:
+    for sid in existing_ids + sorted(back_ids) + new_ids:
         if sid and sid not in seen:
             seen.add(sid)
             merged_ids.append(sid)
@@ -7963,7 +8511,8 @@ async def retry_restock(
         # MERGED: the units an earlier attempt put back stay on the doc.
         "restocked": _merge_restocked(claim.get("restocked"),
                                       restock_result.get("restocked", [])),
-        "restock_applied": bool(restock_result.get("applied")),
+        # A piece whose set-aside failed keeps the step open (D7).
+        "restock_applied": bool(restock_result.get("applied")) and aside_ok,
         "restock_stock_ids": merged_ids,
         "restock_in_progress": False,
         "restock_completed_at": utc_now_iso(),
@@ -7975,48 +8524,52 @@ async def retry_restock(
         ),
         "restock_store_reason": restock_result.get("restock_store_reason"),
     }
-    # D95(2): a counter return's DAMAGED units are set aside by this step too
-    # (its press may have stopped before it did). Idempotent: only the unit
-    # THIS order sold moves, out of SOLD, once.
-    set_aside: Dict[str, Any] = {}
-    damaged_done = True
-    if not refund_id and any(ln.condition == "DAMAGED" for ln in lines):
-        units = await _set_aside_damaged(lines, retry_order, claim, current_user)
-        if units:
-            set_aside = {"$addToSet": {"quarantined_stock_ids": {"$each": [u["stock_id"] for u in units]}}}
-        damaged_done = _damaged_set_aside_done(return_id, lines)
-    if "stock_pending" in claim or not damaged_done:
-        # D95(2): a counter return's record says whether its stock step is
-        # still open (its button and its task follow this flag) -- open until
-        # the GOOD units are back AND the DAMAGED ones are really set aside.
-        update["stock_pending"] = not (restock_result.get("applied") and damaged_done)
-    # D79: the closing stamp is this worker's to write only while its claim
-    # is still its own and younger than the timeout. Otherwise the step reads
-    # as stopped (R4) or a person has checked it (R7): nothing is stamped over
-    # that -- only the units set aside are noted -- and the answer is the
-    # stopped step's.
-    stopped = False
+    aside_all = list(dict.fromkeys([*(claim.get("quarantined_stock_ids") or []), *sorted(aside_ids),
+                                    *(row["stock_id"] for row in set_aside)]))
+    if aside_all:
+        update["quarantined_stock_ids"] = aside_all
+    if refund_id:
+        update["restock_applied_by_booking"] = by_booking
+    if "stock_pending" in claim:
+        # A counter return's record says whether its stock step is still open
+        # (its History label, its button and its task follow this flag).
+        update["stock_pending"] = not update["restock_applied"]
     try:
-        stopped = not _close_claim(coll, claim, {"$set": update, **set_aside})
-        if stopped and set_aside:
-            coll.update_one({"return_id": return_id}, set_aside)
+        closed = _close_claim(coll, mine, update)
     except Exception as exc:  # noqa: BLE001
+        # Neither try got an answer. The stock rows are the truth
+        # (_units_moved_by_return): the next run credits what moved and moves
+        # nothing twice. The claim is given back if it can be; if not, it ages
+        # and the next press or the sweep takes it over (S3).
         logger.warning("[RETURNS] restock retry persist failed: %s", exc)
-    if stopped:
-        logger.error("[RETURNS] stock claim of %s was no longer held at its stamp", return_id)
-        now_reads = {**claim, "stock_pending": True}
         try:
-            now_reads = coll.find_one({"return_id": return_id}, {"_id": 0}) or now_reads
-        except Exception as exc:  # noqa: BLE001 -- unknown: answered as stopped
-            logger.warning("[RETURNS] stopped stock step of %s unreadable: %s", return_id, exc)
-        return await _stopped_step_answer(coll, now_reads, current_user)
+            coll.update_one(mine, {"$set": {"restock_in_progress": False}})
+        except Exception:  # noqa: BLE001
+            logger.error("[RETURNS] restock claim of %s NOT released", return_id)
+        raise HTTPException(status_code=503, detail=(
+            "IMS could not save the result of this stock step. Press Update stock again in a few "
+            "minutes: a unit already placed is never placed twice. Do not add units by hand.")) from exc
+    try:
+        if refund_id and not update["restock_applied"] and not closed:
+            from types import SimpleNamespace
+
+            _reopen_by_booking(coll, return_id, SimpleNamespace(matched_count=0))
+        if by_booking and update["restock_applied"]:
+            _reopen_if_released(coll, return_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[RETURNS] booking reopen of %s failed: %s", return_id, exc)
+    if not closed:
+        # Its stamp missed on the token -- another finisher took the return
+        # over while this one ran. Never "Restock applied" for a stamp that
+        # did not land (nor a Shopify write-back of it): its taker answers.
+        raise _ClaimLost(return_id)
 
     # A successful retry raised the shelf count exactly like the create path
     # did, so Shopify has to hear about it too. Without this the online path --
     # which now routinely DEFERS recovery to this endpoint -- leaves the
     # recovered frame sellable in-shop but invisible online. Fail-soft.
     restocked_rows = restock_result.get("restocked") or []
-    if update["restock_applied"] and restocked_rows:
+    if restock_result.get("applied") and restocked_rows:
         try:
             from ..services.online_stock_writeback import writeback_after_restock
 
@@ -8029,7 +8582,7 @@ async def retry_restock(
         except Exception as exc:  # noqa: BLE001
             logger.debug("[RETURNS] retry write-back skipped: %s", exc)
 
-    if update["restock_applied"] and not update.get("stock_pending"):
+    if update["restock_applied"]:
         # The step the blocked-restock task asked for is done.
         _close_task(f"return_restock_blocked:{return_id}", current_user, "Restocked: the units are back in stock.")
     booked_earlier = False
@@ -8051,15 +8604,55 @@ async def retry_restock(
             "Booked. This order predates IMS stock: a task asks the shop's store "
             "manager to add the frame(s) through stock-in"
             if restock_result.get("stock_in_task") or (update["restock_applied"] and booked_earlier)
-            else "Restocked, but the damaged unit could not be set aside just now - press Update stock again"
-            if update["restock_applied"] and not damaged_done
             else "Restock applied"
             if update["restock_applied"]
             else "Nothing booked: the stock-in task could not be saved - retry shortly"
             if restock_result.get("reason") == "stock_in_task_not_saved"
             else "Restock partial - retry again"
         ),
+        # What the record now says of the step (the press's answer reads it).
+        "restocked": update["restocked"],
+        "restock_store_redirected_from": update["restock_store_redirected_from"],
+        "restock_store_reason": update["restock_store_reason"],
+        "stock_pending": not update["restock_applied"],
+        "quarantined_stock_ids": [row["stock_id"] for row in set_aside],
+        # For the caller's task-agent follow-up (_announce_set_aside); popped
+        # before the answer is sent.
+        "set_aside_units": set_aside,
+        "stock_note": " ".join(part for part in (
+            _new_label_note(restocked_rows),
+            f"{len(set_aside)} piece(s) set aside in Quarantine for the store manager to check "
+            "(damaged, opened, or its condition was not kept): not on sale until the manager decides."
+            if set_aside else "") if part),
     }
+
+
+@router.post("/{return_id}/complete-record/restock")
+async def retry_completed_record_restock(
+    return_id: str = Path(..., description="Return ID"),
+    current_user: dict = Depends(require_roles(*_COMPLETE_RECORD_ROLES)),
+):
+    """Returns > Needs completing > Retry stock step (decision D7, 2026-11-11):
+    Accounts / Admin re-run the restock of a record they completed there --
+    the ONE action for its pieces still out of stock, never a hand entry. It
+    is the store's retry (_retry_restock: its claim, its units-still-out rule,
+    its store scope), for a completed record only: an ordinary return is not
+    theirs, and the store door refuses a completed one. A REBUILT record is
+    retried too (decision D43): each line's own unit first (a removed line's
+    included), never another SOLD unit of the product, never a mint for a
+    unit already back, the claim given back on any failure. An online order's units go back to the shop the press itself
+    resolved (kept on the record), never to the presser's own shop."""
+    coll = _returns_coll()
+    try:
+        doc = (coll.find_one({"return_id": return_id}, {"_id": 0, "recovered": 1, "restock_store_id": 1})
+               if coll is not None else None)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail="Could not read the returns - try again.") from exc
+    if not (doc or {}).get("recovered"):
+        raise HTTPException(status_code=404, detail="Return not found")
+    answer = _retry_restock(return_id, current_user, doc.get("restock_store_id"), panel=True)
+    await _announce_set_aside(answer.pop("set_aside_units", None), None, current_user)
+    return answer
 
 
 # ============================================================================
