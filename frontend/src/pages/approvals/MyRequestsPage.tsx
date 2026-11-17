@@ -26,6 +26,8 @@ export function MyRequestsPage() {
   const canSeePayables = hasRole(COST_ROLES);
   const [rows, setRows] = useState<ApprovalRequest[]>([]);
   const [loading, setLoading] = useState(true);
+  // A list that could not be read is never shown as an empty one (D112).
+  const [loadFailed, setLoadFailed] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -33,7 +35,9 @@ export function MyRequestsPage() {
     try {
       const res = await approvalsApi.getMyRequests();
       setRows(res.requests || []);
+      setLoadFailed(false);
     } catch {
+      setLoadFailed(true);
       toast.error('Failed to load your requests');
     } finally {
       setLoading(false);
@@ -71,6 +75,10 @@ export function MyRequestsPage() {
         <div className="flex items-center justify-center py-16 text-gray-500">
           <Loader2 className="w-5 h-5 animate-spin mr-2" />
           <span className="text-sm">Loading…</span>
+        </div>
+      ) : loadFailed ? (
+        <div role="alert" className="py-16 text-center text-sm text-red-700">
+          Your requests could not be read just now. Please try again.
         </div>
       ) : rows.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-16 text-gray-400">

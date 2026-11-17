@@ -326,6 +326,12 @@ export default function JournalEntriesPanel() {
                   <span className={clsx('inline-block px-2 py-0.5 rounded text-xs font-medium', STATUS_STYLE[je.status])}>
                     {je.status}
                   </span>
+                  {/* D113: marked reversed, voucher never saved -- the books still carry it */}
+                  {je.reversal_unfinished && (
+                    <span className="inline-block ml-2 px-2 py-0.5 rounded text-xs font-medium bg-amber-50 text-amber-700 border border-amber-200">
+                      Reversal not finished
+                    </span>
+                  )}
                 </td>
                 <td className="px-3 py-2 text-gray-600">{je.maker_name || je.maker_id}</td>
               </tr>

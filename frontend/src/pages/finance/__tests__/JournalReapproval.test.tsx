@@ -152,6 +152,24 @@ describe('a reversal left without its voucher (round 4)', () => {
     await waitFor(() => expect(api.reverseJournalEntry).toHaveBeenCalledTimes(2));
   });
 
+  // D113 (1): the mark was only inside the entry's drawer; nobody opening the
+  // list could tell which entry the books still carried.
+  it('the list row itself says Reversal not finished', async () => {
+    api.listJournalEntries.mockResolvedValue({
+      journal_entries: [
+        entry({ status: 'REVERSED', reversed_by: 'JE-9', reversal_unfinished: true }),
+        entry({ je_id: 'JE-2', je_number: 'JE/GEN/2026-27/000002', description: 'Rent for May',
+          status: 'REVERSED', reversed_by: 'JE-8', reversal_unfinished: false }),
+      ],
+      total: 2,
+    });
+    render(<JournalEntriesPanel />);
+    const unfinished = (await screen.findByText('Depreciation for May')).closest('tr') as HTMLElement;
+    expect(unfinished.textContent).toContain('Reversal not finished');
+    const finished = screen.getByText('Rent for May').closest('tr') as HTMLElement;
+    expect(finished.textContent).not.toContain('Reversal not finished');
+  });
+
   it('an accountant is told an admin must finish it', async () => {
     auth.user = { id: 'u-acc', roles: ['ACCOUNTANT'] };
     await open({ status: 'REVERSED', reversed_by: 'JE-9', reversal_unfinished: true });
