@@ -214,10 +214,17 @@ async def cash_reconciliation_summary(
             pending_user_ids.append(closed_by)
         if withheld or s.get("till_link_ok") is False:
             unattributed_ids.add(s.get("session_id"))
-        elif s.get("till_session_id") and counted is not None:
+        elif (
+            s.get("till_session_id")
+            and counted is not None
+            and not s.get("till_counted_earlier")
+        ):
             # Only a close that HOLDS A COUNT (D88). One closed without a
             # count names the drawer too, but it must not stand in for the
             # close that counted it; it keeps adding its own window.
+            # Not a later close on an already counted drawer (D121): it is
+            # never in the totals, so it does not hold the drawer's place
+            # in them either.
             linked_closes.append(
                 (str(closed_at or ""), str(s.get("session_id")), s["till_session_id"])
             )
@@ -469,11 +476,16 @@ async def cash_reconciliation_summary(
                 r.get("session_id") in unattributed_ids
                 and (r.get("store_id"), r.get("session_date")) in counted_days
             )
-            # A D111 session beside its drawer's own Z-Read row (see 2b).
-            or (
-                r.get("counted_earlier_on_till")
-                and r.get("till_session_id") in till_row_ids
-            )
+            # D121: a later Cash Register close on an already counted drawer
+            # is never in the totals -- beside its drawer's Z-Read row (2b),
+            # and also while that drawer's count (made on the Blind EOD
+            # Tally or Day-End) is not locked yet. It used to add until the
+            # lock and leave at it, so a past day's totals changed at the
+            # lock and, before it, called a drawer "balanced" whose first
+            # count was short. The totals read low until the Z-Read locks
+            # (D88(5)); the close is named beside them with its own
+            # difference.
+            or r.get("counted_earlier_on_till")
         )
 
     # Resolve any missing closer names in one batch, then backfill.
