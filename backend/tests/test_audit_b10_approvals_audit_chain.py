@@ -644,6 +644,10 @@ def test_l3_25_admin_approval_settles_a_pair_stranded_before_the_change(db, how)
     assert _request(db, new_id)["status"] == "CONSUMED"
     assert _post(db, s["je_id"])["error"] == "already_posted"
     assert _request(db, s["request_id"]) == s["stored"]
+    # approved once: one approval row, and the approval keeps its own time
+    assert _rows(db, s["je_id"], "je_reapproved") == []
+    assert len(_rows(db, s["je_id"], "je_approved")) == 1
+    assert _je(db, s["je_id"])["checked_at"] == je["checked_at"]
 
 
 @pytest.mark.parametrize("how", _STRANDED)
@@ -730,6 +734,10 @@ def test_d54_a_request_that_lapsed_undecided_is_raised_again_by_a_checker(db):
     assert (new["status"], new["reviewed_by"], new["requested_by"]) == ("APPROVED", "checker", "maker")
     assert _post(db, j["je_id"]).get("ok") is True
     assert _post(db, j["je_id"])["error"] == "already_posted"
+    # approved once: one approval row, and the approval keeps its own time
+    assert _rows(db, j["je_id"], "je_reapproved") == []
+    assert len(_rows(db, j["je_id"], "je_approved")) == 1
+    assert _je(db, j["je_id"])["checked_at"] == je["checked_at"]
 
 
 def test_d54_a_lapsed_request_can_also_be_rejected_by_a_checker(db):
@@ -3268,9 +3276,9 @@ def test_r5_a_request_decision_whose_audit_insert_failed_is_recorded_by_the_next
 
 
 def test_r5_the_request_trail_repair_writes_only_what_is_owed(db, monkeypatch):
-    """What the repair must NOT do: double a row on a healthy path, write
-    'consumed' for a spend that was rolled back, or add a second row beside a
-    previous-version worker's (it leaves no note, and writes its own row)."""
+    """What the repair must NOT do: double a row on a healthy path, or add a
+    second row beside a previous-version worker's (it leaves no note, and
+    writes its own row)."""
     checker = _user(db, "checker", ["ADMIN"])
     eng = _engine(db)
     request_id = _petty_cash_request(db)
@@ -3280,9 +3288,6 @@ def test_r5_the_request_trail_repair_writes_only_what_is_owed(db, monkeypatch):
         return eng.consume_approval(consumed_by="cashier", action_type="petty_cash",
                                     request_id=request_id, amount=amount)
 
-    assert spend(999.0)["error"] == "amount_exceeded"           # rolled back
-    assert eng.get(request_id)["status"] == "APPROVED"
-    assert _request_rows(db, request_id, "consumed") == []
     assert spend(250.0).get("ok") is True
     for _ in range(2):
         eng.get(request_id)
@@ -3459,4 +3464,173 @@ def test_r5_simultaneous_reads_write_an_owed_request_row_once_on_real_mongo(mong
     for t in threads:
         t.join(timeout=60)
     assert [r["user_id"] for r in _request_rows(db, request_id, "approved")] == ["checker"]
+    assert verify_chain(db.get_collection("audit_logs"))["intact"] is True
+
+
+# ===========================================================================
+# Internal review of f2cf0206 (round 6): a journal approved once has one
+# approval row; a spend rolled back for a mismatch is an audited give-back;
+# a request raised again and decided without a checker's role never strands
+# the journal
+# ===========================================================================
+
+
+@pytest.mark.parametrize("then", ["post", "approve", "inbox_sync", "read"])
+@pytest.mark.parametrize("start", ["lapsed_undecided", "stranded"])
+def test_r6_a_journal_approved_once_on_a_request_raised_again_has_one_approval_row(
+        db, monkeypatch, start, then):
+    """A request is raised again for a SUBMITTED journal too (it lapsed
+    undecided, or was decided by someone the journal takes no decision from).
+    That journal's ONE approval is its 'approved' row; the next door then
+    recorded it a second time as 'approved again on request ...' and moved
+    checked_at, because the rule read every raise as owing an approval made
+    again. Only a raise made on an APPROVED journal owes one."""
+    checker = _user(db, "checker", ["ADMIN"])
+    if start == "lapsed_undecided":
+        j = _submitted_journal(db, "maker")
+        db.get_collection("approval_requests").update_one(
+            {"request_id": j["request_id"]}, {"$set": {"expires_at": appr._now() - timedelta(minutes=5)}})
+    else:
+        j = _strand(db, "manager approved")
+    assert _journal_approve(db, j["je_id"]).get("ok") is True
+    approved = _je(db, j["je_id"])
+    new_id = approved["approval_request_id"]
+    assert new_id != j["request_id"] and f"raised_again:{new_id}" in approved["events"]
+
+    if then == "post":
+        code, body = _door(db, monkeypatch, "post", j["je_id"], checker)
+        assert code == 200, body
+    elif then == "approve":
+        _user(db, "boss", ["SUPERADMIN"])
+        res = _journal_approve(db, j["je_id"], "boss", ("SUPERADMIN",))
+        assert (res["http"], res["error"]) == (409, "not_submitted")
+    elif then == "inbox_sync":
+        je_service.sync_with_request(db, _request(db, new_id))
+    else:
+        assert _read_journal(db, monkeypatch, "detail", j["je_id"], checker) == 200
+    je = _je(db, j["je_id"])
+    assert _rows(db, j["je_id"], "je_reapproved") == []          # was a second approval row
+    assert [r["user_id"] for r in _rows(db, j["je_id"], "je_approved")] == ["checker"]
+    assert (je["checker_id"], je["checked_at"]) == ("checker", approved["checked_at"])   # was the door's time
+    assert not [k for k in je["events"] if k.startswith("reapproved:")]
+    assert verify_chain(db.get_collection("audit_logs"))["intact"] is True
+
+
+@pytest.mark.parametrize("between", ["nothing", "a_read", "a_second_spend"])
+@pytest.mark.parametrize("wrong", ["amount", "action_type", "store", "context", "tier"])
+def test_r6_a_spend_rolled_back_for_a_mismatch_is_an_audited_give_back(db, monkeypatch, wrong, between):
+    """A spend that does not match what was approved (amount, action, shop,
+    bill, tier) lands and is rolled back by a second write. A read of the
+    request between the two (the till's waiting panel polls it; a
+    double-submitted spend reads it) wrote the 'consumed' row the first write
+    named; the rollback then wiped the name, so the trail showed a spend with
+    no give-back, and the real spend added a second 'consumed' row: one
+    single-use approval, spent twice on paper. The rollback is recorded as
+    what it is: every interleaving ends with consumed + consume_released,
+    once each, naming the spender and why; the real spend adds its own row."""
+    checker = _user(db, "checker", ["ADMIN"])
+    eng = _engine(db)
+    request_id = _petty_cash_request(db)
+    assert _inbox_approve(db, monkeypatch, request_id, checker)[0] == 200
+    good = {"consumed_by": "cashier", "action_type": "petty_cash", "request_id": request_id,
+            "amount": 250.0}
+    bad, error = {
+        "amount": ({"amount": 999.0}, "amount_exceeded"),
+        "action_type": ({"action_type": "rtv"}, "action_mismatch"),
+        "store": ({"expected_store_id": "S2"}, "store_mismatch"),
+        "context": ({"expected_context": {"order_id": "ORD-other"}}, "context_mismatch"),
+        "tier": ({"min_tier": "super"}, "tier_too_low"),
+    }[wrong]
+
+    real = appr.ApprovalEngine._unconsume
+
+    def _meanwhile(self, *a, **k):
+        if between == "a_read":
+            assert _engine(db).get(request_id)["status"] == "CONSUMED"
+        elif between == "a_second_spend":
+            assert _engine(db).consume_approval(**{**good, **bad})["error"] == "already_consumed"
+        return real(self, *a, **k)
+    monkeypatch.setattr(appr.ApprovalEngine, "_unconsume", _meanwhile)
+    assert eng.consume_approval(**{**good, **bad})["error"] == error
+    monkeypatch.setattr(appr.ApprovalEngine, "_unconsume", real)
+
+    stored = _request(db, request_id)
+    assert (stored["status"], stored["consumed"], stored["consumed_by"]) == ("APPROVED", False, None)
+    for _ in range(2):
+        eng.get(request_id)
+        _inbox_ids(db, monkeypatch, checker, status="ALL")
+        assert [r["user_id"] for r in _request_rows(db, request_id, "consumed")] == ["cashier"]
+        released = _request_rows(db, request_id, "consume_released")    # was none: a spend never given back
+        assert [(r["user_id"], r["reason"]) for r in released] == [("cashier", error)]
+    assert eng.consume_approval(**good).get("ok") is True              # the approval is still good, once
+    assert eng.consume_approval(**good)["error"] == "already_consumed"
+    eng.get(request_id)
+    assert len(_request_rows(db, request_id, "consumed")) == 2
+    assert len(_request_rows(db, request_id, "consume_released")) == 1
+    assert len(_request_rows(db, request_id, "approved")) == 1
+    assert verify_chain(db.get_collection("audit_logs"))["intact"] is True
+
+
+@pytest.mark.parametrize("decided", ["before_post", "during_post"])
+def test_r6_a_request_raised_again_and_decided_without_a_checker_role_never_strands_the_journal(
+        db, monkeypatch, decided):
+    """D54 (A) during a rolling deploy. This version raised the request again
+    for an APPROVED journal; a previous-version worker's inbox approves it and
+    records no reviewed_by_roles, so the journal takes no decision from it.
+    Post spent that approval first and refused afterwards: the approval was
+    burned and bound to this journal's Post, every retry answered 409, and
+    Approve answered not_submitted -- APPROVED for good. Post now refuses
+    BEFORE it spends, the journal says it needs approving again, and the
+    checker's own Approve raises a fresh request; an approval that lands
+    while Post is between its check and its spend is given back."""
+    checker = _user(db, "checker", ["ADMIN"])
+    boss = _user(db, "boss", ["SUPERADMIN"])
+    j = _raised_again(db)
+    requests = db.get_collection("approval_requests")
+
+    def _previous_version_approves():
+        res = _engine(db).approve(j["new_id"], approver_user_id="boss",
+                                  approver_roles=["SUPERADMIN"], pin=PIN)
+        assert res.get("ok") is True, res
+        requests.update_one({"request_id": j["new_id"]}, {"$unset": {"reviewed_by_roles": ""}})
+
+    if decided == "before_post":
+        _previous_version_approves()
+    else:
+        real = appr.ApprovalEngine.consume_approval
+
+        def _decided_first(self, **k):
+            monkeypatch.setattr(appr.ApprovalEngine, "consume_approval", real)
+            _previous_version_approves()
+            return real(self, **k)
+        monkeypatch.setattr(appr.ApprovalEngine, "consume_approval", _decided_first)
+
+    for _ in range(2):
+        code, body = _door(db, monkeypatch, "post", j["je_id"], checker)
+        assert (code, body["error"]) == (409, "not_approved"), body
+        req = _request(db, j["new_id"])
+        assert (req["status"], req["consumed"]) == ("APPROVED", False)   # was CONSUMED, bound to Post
+    assert _je(db, j["je_id"])["status"] == "APPROVED"
+    spent = len(_request_rows(db, j["new_id"], "consumed"))
+    assert spent == len(_request_rows(db, j["new_id"], "consume_released")) == (
+        0 if decided == "before_post" else 1)
+    assert _list_flag(db, monkeypatch, j["je_id"], checker) is True      # was False: no way forward offered
+
+    res = _journal_approve(db, j["je_id"], "maker")
+    assert (res["http"], res["error"]) == (403, "cannot_approve_own")
+    code, body = _door(db, monkeypatch, "approve", j["je_id"], boss)
+    assert code == 200, body                                              # was 409 not_submitted, for good
+    je = _je(db, j["je_id"])
+    fresh = je["approval_request_id"]
+    assert fresh != j["new_id"] and (je["status"], je["checker_id"]) == ("APPROVED", "boss")
+    assert [r["user_id"] for r in _rows(db, j["je_id"], "je_reapproved")] == ["boss"]
+    assert _list_flag(db, monkeypatch, j["je_id"], checker) is False
+    code, body = _door(db, monkeypatch, "post", j["je_id"], checker)
+    assert code == 200, body
+    assert (_je(db, j["je_id"])["status"], _request(db, fresh)["status"]) == ("POSTED", "CONSUMED")
+    assert _request(db, j["new_id"])["status"] == "APPROVED"            # left as it was decided
+    code, body = _door(db, monkeypatch, "post", j["je_id"], checker)
+    assert (code, body["error"]) == (409, "already_posted")
+    assert len(_rows(db, j["je_id"], "je_reapproved")) == 1
+    assert len(_posted_rows(db, j["je_id"])) == 1
     assert verify_chain(db.get_collection("audit_logs"))["intact"] is True
