@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisco
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timedelta
+from api.utils.event_time import utc_now_naive
 from enum import Enum
 import uuid
 import json
@@ -2870,7 +2871,7 @@ async def execute_jarvis_command(
     return {
         "command": command.command,
         "result": result,
-        "executed_at": datetime.now().isoformat(),
+        "executed_at": utc_now_naive().isoformat(),
     }
 
 
@@ -2885,7 +2886,7 @@ async def get_jarvis_dashboard(current_user: dict = Depends(require_superadmin))
         "staff": jarvis_instance.analytics.get_staff_insights(),
         "predictions": jarvis_instance.analytics.get_predictions(),
         "recommendations": jarvis_instance.analytics.get_recommendations(),
-        "generated_at": datetime.now().isoformat(),
+        "generated_at": utc_now_naive().isoformat(),
     }
 
 

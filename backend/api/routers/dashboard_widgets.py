@@ -13,6 +13,7 @@ domain router's /{id} catch-all could shadow them.
 from fastapi import APIRouter, Depends, Query
 from typing import Optional, Dict, Any, List
 from datetime import datetime
+from api.utils.event_time import utc_now_naive
 
 from ..utils.ist import ist_day_start_utc, ist_today, now_ist
 from ..services.online_order_status import BOOKED_STATUSES
@@ -534,7 +535,7 @@ async def admin_system_health(
 ):
     from database.connection import get_db
 
-    status = {"api": "healthy", "checked_at": datetime.now().isoformat()}
+    status = {"api": "healthy", "checked_at": utc_now_naive().isoformat()}
     try:
         db = get_db()
         status["database"] = "connected" if (db and db.is_connected) else "disconnected"

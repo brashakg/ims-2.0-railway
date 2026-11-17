@@ -231,7 +231,7 @@ def test_two_identical_receipts_at_once_leave_no_gap(monkeypatch):
 # Verifier round 3: a worker that dies between the insert and the number.
 # ---------------------------------------------------------------------------
 
-from datetime import datetime, timedelta  # noqa: E402
+from datetime import datetime, timedelta, timezone  # noqa: E402
 
 import mongomock  # noqa: E402
 
@@ -243,7 +243,7 @@ def _stranded(db, grn_id, minutes_ago, **extra):
     db.grns.insert_one({
         "grn_id": grn_id, "grn_number": f"PENDING/{grn_id}", "store_id": "BV-TEST-01",
         "status": "PENDING", "grn_subtype": "STANDARD",
-        "created_at": datetime.now() - timedelta(minutes=minutes_ago), **extra,
+        "created_at": datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=minutes_ago), **extra,
     })
 
 
@@ -274,7 +274,7 @@ def test_a_stranded_receipt_is_numbered_once_even_by_two_creates(monkeypatch):
     worker's, and is taken over."""
     db = mongomock.MongoClient().db
     minted = _counting_minter(monkeypatch)
-    now = datetime.now()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     _stranded(db, "G-HELD", 5, numbering_claim="other", numbering_claimed_at=now)
     _stranded(db, "G-ORPHAN", 5, numbering_claim="dead", numbering_claimed_at=now - timedelta(minutes=5))
 
@@ -409,7 +409,7 @@ def _stalled_repo(db, stall):
 
 
 def _a_minute_passes(db, grn_id, **extra):
-    old = datetime.now() - timedelta(minutes=5)
+    old = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=5)
     db.grns.update_one({"grn_id": grn_id}, {"$set": {"created_at": old, **extra}})
 
 
@@ -451,7 +451,7 @@ def test_a_create_whose_claim_is_taken_over_never_overwrites_the_number(monkeypa
         calls.append(store_id)
         if len(calls) == 1:  # the live request, stalled after its claim
             (row,) = list(db.grns.find())
-            _a_minute_passes(db, row["grn_id"], numbering_claimed_at=datetime.now() - timedelta(minutes=5))
+            _a_minute_passes(db, row["grn_id"], numbering_claimed_at=datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=5))
             _number_stranded_receipts(GRNRepository(db.grns))
         return f"RCPT/{store_id}/26-27/{next(seq):04d}"
 

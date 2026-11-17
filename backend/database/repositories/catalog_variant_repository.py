@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional
 from datetime import datetime
+from api.utils.event_time import utc_now_naive
 import logging
 import uuid
 
@@ -125,7 +126,7 @@ class CatalogVariantRepository(BaseRepository):
 
         variant = _drop_invalid_gtin(variant)
         sku = variant["sku"]
-        now = datetime.now()
+        now = utc_now_naive()
         existing = self.find_one({"sku": sku})
 
         if existing is not None:

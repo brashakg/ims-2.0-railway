@@ -111,6 +111,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime, timezone
+from api.utils.event_time import utc_now_naive
 from typing import Any, Dict, Optional, Tuple
 
 from .phone import normalize_indian_mobile
@@ -328,7 +329,7 @@ def make_patient_row(
         "dob": _iso(dob),
         "anniversary": _iso(anniversary),
         "relation": (str(relation).strip() if relation else "") or DEFAULT_RELATION,
-        "created_at": datetime.now(),
+        "created_at": utc_now_naive(),
     }
     if is_primary:
         row["is_primary"] = True

@@ -472,8 +472,10 @@ def test_a_pointer_already_stamped_is_not_a_failed_handoff(rig, monkeypatch):
     db = rig["db"]
     _bill(db, "ORD", status="CONFIRMED")
     seen_before_the_pointer = db.orders.find_one({"order_id": "ORD"})
-    monkeypatch.setattr("database.repositories.base_repository.datetime", Frozen)
+    # BaseRepository stamps updated_at through the shared UTC helper (RUN-02).
+    monkeypatch.setattr("api.utils.event_time.datetime", Frozen)
     first = ensure_workshop_job(seen_before_the_pointer, "U1", rig["jobs"], rig["orders"])
+    time.sleep(0.005)  # a real clock would move on here; only the frozen one must not
     assert rig["orders"].update("ORD", {"workshop_job_id": first,
                                         "workshop_job_number": _jobs(db, "ORD")[0]["job_number"]}) is False
     assert ensure_workshop_job(seen_before_the_pointer, "U1", rig["jobs"], rig["orders"]) == first

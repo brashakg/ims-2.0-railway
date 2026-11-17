@@ -854,7 +854,11 @@ def test_a_spine_gtin_write_that_changes_nothing_is_no_failure(gtin_env, monkeyp
         def now(cls, tz=None):
             return datetime(2026, 10, 1, 12, 0, 0)
 
+    import api.utils.event_time as event_time
+
     monkeypatch.setattr(base_repo, "datetime", _SameMs)
+    # RUN-02: repositories stamp through the shared UTC helper.
+    monkeypatch.setattr(event_time, "datetime", _SameMs)
     _put("twin-g1", {"attributes": {"gtin": _GTIN}})
     gtin_env.collection.update_one({"product_id": "spine-g1"}, {"$set": {"barcode": _UPC}})
     _put("twin-g1", {"attributes": {"gtin": _GTIN}, "pricing": {"mrp": 5020.0}})

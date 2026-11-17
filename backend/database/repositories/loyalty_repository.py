@@ -12,6 +12,7 @@ Fail-soft: every helper returns a sensible default on any DB error so a
 loyalty failure can NEVER block POS.
 """
 from datetime import datetime
+from api.utils.event_time import utc_now_naive
 from typing import Any, Dict, List, Optional
 
 from .base_repository import BaseRepository
@@ -38,7 +39,7 @@ class LoyaltyAccountRepository(BaseRepository):
         existing = self.find_by_id(customer_id)
         if existing is not None:
             return existing
-        now = datetime.now()
+        now = utc_now_naive()
         seed = {
             "customer_id": customer_id,
             "_id": customer_id,
@@ -81,8 +82,8 @@ class LoyaltyAccountRepository(BaseRepository):
                 inc["lifetime_redeemed"] = int(delta_lifetime_redeemed)
 
             set_block: Dict[str, Any] = {
-                "last_activity_at": datetime.now(),
-                "updated_at": datetime.now(),
+                "last_activity_at": utc_now_naive(),
+                "updated_at": utc_now_naive(),
             }
             if new_tier:
                 set_block["tier"] = new_tier
@@ -97,6 +98,49 @@ class LoyaltyAccountRepository(BaseRepository):
             return self.find_by_id(customer_id)
         except Exception:
             return self.find_by_id(customer_id)
+
+    @staticmethod
+    def _expiry_key(lot_id: str) -> str:
+        return f"loyalty-expire:{lot_id}"
+
+    def expiry_debited_points(self, customer_id: str, lot_id: str) -> Optional[int]:
+        """Points this lot's expiry has ALREADY taken off the balance, or None.
+
+        The marker is written in the same guarded write as the debit
+        (money_guard idempotency key), so it is the one durable record that the
+        debit landed -- whatever happened to the reply. RAISES on a read
+        failure: a failed read must never look like "not debited yet".
+        """
+        doc = self.collection.find_one({"customer_id": customer_id}) or {}
+        key = self._expiry_key(lot_id)
+        for entry in doc.get("money_ledger") or []:
+            if entry.get("idempotency_key") == key:
+                return abs(int(entry.get("delta") or 0))
+        return None
+
+    def debit_for_expiry(
+        self, customer_id: str, lot_id: str, points: int, actor: Optional[str] = None
+    ) -> None:
+        """Take an expired lot's unspent points off the balance, once per lot.
+
+        Keyed on the lot, so a retry, a lost reply or a second sweep running at
+        the same moment cannot debit twice; guarded on the balance, so points
+        being redeemed right now are never expired underneath the customer.
+        Returns nothing on purpose: the caller reads expiry_debited_points --
+        the stored marker, not this call's reply, says whether it landed.
+        """
+        # ponytail: one small marker per expired lot stays on the account
+        # document (money_ledger); archive old markers if a customer ever
+        # accumulates thousands of expired lots.
+        from api.services import money_guard
+
+        now = utc_now_naive()
+        money_guard.debit(
+            self.collection, "LOYALTY", customer_id, int(points),
+            reason="expire", ref=lot_id, actor=actor,
+            idempotency_key=self._expiry_key(lot_id),
+            set_extra={"last_activity_at": now, "updated_at": now},
+        )
 
     def try_debit(
         self,
@@ -140,8 +184,8 @@ class LoyaltyAccountRepository(BaseRepository):
             inc_extra["lifetime_earned"] = int(delta_lifetime_earned)
 
         set_extra: Dict[str, Any] = {
-            "last_activity_at": datetime.now(),
-            "updated_at": datetime.now(),
+            "last_activity_at": utc_now_naive(),
+            "updated_at": utc_now_naive(),
         }
         if new_tier:
             set_extra["tier"] = new_tier
@@ -258,29 +302,47 @@ class LoyaltyTransactionRepository(BaseRepository):
             return None
 
     def find_expired_unprocessed(self, now: datetime) -> List[Dict[str, Any]]:
-        """All EARN rows whose expires_at <= now AND that haven't already
-        been swept (we mark with `expired: True` on the EARN row after
-        writing the offsetting EXPIRE row).
+        """All EARN rows whose expires_at <= now AND that are not yet marked
+        ``expired`` (the mark is the LAST step of a lot's expiry).
+
+        RAISES on a read failure: the sweep must not report "nothing to
+        expire" when it could not read the list.
+        """
+        return list(self.collection.find({
+            "type": "EARN",
+            "expires_at": {"$lte": now, "$ne": None},
+            "expired": {"$ne": True},
+        }))
+
+    def ledger_for_expiry(self, customer_id: str) -> List[Dict[str, Any]]:
+        """The customer's WHOLE ledger for the expiry maths. RAISES on a read
+        failure -- find_for_customer answers [] there, and an empty ledger
+        reads as "this lot has nothing left to expire"."""
+        return list(self.collection.find({"customer_id": customer_id}))
+
+    def mark_expired(self, txn_id: str, run_id: Optional[str] = None) -> bool:
+        """Mark an EARN lot as finished and CONFIRM it from the stored row.
+
+        True  = this run (run_id) marked it.
+        False = it was already marked by another run.
+        RAISES when the stored row does not show the mark (the lot stays due,
+        so a later sweep picks it up again).
         """
         try:
-            cursor = self.collection.find({
-                "type": "EARN",
-                "expires_at": {"$lte": now, "$ne": None},
-                "expired": {"$ne": True},
-            })
-            return list(cursor)
-        except Exception:
-            return []
-
-    def mark_expired(self, txn_id: str) -> bool:
-        try:
             self.collection.update_one(
-                {"txn_id": txn_id},
-                {"$set": {"expired": True, "expired_at": datetime.now()}},
+                {"txn_id": txn_id, "expired": {"$ne": True}},
+                {"$set": {
+                    "expired": True,
+                    "expired_at": utc_now_naive(),
+                    "expired_run": run_id,
+                }},
             )
-            return True
-        except Exception:
-            return False
+        except Exception:  # noqa: BLE001
+            pass  # a lost reply still counts: the read-back below decides
+        doc = self.collection.find_one({"txn_id": txn_id}) or {}
+        if not doc.get("expired"):
+            raise RuntimeError(f"expiry mark not confirmed for {txn_id}")
+        return doc.get("expired_run") == run_id
 
 
 # ============================================================================
@@ -407,7 +469,7 @@ class LoyaltySettingsRepository(BaseRepository):
                     merged["category_multipliers"]
                 )
             merged["_id"] = self.SINGLETON_ID
-            merged["updated_at"] = datetime.now()
+            merged["updated_at"] = utc_now_naive()
             # upsert
             self.collection.update_one(
                 {"_id": self.SINGLETON_ID},

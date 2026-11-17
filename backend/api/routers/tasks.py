@@ -12,6 +12,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import AliasChoices, BaseModel, Field, model_validator
 from typing import Optional, List, Dict
 from datetime import datetime, timedelta
+from api.utils.event_time import parse_event_utc_naive, utc_now_naive
 import uuid
 
 from .auth import get_current_user, require_roles
@@ -256,8 +257,10 @@ class TaskCreate(BaseModel):
         # 5-minute grace covers minor clock drift and quick unit-test runs.
         due = self.due_at or self.due_date
         if due is not None:
-            due_naive = due.replace(tzinfo=None) if due.tzinfo else due
-            if due_naive < datetime.now() - timedelta(minutes=5):
+            # RUN-02: compare instants, not an aware UTC value stripped to
+            # wall-clock digits against the host's local clock.
+            due_naive = parse_event_utc_naive(due)
+            if due_naive is not None and due_naive < utc_now_naive() - timedelta(minutes=5):
                 raise ValueError(
                     "due_at must not be in the past. "
                     "Use a future date/time for the task deadline."
@@ -552,7 +555,7 @@ async def create_task(
     due_at = task.due_at or task.due_date
     if due_at is None:
         raise HTTPException(status_code=422, detail="due_at (or due_date) is required")
-    now = datetime.now()
+    now = utc_now_naive()
 
     # Optional attachment: validate the referenced file actually exists in the
     # store BEFORE persisting (a forged/missing id -> 400, not a later 404 at
@@ -877,7 +880,7 @@ async def update_task(
                 "from": current_status,
                 "to": new_status,
                 "by": current_user.get("user_id"),
-                "at": datetime.now(),
+                "at": utc_now_naive(),
             }
         ]
     if update.notes:
@@ -890,7 +893,7 @@ async def update_task(
             update_data["due_date"] = update.due_at
         update_data["history"] = update_data.get("history", existing.get("history") or []) + [{
             "action": "due_date_change", "from": existing.get("due_at") or existing.get("due_date"),
-            "to": update.due_at, "by": current_user.get("user_id"), "at": datetime.now(),
+            "to": update.due_at, "by": current_user.get("user_id"), "at": utc_now_naive(),
         }]
     if update.attachment_file_id is not None:
         fid = str(update.attachment_file_id).strip()
@@ -906,7 +909,7 @@ async def update_task(
             update_data["attachment"] = None
 
     if update_data:
-        update_data["updated_at"] = datetime.now()
+        update_data["updated_at"] = utc_now_naive()
         if repo.update(task_id, update_data):
             if update_data.get("status") == "CANCELLED":
                 # A catalogue-flag task: cancelling it withdraws its open flags
@@ -944,7 +947,7 @@ async def complete_task(
             detail=f"Task is already in '{current_status}' status and cannot be completed.",
         )
 
-    now = datetime.now()
+    now = utc_now_naive()
     result = repo.update(
         task_id,
         {
@@ -1075,7 +1078,7 @@ async def auto_generate_daily_tasks(
         except Exception:
             templates = []
 
-    now = datetime.now()
+    now = utc_now_naive()
     generated_count = 0
     unassigned: list = []
 
@@ -1272,7 +1275,7 @@ async def acknowledge_task(
             "message": "Task already acknowledged",
         }
 
-    now = datetime.now()
+    now = utc_now_naive()
     if repo.update(
         task_id,
         {
@@ -1341,7 +1344,7 @@ async def escalate_task(
             "message": "Task already at the top of the escalation ladder",
         }
 
-    now = datetime.now()
+    now = utc_now_naive()
     by = current_user.get("user_id")
 
     if escalate_to:
@@ -1490,7 +1493,7 @@ async def auto_escalate_overdue_tasks(
     # Only the tasks the caller can see: a press from the floor must not
     # escalate (and reassign) a colleague's task it may not even open.
     filters = visible(build_escalation_candidate_filter(active_store), current_user)
-    now = datetime.now()
+    now = utc_now_naive()
     sla_cfg = _load_sla_config()
 
     # Pass 1 -- READ-ONLY. Page through the WHOLE candidate set (most-overdue
@@ -1574,7 +1577,7 @@ async def scan_payment_variance(
 
     active_store = store_in_view(store_id, current_user, one_shop=True)
     # BUG-031 dual window. `orders.created_at` is a BSON Date on every live
-    # write path (BaseRepository._add_timestamps stamps datetime.now();
+    # write path (BaseRepository._add_timestamps stamps utc_now_naive();
     # shopify_ingest persists naive-UTC datetimes), and Mongo type-bracketing
     # means a STRING $gte bound NEVER compares against a Date field -- so the
     # ISO-string cutoff this used matched ZERO orders and the whole
@@ -1582,7 +1585,7 @@ async def scan_payment_variance(
     # found". Match BOTH a datetime window (today's Date-typed rows) AND a
     # string window (any legacy ISO-string created_at, e.g. migrated rows) via
     # $or, mirroring finance._cash_sales_for_window.
-    cutoff_dt = datetime.now() - timedelta(days=days)
+    cutoff_dt = utc_now_naive() - timedelta(days=days)
     cutoff_iso = cutoff_dt.isoformat()
     filters: dict = {
         "$or": [
@@ -1639,7 +1642,7 @@ async def list_fake_closures(
         return {"flagged": [], "count": 0}
 
     active_store = store_in_view(store_id, current_user)
-    cutoff = datetime.now() - timedelta(days=days)
+    cutoff = utc_now_naive() - timedelta(days=days)
     filters: dict = {
         "status": {
             "$in": [
@@ -1693,7 +1696,7 @@ async def list_silent_tasks(
     except Exception:  # noqa: BLE001
         candidates = []
 
-    silent = silent_tasks(candidates, now=datetime.now(), sla_config=_load_sla_config())
+    silent = silent_tasks(candidates, now=utc_now_naive(), sla_config=_load_sla_config())
     return {"silent": [_canon_task_out(t) for t in silent], "count": len(silent)}
 
 
@@ -1779,7 +1782,7 @@ async def update_sla_config(
     col = _sla_config_collection()
     if col is None:
         raise HTTPException(status_code=503, detail="DB unavailable")
-    now = datetime.now()
+    now = utc_now_naive()
     col.update_one(
         {"config_id": "global"},
         {
@@ -2015,7 +2018,7 @@ async def create_sop_template(
     store = store_in_view(payload.store_id, current_user, writing=True)
     _sop_people(payload.assigned_users, {"store_id": store})
 
-    now = datetime.now()
+    now = utc_now_naive()
     template_id = f"SOP-{uuid.uuid4().hex[:8].upper()}"
     doc = {
         "template_id": template_id,
@@ -2085,7 +2088,7 @@ async def update_sop_template(
             s.model_dump() if hasattr(s, "model_dump") else s
             for s in update_data["steps"]
         ]
-    update_data["updated_at"] = datetime.now()
+    update_data["updated_at"] = utc_now_naive()
     update_data["updated_by"] = current_user.get("user_id")
 
     result = col.update_one({"template_id": template_id}, {"$set": update_data})
@@ -2117,7 +2120,7 @@ async def delete_sop_template(
         {
             "$set": {
                 "is_active": False,
-                "archived_at": datetime.now(),
+                "archived_at": utc_now_naive(),
                 "archived_by": current_user.get("user_id"),
             }
         },
@@ -2150,7 +2153,7 @@ async def assign_sop(
     _sop_people(payload.assigned_users, tpl)
 
     update: dict = {
-        "updated_at": datetime.now(),
+        "updated_at": utc_now_naive(),
         "updated_by": current_user.get("user_id"),
     }
     if payload.assigned_roles is not None:
@@ -2248,7 +2251,7 @@ async def toggle_sop_checklist_item(
     # IST audit: same IST day key as the GET above -- a tick at 23:30 IST must
     # land on TODAY's completion doc, not yesterday's (UTC) one.
     day = payload.date or ist_today().isoformat()
-    now = datetime.now()
+    now = utc_now_naive()
     steps = tpl.get("steps") or []
 
     # Validate that the requested step_number actually exists in this template.
@@ -2379,7 +2382,7 @@ async def start_task(
             status_code=400,
             detail=f"Cannot start a task in '{existing}' status.",
         )
-    now = datetime.now()
+    now = utc_now_naive()
     repo.update(
         task_id,
         {
@@ -2416,13 +2419,13 @@ async def reassign_task(
         "to": body.assigned_to,
         "reason": body.reason,
         "by": current_user.get("user_id"),
-        "at": datetime.now(),
+        "at": utc_now_naive(),
     }
     repo.update(
         task_id,
         {
             "assigned_to": body.assigned_to,
-            "reassigned_at": datetime.now(),
+            "reassigned_at": utc_now_naive(),
             "reassigned_by": current_user.get("user_id"),
             "history": (task.get("history") or []) + [history_entry],
         },

@@ -6,6 +6,7 @@ User data access operations
 import logging
 from typing import List, Optional, Dict
 from datetime import datetime
+from api.utils.event_time import utc_now_naive
 from .base_repository import BaseRepository
 
 _log = logging.getLogger(__name__)
@@ -80,13 +81,13 @@ class UserRepository(BaseRepository):
     
     def update_last_login(self, user_id: str) -> bool:
         """Update last login timestamp"""
-        return self.update(user_id, {"last_login": datetime.now()})
+        return self.update(user_id, {"last_login": utc_now_naive()})
     
     def update_password(self, user_id: str, password_hash: str) -> bool:
         """Update user password"""
         return self.update(user_id, {
             "password_hash": password_hash,
-            "password_changed_at": datetime.now()
+            "password_changed_at": utc_now_naive()
         })
     
     # =========================================================================

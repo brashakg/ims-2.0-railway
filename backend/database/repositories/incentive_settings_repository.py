@@ -9,6 +9,7 @@ in the next phase).
 from __future__ import annotations
 
 from datetime import datetime
+from api.utils.event_time import utc_now_naive
 from typing import Dict, Optional
 
 from .base_repository import BaseRepository
@@ -84,7 +85,7 @@ class IncentiveSettingsRepository(BaseRepository):
         points_log rows — historical rows keep their snapshot, so this
         write doesn't mutate past computations."""
         existing = self.collection.find_one({"store_id": store_id})
-        now = datetime.now()
+        now = utc_now_naive()
         if existing:
             self.collection.update_one(
                 {"store_id": store_id},
@@ -134,7 +135,7 @@ class IncentiveSettingsRepository(BaseRepository):
         """Upsert calculator-input keys at a given scope (global / entity /
         store). `scope_key` is the store_id (store scope) or the sentinel
         for global / entity. Stamps `scope` + `entity_id` provenance."""
-        now = datetime.now()
+        now = utc_now_naive()
         set_doc = {
             **patch,
             "scope": scope,
@@ -169,7 +170,7 @@ class IncentiveSettingsRepository(BaseRepository):
         updated_by: str,
     ) -> Dict:
         """Toggle / re-tune the visufit gate."""
-        patch: Dict = {"updated_at": datetime.now(), "updated_by": updated_by}
+        patch: Dict = {"updated_at": utc_now_naive(), "updated_by": updated_by}
         if threshold is not None:
             patch["visufit_gate_threshold"] = threshold
         if enabled is not None:

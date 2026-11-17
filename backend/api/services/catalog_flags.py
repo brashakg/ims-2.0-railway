@@ -29,6 +29,7 @@ import logging
 import uuid
 from collections import OrderedDict
 from datetime import datetime, timezone
+from api.utils.event_time import utc_now_naive
 from typing import Any, Dict, List, Optional
 
 from .cache import invalidate_product_lists
@@ -309,7 +310,7 @@ def _complete_task(task_id: str, actor: Dict[str, Any], note: str) -> None:
     task = repo.find_by_id(task_id) if repo is not None else None
     if not task or str(task.get("status", "")).upper() in ("COMPLETED", "CANCELLED"):
         return
-    now = datetime.now()
+    now = utc_now_naive()
     repo.update(
         task_id,
         {

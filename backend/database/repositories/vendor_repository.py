@@ -5,6 +5,7 @@ Vendor, PO, and GRN data access operations
 """
 from typing import List, Optional, Dict
 from datetime import datetime, date, timedelta
+from api.utils.event_time import utc_now_naive
 from .base_repository import BaseRepository
 
 
@@ -132,7 +133,7 @@ class GRNRepository(BaseRepository):
         return self.update(grn_id, {
             "status": "ACCEPTED",
             "accepted_by": accepted_by,
-            "accepted_at": datetime.now()
+            "accepted_at": utc_now_naive()
         })
     
     def escalate_mismatch(self, grn_id: str, note: str) -> bool:

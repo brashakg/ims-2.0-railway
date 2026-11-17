@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional
 from datetime import datetime
+from api.utils.event_time import utc_now_naive
 import uuid
 
 from .base_repository import BaseRepository
@@ -172,7 +173,7 @@ class EcomCollectionRepository(BaseRepository):
         coll = self.find_one({self.id_field: collection_id})
         if coll is None:
             return None
-        now = datetime.now()
+        now = utc_now_naive()
         patch: Dict = {"online_sync_blocked": bool(blocked)}
         if blocked:
             patch["online_sync_blocked_by"] = user_id
@@ -280,7 +281,7 @@ class EcomCollectionRepository(BaseRepository):
                         "products_count": len(products),
                         "locally_modified": True,
                         "edit_rev": new_edit_rev(),
-                        "updated_at": datetime.now(),
+                        "updated_at": utc_now_naive(),
                     }
                 },
             )

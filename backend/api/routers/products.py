@@ -4,7 +4,7 @@ IMS 2.0 - Products Router
 Product catalog management endpoints
 """
 
-from api.utils.event_time import utc_now_iso
+from api.utils.event_time import utc_now_iso, utc_now_naive
 
 import io
 from fastapi import APIRouter, HTTPException, Depends, Query, Request, UploadFile, File
@@ -12,6 +12,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 from typing import Any, Dict, List, Optional, Tuple, Union
 from datetime import datetime, timedelta
+from api.utils.event_time import utc_now_naive
 import logging
 import hashlib
 import json
@@ -2969,7 +2970,7 @@ async def cataloguing_scorecard(
     field-blind baseline rows, which are no longer read -- those early edits
     are invisible to this metric (acceptable: the door was hours old).
     """
-    now = datetime.now()
+    now = utc_now_naive()
     cutoff = now - timedelta(days=days)
     db = _scorecard_db()
     if db is None:
@@ -3213,7 +3214,7 @@ async def generate_qc_samples(
     if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
-    now = datetime.now()
+    now = utc_now_naive()
     cutoff = now - timedelta(days=body.days)
     try:
         pool_docs = list(
@@ -3475,7 +3476,7 @@ async def qc_sample_verdict(
         }
         update["overwritten_by"] = current_user.get("user_id")
         update["overwritten_by_name"] = current_user.get("username")
-        update["overwritten_at"] = datetime.now()
+        update["overwritten_at"] = utc_now_naive()
 
     update.update(
         {
@@ -3485,7 +3486,7 @@ async def qc_sample_verdict(
             "note": body.note,
             "reviewed_by": current_user.get("user_id"),
             "reviewed_by_name": current_user.get("username"),
-            "reviewed_at": datetime.now(),
+            "reviewed_at": utc_now_naive(),
             "status": "REVIEWED",
         }
     )
@@ -4233,7 +4234,7 @@ async def update_product(
                                 "user_id": current_user.get("user_id"),
                                 "entity_type": "product",
                                 "entity_id": product_id,
-                                "timestamp": datetime.now(),
+                                "timestamp": utc_now_naive(),
                                 "ts": utc_now_iso(),
                                 "source": "spine_put",
                                 "before": _before,

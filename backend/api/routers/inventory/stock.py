@@ -32,6 +32,7 @@ from ...services.gtin import fold_barcode_spellings
 from ...services.product_master import main_photo
 from ...services.item_events import on_hand_match
 from ...utils.ist import ist_date_str_from_stored
+from ...utils.event_time import utc_now_naive
 from .helpers import (
     _get_db,
 )
@@ -201,7 +202,7 @@ def _last_grn_by_product(store_id: Optional[str]) -> Dict[str, Dict]:
         # matches a Date, so this join returned NOTHING and the "+N via GRN-xxx"
         # source chip never appeared on the stock ledger. `cutoff` is pure
         # elapsed time in the stored naive-UTC frame, so it needs no IST shift.
-        cutoff = datetime.now() - timedelta(days=30)
+        cutoff = utc_now_naive() - timedelta(days=30)
         cur = (
             db.get_collection("grns")
             .find(

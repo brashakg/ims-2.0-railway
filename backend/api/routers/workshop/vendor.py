@@ -10,6 +10,7 @@ from api.utils.event_time import utc_event_iso, utc_now
 
 from fastapi import HTTPException, Depends
 from datetime import datetime
+from api.utils.event_time import utc_now_naive
 from ..auth import get_current_user, require_roles
 from ...dependencies import (
     get_workshop_repository,
@@ -82,7 +83,7 @@ async def patch_job_vendor(
             update["vendor_name"] = vendor.get("trade_name") or vendor.get("legal_name")
 
     update["vendor_updated_by"] = current_user.get("user_id")
-    update["vendor_updated_at"] = datetime.now()
+    update["vendor_updated_at"] = utc_now_naive()
 
     if not repo.update(job_id, update):
         raise HTTPException(status_code=500, detail="Failed to update vendor fields")

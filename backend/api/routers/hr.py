@@ -13,6 +13,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Optional, List
 from datetime import date, datetime
+from api.utils.event_time import utc_now_naive
 from ..utils.ist import now_ist, ist_today, now_ist_naive
 from calendar import monthrange
 import uuid
@@ -2582,7 +2583,7 @@ async def upload_employee_document(
             {"user_id": employee_id},
             {
                 "$push": {"documents": doc_record},
-                "$set": {"updated_at": datetime.now()},
+                "$set": {"updated_at": utc_now_naive()},
             },
         )
         if result.matched_count == 0:
@@ -2723,7 +2724,7 @@ async def delete_employee_document(
         {"user_id": employee_id},
         {
             "$pull": {"documents": {"doc_id": doc_id}},
-            "$set": {"updated_at": datetime.now()},
+            "$set": {"updated_at": utc_now_naive()},
         },
     )
 

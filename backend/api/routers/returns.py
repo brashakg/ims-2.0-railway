@@ -31,6 +31,7 @@ from api.utils.event_time import utc_now_iso
 import logging
 import uuid
 from datetime import datetime, timezone
+from api.utils.event_time import utc_now_naive
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Path, Query
@@ -2528,7 +2529,7 @@ def _flip_sold_unit(
         return True
     try:
         return coll.update_one({id_field: sid, "status": "SOLD"},
-                               {"$set": {**fields, "updated_at": datetime.now()}}).matched_count > 0
+                               {"$set": {**fields, "updated_at": utc_now_naive()}}).matched_count > 0
     except Exception:  # noqa: BLE001
         # ponytail: a read-back that also fails leaves it open (a second unit
         # is possible only on two misses in a row).
