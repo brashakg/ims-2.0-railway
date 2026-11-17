@@ -5316,8 +5316,9 @@ def _stock_lines(items: Any) -> List[Dict[str, Any]]:
 
 # Closing a blocked-restock task by hand (D122(5), D109(3)): what its 409 / 503 say.
 TASK_UNITS_STILL_OUT_MESSAGE = ("This return's units are still NOT back in stock, so this task stays open and has "
-                                "changed (open it again to read it). Press 'Update stock' on the return: IMS puts "
-                                "each unit back once and closes this task. Do not add them by hand.")
+                                "changed (open it again to read it). Use the button it names - 'Update stock' on "
+                                "the return, or 'Retry stock step' in Needs completing: IMS puts each unit back "
+                                "once and closes this task. Do not add them by hand.")
 CLOSE_NOT_RECORDED_MESSAGE = "The return could not be updated just now - the task stays open. Try again."
 
 
