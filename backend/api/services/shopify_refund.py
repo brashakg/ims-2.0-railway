@@ -3191,7 +3191,7 @@ def stock_in_task_id(refund_id: str, owner: str) -> str:
     booking raise it under the same id, so the database keeps one."""
     import hashlib
 
-    return "TSK-HSI-" + hashlib.sha1(f"{refund_id}:{owner}".encode()).hexdigest()[:16].upper()
+    return "TSK-HSI-" + hashlib.sha256(f"{refund_id}:{owner}".encode()).hexdigest()[:16].upper()
 
 
 def task_on(tasks: Any, source_ref: str) -> Optional[Dict[str, Any]]:

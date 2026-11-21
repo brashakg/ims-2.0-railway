@@ -2274,7 +2274,7 @@ def stock_task_id(return_id: str) -> str:
     record (D130(2)): two sweeps raising it at one moment leave one row."""
     import hashlib
 
-    return "TSK-RSB-" + hashlib.sha1(str(return_id).encode()).hexdigest()[:16].upper()
+    return "TSK-RSB-" + hashlib.sha256(str(return_id).encode()).hexdigest()[:16].upper()
 
 
 def _keep_stock_task_open(coll: Any, doc: Dict[str, Any], step: Dict[str, Any]) -> bool:
