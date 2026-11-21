@@ -1705,19 +1705,28 @@ def test_r2_b_a_retry_with_its_request_id_saves_one_statement(monkeypatch):
     first = _upload(d, monkeypatch, request_id="REQ-1")  # landed, reply lost: read back
     again = _upload(d, monkeypatch, request_id="REQ-1")
     assert seen and again == first and d.bank_statements.count_documents({}) == 1
-    for changed in ({"amount": 250}, {"account_name": "Other"}, {"store_id": "S2"}):
+    for changed in ({"amount": 250}, {"account_name": "Other"}):
         with pytest.raises(HTTPException) as err:
             _upload(d, monkeypatch, request_id="REQ-1", **changed)
         assert err.value.status_code == 409, changed
     assert d.bank_statements.count_documents({}) == 1
-    # Another shop's accountant holding the same id learns nothing of it.
+    # Decision D132: the key is (shop, request_id). Another shop's accountant
+    # whose client sends the same id saves that shop's own statement (once,
+    # also on its retry) and learns nothing of the first shop's.
     other = {"user_id": "a2", "roles": ["ACCOUNTANT"], "store_ids": ["S2"], "active_store_id": "S2"}
     from starlette.datastructures import UploadFile
-    with pytest.raises(HTTPException) as err:
-        asyncio.run(bank.import_bank_statement(
+
+    def other_upload():
+        return asyncio.run(bank.import_bank_statement(
             file=UploadFile(filename="s.csv", file=io.BytesIO(b"Date,Description,Debit,Credit\n2026-11-04,X,0,100\n")),
             store_id=None, account_name="B", request_id="REQ-1", current_user=other))
-    assert err.value.status_code == 404
+
+    theirs = other_upload()
+    assert theirs["statement_id"] != first["statement_id"]
+    assert other_upload()["statement_id"] == theirs["statement_id"]
+    assert d.bank_statements.count_documents({}) == 2
+    assert d.bank_statements.count_documents({"store_id": "S2"}) == 1
+    d.bank_statements.delete_one({"store_id": "S2"})
     # The same request racing itself: the second copy runs inside the first
     # one's insert (both past the replay read) and only one is stored.
     from concurrent.futures import ThreadPoolExecutor

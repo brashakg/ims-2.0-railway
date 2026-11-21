@@ -433,11 +433,14 @@ async def import_bank_statement(
         raise HTTPException(status_code=503, detail="Database unavailable")
     effective_store = store_in_view(store_id, current_user, writing=True) or ""
 
-    # One statement per request_id: its own _id, so a retry (or the same
-    # request racing itself) can save only once -- Mongo's _id index always
-    # exists, no index of ours to be missing.
+    # One statement per (shop, request_id): its own _id, so a retry (or the
+    # same request racing itself) can save only once -- Mongo's _id index
+    # always exists, no index of ours to be missing. The shop is part of the
+    # key (decision D132): another shop's client that happens to send the same
+    # request_id saves its own statement and learns nothing of this one.
     key = request_id.strip() if isinstance(request_id, str) else ""
-    statement_id = str(uuid.uuid5(_STATEMENT_NS, key)) if key else str(uuid.uuid4())
+    statement_id = (str(uuid.uuid5(_STATEMENT_NS, f"{effective_store}{key}")) if key
+                    else str(uuid.uuid4()))
     sent = {
         "file_sha256": hashlib.sha256(content_bytes).hexdigest(),
         "store_id": effective_store,
