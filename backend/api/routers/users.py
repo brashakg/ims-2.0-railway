@@ -28,7 +28,7 @@ from ..dependencies import (
     user_store_scope,
     validate_store_access,
 )
-from ..services.role_caps import role_baseline_cap, effective_discount_cap
+from ..services.role_caps import ROLE_DISCOUNT_CAPS, role_baseline_cap, effective_discount_cap
 from ..services.user_roles import (
     BCRYPT_MAX_BYTES,
     can_assign_roles,
@@ -208,6 +208,14 @@ class UserUpdate(BaseModel):
     store_ids: Optional[List[str]] = None
     primary_store_id: Optional[str] = None
     discount_cap: Optional[float] = Field(default=None, ge=0, le=100)
+    # D70: True = "set this person's cap to the role standard" (the editor's
+    # explicit choice on a role change). Never stored; cannot be combined with
+    # discount_cap.
+    discount_cap_follow_role: Optional[bool] = None
+    # D93: the roles the editor saw when they opened this person. When sent,
+    # the write lands only while the stored roles are still these (409 if a
+    # role changed meanwhile). Never stored.
+    expected_roles: Optional[List[str]] = None
     is_active: Optional[bool] = None
     # Deny-only per-user module override (see UserCreate.module_access). Only
     # persisted when explicitly provided on update so an unrelated edit (e.g. a
@@ -410,6 +418,7 @@ _SANITIZED_USER_FIELDS = (
     "store_ids",
     "primary_store_id",
     "discount_cap",
+    "discount_cap_is_role_default",
     "is_active",
     "must_change_password",
     "module_access",
@@ -513,6 +522,12 @@ def sanitize_user(user: dict, viewer: Optional[dict] = None) -> dict:
     if user is None:
         return user
     out = {f: user[f] for f in _SANITIZED_USER_FIELDS if f in user}
+    # The cap the till actually enforces (role standard vs the per-user
+    # override), from the ONE shared rule -- so Settings > Users shows what is
+    # enforced instead of guessing from the stored override (L1-F03).
+    out["effective_discount_cap"] = effective_discount_cap(
+        user.get("roles") or [], user.get("discount_cap")
+    )
     if "documents" in out:
         # GridFS handles are capabilities, not data -- metadata only, always.
         out["documents"] = _safe_documents(out.get("documents"))
@@ -920,10 +935,18 @@ async def list_users(
         if active_only:
             filter_dict["is_active"] = True
 
-        users = repo.find_many(filter_dict, skip=skip, limit=limit)
+        # Stable order so skip/limit pages neither repeat nor skip anyone. A
+        # failed read is a 503, never a 200 [] the screen would take as the
+        # last page (or "No users found").
+        try:
+            users = repo.find_many(
+                filter_dict, sort=[("_id", 1)], skip=skip, limit=limit, strict=True
+            )
+        except Exception:  # noqa: BLE001
+            raise HTTPException(status_code=503, detail="Could not read the staff list. Retry.")
         return [sanitize_user(u, current_user) for u in users]
 
-    return []
+    raise HTTPException(status_code=503, detail="Could not read the staff list. Retry.")
 
 
 @router.post("", response_model=dict, status_code=201)
@@ -983,6 +1006,9 @@ async def create_user(user: UserCreate, current_user: dict = Depends(require_adm
                 if _clamped_cap is not None
                 else role_baseline_cap(user.roles)
             ),
+            # D70: a cap the role standard filled in follows the role on a later
+            # role change; a typed cap is the editor's and is kept.
+            "discount_cap_is_role_default": _clamped_cap is None,
             "is_active": True,
             # Honour the (default-True) flag instead of the old duplicate-key bug
             # that hard-coded True and ignored the request. Cleared on first
@@ -1007,6 +1033,12 @@ async def create_user(user: UserCreate, current_user: dict = Depends(require_adm
             if _val:
                 user_data[_id_field] = _val
 
+        # The audit row's id is stored on the user in the insert itself, so the
+        # row is confirmed exactly when the account exists.
+        _create_log_id = str(uuid.uuid4())
+        if _clean_perms or _clamped_cap is not None:
+            user_data[_perm_audit.CONFIRMED_IDS_FIELD] = [_create_log_id]
+
         created = repo.create(user_data)
         if created:
             # AUDIT (no-log-no-commit): only when an actual override was set --
@@ -1015,6 +1047,7 @@ async def create_user(user: UserCreate, current_user: dict = Depends(require_adm
             if _clean_perms or _clamped_cap is not None:
                 audit = _perm_audit.write_permission_audit(
                     get_audit_repository(),
+                    extra={"log_id": _create_log_id},
                     action="PERMISSIONS_CREATE",
                     actor=current_user,
                     target_user_id=created["user_id"],
@@ -1062,9 +1095,83 @@ async def get_user(user_id: str, current_user: dict = Depends(require_manager)):
         if user is not None:
             _assert_can_read_user(user, current_user)
             return sanitize_user(user, current_user)
-        raise HTTPException(status_code=404, detail="User not found")
+        raise _user_missing(repo, user_id)
 
     return {"user_id": user_id}
+
+
+def _user_missing(repo, user_id: str) -> HTTPException:
+    """The error for a user read that came back empty. ``find_by_id`` answers
+    None for a failed database read as well as for "no such person", so ask
+    the database once more, strictly: 404 only when it confirms the person is
+    not there, 503 when the read itself failed."""
+    confirm = getattr(repo, "is_absent", None)  # test doubles have no strict read
+    try:
+        absent = confirm(user_id) if confirm else True
+    except Exception:  # noqa: BLE001 - the read failed: not "not found"
+        absent = False
+    if absent:
+        return HTTPException(status_code=404, detail="User not found")
+    return HTTPException(
+        status_code=503, detail="Could not read this person. Try again."
+    )
+
+
+def _commit_user_write(
+    repo, user_id, update_data, expected, actor, audit, add_to_set=None
+):
+    """Write ``update_data`` (compare-and-set on ``expected`` when given).
+
+    ``add_to_set`` ({list_field: value}, e.g. a shop grant) lands in the SAME
+    update, or not at all (D97). So does the logged ``audit`` row's id, into
+    the user's ``permission_log_ids``: that id on the user document is the
+    only proof the logged change was applied. History and Revert read it
+    (find_permission_history), so a change that did not land can never be
+    shown or re-applied as real, even when nothing more could be written.
+
+    ``repo.update`` returns False both for "nothing matched" and for a driver
+    error that may come AFTER the server committed (lost reply). So on False
+    re-read the row: the audit id on it (or, for an unaudited edit, the
+    intended values) means the write landed. A write that did not land also
+    gets a best-effort ABORTED row for the trail. If the re-read itself fails
+    the outcome is unknown: returns None."""
+    adds = dict(add_to_set or {})
+    _log_id = (audit or {}).get("log_id")
+    if _log_id:
+        adds[_perm_audit.CONFIRMED_IDS_FIELD] = _log_id
+    kwargs = {}
+    if expected is not None:
+        kwargs["expected"] = expected
+    if adds:
+        kwargs["add_to_set"] = adds
+    if repo.update(user_id, update_data, **kwargs):
+        return True
+    stored = repo.find_by_id(user_id)
+    if stored is None:
+        return None
+    if _log_id:
+        landed = _log_id in (stored.get(_perm_audit.CONFIRMED_IDS_FIELD) or [])
+    else:
+        landed = all(
+            stored.get(k) == v
+            for k, v in update_data.items()
+            if k not in ("updated_at", "updated_by")
+        ) and all(v in (stored.get(k) or []) for k, v in adds.items())
+    if landed:
+        return True
+    if audit is not None:
+        _perm_audit.write_permission_abort(
+            get_audit_repository(),
+            actor=actor,
+            aborted=audit,
+            reason="changed meanwhile" if expected is not None else "write failed",
+        )
+    return False
+
+
+_CHANGED_MEANWHILE = (
+    "This person's roles or discount cap were changed meanwhile. Reload and try again."
+)
 
 
 @router.put("/{user_id}", response_model=dict)
@@ -1072,12 +1179,20 @@ async def update_user(
     user_id: str, user: UserUpdate, current_user: dict = Depends(require_admin)
 ):
     """Update user (Admin only)"""
+    return await _apply_user_update(user_id, user, current_user)
+
+
+async def _apply_user_update(
+    user_id: str, user: UserUpdate, current_user: dict, grant_store=None
+):
+    """The one user-edit door. ``grant_store`` (assign-store with a role, D97)
+    is a shop added in the same compare-and-set write as the edit."""
     repo = get_user_repository()
 
     if repo is not None:
         existing = repo.find_by_id(user_id)
         if existing is None:
-            raise HTTPException(status_code=404, detail="User not found")
+            raise _user_missing(repo, user_id)
 
         actor_roles = current_user.get("roles", [])
 
@@ -1095,6 +1210,14 @@ async def update_user(
         # an unrelated edit can't wipe module_access (or any other field). When
         # module_access IS sent it round-trips through (sanitized) and overwrites.
         update_data = user.model_dump(exclude_unset=True)
+        # D93: the roles the caller computed its change from (the editor's
+        # screen, or a side door's own read). A role change since then is a
+        # 409 before anything is logged or written.
+        _seen_roles = update_data.pop("expected_roles", None)
+        if _seen_roles is not None and sorted(_seen_roles) != sorted(
+            existing.get("roles") or []
+        ):
+            raise HTTPException(status_code=409, detail=_CHANGED_MEANWHILE)
         _login_changed = _apply_login_identity_edit(repo, user_id, existing, update_data)
 
         # PRIVILEGE GUARD 2: if roles are being changed, the actor must be
@@ -1139,12 +1262,57 @@ async def update_user(
         # LIVE BUG retrofit: clamp any requested discount_cap to the actor's own
         # cap (was stored unguarded on update too).
         _cap_touched = "discount_cap" in update_data
+        _follow = bool(update_data.pop("discount_cap_follow_role", None))
+        if _follow and _cap_touched:
+            raise HTTPException(
+                status_code=422,
+                detail="Send either a discount cap or 'use the role standard', not both.",
+            )
         if _cap_touched:
             update_data["discount_cap"] = _clamp_discount_cap(
                 current_user,
                 update_data.get("discount_cap"),
                 update_data.get("roles", existing.get("roles", [])),
             )
+            # A cap the editor sent is deliberate: kept on later role changes.
+            update_data["discount_cap_is_role_default"] = False
+
+        # D70: on a role change, a cap that the role standard set follows the
+        # new role's standard; an unmarked (typed or legacy) cap is kept unless
+        # the editor explicitly chose the standard. The write is conditional on
+        # the cap still being the one read here, so a concurrent deliberate
+        # edit is never overwritten (409 instead).
+        _expect = None
+        _new_roles = update_data.get("roles", existing.get("roles", []))
+        if _follow or (
+            "roles" in update_data
+            and not _cap_touched
+            and existing.get("discount_cap_is_role_default") is True
+        ):
+            _base = role_baseline_cap(_new_roles)
+            if _base != existing.get("discount_cap") or not existing.get(
+                "discount_cap_is_role_default"
+            ):
+                update_data["discount_cap"] = _base
+                update_data["discount_cap_is_role_default"] = True
+                _cap_touched = True
+        # A role change or a cap move to the role standard lands only while
+        # roles AND cap are still what was read here: two edits from the same
+        # read can never mix one's roles with the other's cap (loser gets 409).
+        # D93(2): every discount-cap write (a typed cap too) is also held to
+        # the roles read here, so a cap never lands on a changed role.
+        if (
+            "roles" in update_data
+            or _cap_touched
+            or _seen_roles is not None
+        ):
+            _expect = {
+                "roles": existing.get("roles"),
+                "discount_cap": existing.get("discount_cap"),
+                "discount_cap_is_role_default": existing.get(
+                    "discount_cap_is_role_default"
+                ),
+            }
 
         update_data["updated_by"] = current_user.get("user_id")
 
@@ -1171,7 +1339,22 @@ async def update_user(
                     detail="Could not record the permission change; update aborted.",
                 )
 
-        if repo.update(user_id, update_data):
+        _updated = _commit_user_write(
+            repo, user_id, update_data, _expect, current_user,
+            audit if _audit_needed else None,
+            add_to_set={"store_ids": grant_store} if grant_store else None,
+        )
+        if _updated is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Could not confirm the change was saved. Reload before trying again.",
+            )
+        if not _updated and _expect is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=_CHANGED_MEANWHILE,
+            )
+        if _updated:
             # F18: an edit that flips is_active must take effect immediately for
             # tokens already in the wild (both ways -- a re-activation must not
             # keep 401ing off a stale entry either).
@@ -1201,7 +1384,7 @@ async def delete_user(user_id: str, current_user: dict = Depends(require_admin))
     if repo is not None:
         existing = repo.find_by_id(user_id)
         if existing is None:
-            raise HTTPException(status_code=404, detail="User not found")
+            raise _user_missing(repo, user_id)
 
         # Prevent deactivating yourself
         if user_id == current_user.get("user_id"):
@@ -1241,6 +1424,25 @@ async def delete_user(user_id: str, current_user: dict = Depends(require_admin))
     return {"message": "User deactivated"}
 
 
+async def _add_role_via_update(
+    user_id: str, existing: dict, role: str, current_user: dict, grant_store=None
+):
+    """One door for every role change (D70): the PUT path moves a marked
+    role-default discount cap with its audit row and compare-and-set, and runs
+    the hierarchy / escalation / last-admin guards."""
+    # Read-modify-write of roles; update_user's compare-and-set on the roles
+    # read here turns a concurrent role edit into a 409, never a lost role.
+    roles = list(existing.get("roles", []) or [])
+    if role not in roles:
+        roles.append(role)
+    await _apply_user_update(
+        user_id,
+        UserUpdate(roles=roles, expected_roles=list(existing.get("roles", []) or [])),
+        current_user,
+        grant_store=grant_store,
+    )
+
+
 @router.post("/{user_id}/roles/{role}")
 async def add_role(
     user_id: str, role: str, current_user: dict = Depends(require_admin)
@@ -1267,12 +1469,10 @@ async def add_role(
     if repo is not None:
         existing = repo.find_by_id(user_id)
         if existing is None:
-            raise HTTPException(status_code=404, detail="User not found")
+            raise _user_missing(repo, user_id)
 
-        if repo.add_role(user_id, role):
-            return {"message": f"Role {role} added to user"}
-
-        raise HTTPException(status_code=500, detail="Failed to add role")
+        await _add_role_via_update(user_id, existing, role, current_user)
+        return {"message": f"Role {role} added to user"}
 
     return {"message": f"Role {role} added to user"}
 
@@ -1296,7 +1496,7 @@ async def remove_role(
     if repo is not None:
         existing = repo.find_by_id(user_id)
         if existing is None:
-            raise HTTPException(status_code=404, detail="User not found")
+            raise _user_missing(repo, user_id)
 
         current_roles = existing.get("roles", []) or []
         # LAST-ROLE GUARD: don't strip a user's only remaining role -- a
@@ -1319,10 +1519,18 @@ async def remove_role(
                 detail="Cannot remove admin role from the last active admin",
             )
 
-        if repo.remove_role(user_id, role):
-            return {"message": f"Role {role} removed from user"}
-
-        raise HTTPException(status_code=500, detail="Failed to remove role")
+        # Same single role-change door as add_role (D70 cap move + audit).
+        # D93(1): the list was computed from THIS read, so this read is the
+        # expectation (a role added meanwhile is a 409, never silently lost).
+        await update_user(
+            user_id,
+            UserUpdate(
+                roles=[r for r in current_roles if r != role],
+                expected_roles=list(current_roles),
+            ),
+            current_user,
+        )
+        return {"message": f"Role {role} removed from user"}
 
     return {"message": f"Role {role} removed from user"}
 
@@ -1419,7 +1627,7 @@ async def reset_password(
 
     existing = repo.find_by_id(user_id)
     if existing is None:
-        raise HTTPException(status_code=404, detail="User not found")
+        raise _user_missing(repo, user_id)
 
     # ROLE-ESCALATION GUARD: a non-SUPERADMIN actor may only reset a user at or
     # below their own level. This mirrors update_user / delete_user so an ADMIN
@@ -1505,7 +1713,7 @@ async def set_password(
         raise HTTPException(status_code=503, detail="Database unavailable")
     existing = repo.find_by_id(user_id)
     if existing is None:
-        raise HTTPException(status_code=404, detail="User not found")
+        raise _user_missing(repo, user_id)
 
     keep_sid = current_user.get("sid") if current_user.get("user_id") == user_id else None
     saved = repo.update(
@@ -1535,6 +1743,19 @@ async def set_password(
 class AssignStoreBody(BaseModel):
     store_id: str = Field(..., min_length=1)
     role: Optional[str] = None
+
+
+def _grant_store(repo, user_id: str, store_id: str) -> None:
+    """Add one shop to a user. A write that did not land is an error, never a
+    silent "assigned"; a write that landed but lost its reply is success."""
+    if repo.add_store(user_id, store_id):
+        return
+    stored = repo.find_by_id(user_id)
+    if stored is None or store_id not in (stored.get("store_ids") or []):
+        raise HTTPException(
+            status_code=503,
+            detail="Could not save the shop access. Reload and try again.",
+        )
 
 
 @router.post("/{user_id}/assign-store")
@@ -1569,15 +1790,16 @@ async def assign_store(
         }
     existing = repo.find_by_id(user_id)
     if existing is None:
-        raise HTTPException(status_code=404, detail="User not found")
-    repo.add_store(user_id, body.store_id)
+        raise _user_missing(repo, user_id)
     if body.role:
-        # Add the role if the repo supports it; ignore failures so the
-        # store assignment still succeeds.
-        try:
-            repo.add_role(user_id, body.role)
-        except Exception:
-            pass
+        # D97: through the same role-change door as add_role (D70), with the
+        # shop grant in that ONE compare-and-set write. A refusal (409) leaves
+        # the person's shops and roles exactly as stored.
+        await _add_role_via_update(
+            user_id, existing, body.role, current_user, grant_store=body.store_id
+        )
+    else:
+        _grant_store(repo, user_id, body.store_id)
     return {"user_id": user_id, "store_id": body.store_id, "message": "Store assigned"}
 
 
@@ -1591,12 +1813,10 @@ async def add_store_access(
     if repo is not None:
         existing = repo.find_by_id(user_id)
         if existing is None:
-            raise HTTPException(status_code=404, detail="User not found")
+            raise _user_missing(repo, user_id)
 
-        if repo.add_store(user_id, store_id):
-            return {"message": f"Store {store_id} access granted"}
-
-        raise HTTPException(status_code=500, detail="Failed to add store access")
+        _grant_store(repo, user_id, store_id)
+        return {"message": f"Store {store_id} access granted"}
 
     return {"message": f"Store {store_id} access granted"}
 
@@ -1611,7 +1831,7 @@ async def remove_store_access(
     if repo is not None:
         existing = repo.find_by_id(user_id)
         if existing is None:
-            raise HTTPException(status_code=404, detail="User not found")
+            raise _user_missing(repo, user_id)
 
         if repo.remove_store(user_id, store_id):
             return {"message": f"Store {store_id} access revoked"}
@@ -1746,6 +1966,9 @@ async def get_permission_options(current_user: dict = Depends(require_admin)):
         "schema_version": _cd.DELTA_SCHEMA_VERSION,
         "discount_cap_field": _cd.DISCOUNT_CAP_FIELD,
         "role_deltas": _cd.ROLE_DELTAS,
+        # The role standard discount per role (the ONE table in role_caps). The
+        # editor shows max() over the person's roles -- role_baseline_cap.
+        "role_discount_caps": ROLE_DISCOUNT_CAPS,
         # The capabilities THIS actor may grant (cap their own level). The FE
         # uses this to show ungrantable toggles grayed-with-reason.
         "grantable": sorted(grantable_capabilities_for(current_user.get("roles", []))),
@@ -1763,8 +1986,15 @@ async def get_user_permissions(
         return {"permissions": {}, "module_access": {}, "discount_cap": None, "history": []}
     existing = repo.find_by_id(user_id)
     if existing is None:
-        raise HTTPException(status_code=404, detail="User not found")
-    history = _perm_audit.find_permission_history(get_audit_repository(), user_id)
+        raise _user_missing(repo, user_id)
+    history = _perm_audit.find_permission_history(
+        get_audit_repository(),
+        user_id,
+        applied_ids=existing.get(_perm_audit.CONFIRMED_IDS_FIELD),
+    )
+    if history is None:
+        # A failed history read is not "no changes recorded yet".
+        raise HTTPException(status_code=503, detail="Could not read the change history.")
     # Strip Mongo _id from history rows for a clean JSON response.
     clean_hist = []
     for h in history:
@@ -1782,6 +2012,8 @@ class PermissionRevertBody(BaseModel):
     # The audit log_id of the prior snapshot to re-apply. The revert re-runs the
     # SAME escalation guard + sanitize so it can never launder an escalation.
     audit_log_id: str = Field(..., min_length=1)
+    # D93: the roles the editor saw (409 if a role changed meanwhile).
+    expected_roles: Optional[List[str]] = None
 
 
 @router.post("/{user_id}/permissions/revert")
@@ -1801,7 +2033,7 @@ async def revert_user_permissions(
 
     existing = repo.find_by_id(user_id)
     if existing is None:
-        raise HTTPException(status_code=404, detail="User not found")
+        raise _user_missing(repo, user_id)
 
     actor_roles = current_user.get("roles", [])
     # Same higher-account guard as update_user: a non-SUPERADMIN cannot touch a
@@ -1814,10 +2046,22 @@ async def revert_user_permissions(
             )
 
     # Locate the prior snapshot in the immutable audit trail.
-    history = _perm_audit.find_permission_history(audit_repo, user_id, limit=200)
+    history = _perm_audit.find_permission_history(
+        audit_repo,
+        user_id,
+        limit=200,
+        applied_ids=existing.get(_perm_audit.CONFIRMED_IDS_FIELD),
+    )
+    if history is None:
+        raise HTTPException(status_code=503, detail="Could not read the change history.")
     target = next((h for h in history if h.get("log_id") == body.audit_log_id), None)
     if target is None:
         raise HTTPException(status_code=404, detail="Audit snapshot not found")
+    if target.get("not_applied"):
+        raise HTTPException(
+            status_code=409,
+            detail="That change was never applied, so there is nothing to revert to.",
+        )
     # Re-apply the AFTER state of the chosen historical row (that is the state
     # the user wants to return TO). Re-run it through the guard + sanitize so a
     # state set by a higher admin can't be re-applied by a lower one.
@@ -1825,17 +2069,28 @@ async def revert_user_permissions(
     _actor_is_super = "SUPERADMIN" in set(actor_roles)
     _clean = sanitize_permissions(restore.get("permissions"), _actor_is_super)
     _guard_permission_grants(current_user, _clean)
-    _cap = _clamp_discount_cap(
-        current_user, restore.get("discount_cap"), existing.get("roles", [])
+    _roles = existing.get("roles", []) or []
+    if body.expected_roles is not None and sorted(body.expected_roles) != sorted(_roles):
+        raise HTTPException(status_code=409, detail=_CHANGED_MEANWHILE)
+    # D93(3): a role-standard cap is restored as role-standard (it follows the
+    # role again), not as a typed value. D93(4): snapshots written before the
+    # marker never recorded roles, so a cap equal to the standard of ANY role
+    # is role-default (it then follows the CURRENT role); any other is typed.
+    _was_default = restore.get("discount_cap_is_role_default")
+    if _was_default is None and restore.get("discount_cap") is not None:
+        _was_default = float(restore["discount_cap"]) in set(ROLE_DISCOUNT_CAPS.values())
+    _cap = (
+        None
+        if _was_default
+        else _clamp_discount_cap(current_user, restore.get("discount_cap"), _roles)
     )
 
     prior = _perm_audit.snapshot_of(existing)
     update_data = {
         "permissions": _clean or {},
         "module_access": sanitize_module_access(restore.get("module_access")) or {},
-        "discount_cap": _cap
-        if _cap is not None
-        else role_baseline_cap(existing.get("roles", [])),
+        "discount_cap": _cap if _cap is not None else role_baseline_cap(_roles),
+        "discount_cap_is_role_default": _cap is None,
         "updated_by": current_user.get("user_id"),
     }
     after_doc = dict(existing)
@@ -1857,6 +2112,18 @@ async def revert_user_permissions(
             status_code=500,
             detail="Could not record the revert; nothing changed.",
         )
-    if repo.update(user_id, update_data):
+    # D93(2): the cap is written only onto the roles (and cap) read here.
+    _expect = {
+        "roles": existing.get("roles"),
+        "discount_cap": existing.get("discount_cap"),
+        "discount_cap_is_role_default": existing.get("discount_cap_is_role_default"),
+    }
+    _done = _commit_user_write(repo, user_id, update_data, _expect, current_user, audit)
+    if _done:
         return {"user_id": user_id, "message": "Permissions reverted"}
-    raise HTTPException(status_code=500, detail="Failed to revert permissions")
+    if _done is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Could not confirm the revert was saved. Reload before trying again.",
+        )
+    raise HTTPException(status_code=409, detail=_CHANGED_MEANWHILE)

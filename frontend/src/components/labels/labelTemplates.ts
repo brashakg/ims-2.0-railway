@@ -18,6 +18,7 @@
 // resolution for Zebra / TSC desktop label printers.
 
 import JsBarcode from 'jsbarcode';
+import { formatDateIST } from '../../utils/datetime';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -91,15 +92,11 @@ function storeDisplayName(d: { store_name?: string; store_brand?: string; store_
   return (d.store_name || '').trim() || brandText(d.store_brand) || (d.store_code || '').trim() || '';
 }
 
+/** The IST calendar day in every browser zone (a date-only promise date is
+ *  that day); an unreadable value prints as-is. */
 function fmtDate(value?: string): string {
   if (!value) return '';
-  const d = new Date(value);
-  if (isNaN(d.getTime())) return value;
-  return d.toLocaleDateString('en-IN', {
-    day: '2-digit',
-    month: 'short',
-    year: 'numeric',
-  });
+  return formatDateIST(value, value);
 }
 
 /** Generate a CODE128 barcode as an inline SVG string for HTML labels. */

@@ -19,9 +19,9 @@ const mockSetPassword = vi.fn();
 
 vi.mock('../../../services/api', () => ({
   adminUserApi: {
-    getUsers: () => Promise.resolve({
-      users: [{ user_id: 'u-9', username: 'ravi', full_name: 'Ravi Kumar', roles: ['SALES_STAFF'], store_ids: ['S1'] }],
-    }),
+    getUsers: () => Promise.resolve([
+      { user_id: 'u-9', username: 'ravi', full_name: 'Ravi Kumar', roles: ['SALES_STAFF'], store_ids: ['S1'] },
+    ]),
     setPassword: (...a: unknown[]) => mockSetPassword(...a),
     resetPassword: vi.fn(),
   },

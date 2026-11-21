@@ -10,6 +10,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { RefreshCw, Loader2, Check, X, AlertTriangle } from 'lucide-react';
 import clsx from 'clsx';
 import { useAuth } from '../../context/AuthContext';
+import { isSuperAdmin } from '../../utils/capabilities';
 import {
   getIntegrationStatus,
   type IntegrationStatusReport,
@@ -173,8 +174,9 @@ export function MessagingPreflightPanel({ report }: { report: IntegrationStatusR
 }
 
 export function IntegrationStatusCard() {
-  const { hasRole } = useAuth();
-  const isSuperAdmin = hasRole(['SUPERADMIN']);
+  const { user } = useAuth();
+  // GET /jarvis/integrations/status is SUPERADMIN-only: an ADMIN would only 403.
+  const isSuperAdminUser = isSuperAdmin(user?.roles);
 
   const [report, setReport] = useState<IntegrationStatusReport | null>(null);
   const [loading, setLoading] = useState(true);
@@ -194,11 +196,11 @@ export function IntegrationStatusCard() {
   }, []);
 
   useEffect(() => {
-    if (isSuperAdmin) load();
-  }, [isSuperAdmin, load]);
+    if (isSuperAdminUser) load();
+  }, [isSuperAdminUser, load]);
 
   // SUPERADMIN-only surface - render nothing for everyone else.
-  if (!isSuperAdmin) return null;
+  if (!isSuperAdminUser) return null;
 
   return (
     <div className="bg-white rounded-lg border-2 border-gray-200 p-6">

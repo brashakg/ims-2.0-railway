@@ -1,10 +1,14 @@
 """Staff ranking, workshop pending / productivity and daily stock count."""
 
-from fastapi import Depends, Query
+import logging
+
+from fastapi import Depends, HTTPException, Query
 from typing import Any, Dict, Optional
 from datetime import date, datetime, timedelta
+from ...utils.event_time import parse_event_utc_naive
 from ...utils.ist import (
     now_ist_naive,
+    ist_date_str,
     ist_day_start_utc,
     ist_today,
 )
@@ -30,6 +34,8 @@ from ._shared import (
     _stock_category_map,
     router,
 )
+
+logger = logging.getLogger(__name__)
 
 # ============================================================================
 # STAFF & CLINICAL REPORTS
@@ -280,11 +286,10 @@ async def workshop_productivity(
         utilization        -- this tech's jobs_completed / busiest tech's
                               jobs_completed (0-1; relative load index)
 
-    Plus store totals over the same window. Fail-soft: no DB / no jobs -> an
-    honest empty envelope (never a fabricated average), never raises.
+    Plus store totals over the same window. No jobs -> an honest empty
+    envelope (never a fabricated average); jobs that cannot be READ -> 503,
+    never a zero that reads as "nobody closed anything" (Codex PR-1425).
     """
-    from database.repositories.workshop_repository import WorkshopJobRepository  # lazy
-
     active_store = store_in_view(store_id, current_user)
 
     # Window: default to the last 30 days ending today (IST business date).
@@ -308,18 +313,30 @@ async def workshop_productivity(
         },
     }
 
+    unreadable = HTTPException(
+        status_code=503,
+        detail="Could not read workshop jobs for this report. Please try again.",
+    )
     db = get_db()
     if db is None or not getattr(db, "is_connected", True):
-        return empty
+        raise unreadable
 
     try:
-        repo = WorkshopJobRepository(db.get_collection("workshop_jobs"))
-        all_jobs = _jobs_in_reach(repo.find_by_store(active_store), current_user)
-    except Exception:
-        return empty
+        # Read directly, not through find_many (which answers [] on a read
+        # error); the store rule runs strict for the same reason.
+        jobs = list(
+            db.get_collection("workshop_jobs").find(
+                {"store_id": active_store} if active_store else {}, {"_id": 0}
+            )
+        )
+        all_jobs = _jobs_in_reach(jobs, current_user, strict=True)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[REPORTS] workshop productivity read failed: %s", exc)
+        raise unreadable
 
     def _to_dt(v):
-        """Parse a stored timestamp (str or datetime) to a naive datetime, or None."""
+        """A CALENDAR field (expected_date) as a naive datetime, or None: its
+        wall-clock day is the business day, so no zone shift."""
         if not v:
             return None
         try:
@@ -368,11 +385,16 @@ async def workshop_productivity(
     for job in all_jobs:
         if job.get("status") not in CLOSED:
             continue
-        completed = _to_dt(job.get("completed_at"))
+        # completed_at / created_at are EVENT instants: read them in the one
+        # stored frame (naive UTC; an explicit offset or Z is converted, not
+        # dropped) so the elapsed time below is true for every stored shape.
+        completed = parse_event_utc_naive(job.get("completed_at"))
         if completed is None:
             continue
-        # Window filter on the CLOSE (completed) date.
-        comp_date = completed.date()
+        # Window filter on the CLOSE day -- the IST business day of that
+        # instant (L3-30), not its UTC calendar day: a job closed at 01:30 IST
+        # belongs to the day the shop was open, and to exactly one window.
+        comp_date = date.fromisoformat(ist_date_str(completed))
         if comp_date < start_d or comp_date > end_d:
             continue
 
@@ -381,7 +403,7 @@ async def workshop_productivity(
         tot_completed += 1
 
         # Turnaround: completed_at - created_at in days (>= 0 only).
-        created = _to_dt(job.get("created_at"))
+        created = parse_event_utc_naive(job.get("created_at"))
         if created is not None:
             days = (completed - created).total_seconds() / 86400.0
             if days >= 0:
