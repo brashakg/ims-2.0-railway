@@ -1415,6 +1415,7 @@ def blind_submit(
     window_end: Any = None,
     idempotency_key: Optional[str] = None,
     origin: Optional[str] = None,
+    bank_deposit_paisa: int = 0,
     actor: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Cashier posts the denomination counts (BLIND).
@@ -1530,6 +1531,14 @@ def blind_submit(
         exp = _own_share(exp, charged)
         payouts = exp["cash_payouts_paisa"]
     tol = get_variance_tolerance_paisa(store_id=store_id)
+    # A Cash Register close that counts the drawer may record cash banked
+    # out of it (D127: one count, one figure). Left out here, the till's own
+    # count of that drawer read short by the deposit -- in the totals and at
+    # its Z-Read lock -- where the register close it came from balanced.
+    deposit = max(int(bank_deposit_paisa or 0), 0)
+    if deposit:
+        exp = {**exp, "expected_cash_paisa": int(exp["expected_cash_paisa"]) - deposit}
+        exp["negative_expected_advisory"] = exp["expected_cash_paisa"] < 0
     negative_expected = bool(exp.get("negative_expected_advisory"))
     if old_snapshot:
         expected_cash_paisa = variance_paisa = None
@@ -1576,6 +1585,7 @@ def blind_submit(
                     ),
                     "blind_count_paisa": counted,
                     "cash_payouts_paisa": payouts,
+                    "bank_deposit_paisa": deposit,
                     # AUTO_EXPENSES: the figure above came from the expenses
                     # book, not a hand-typed box. The advisory says a payroll-
                     # shaped expense was deliberately left out (count only).
@@ -1764,6 +1774,7 @@ def _record_screen_close(
     closing_count_state: Optional[str] = None,
     counted_paisa: Optional[int] = None,
     origin: Optional[str] = None,
+    bank_deposit_paisa: int = 0,
     actor: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Land a closing count from EITHER close screen on the SAME till session.
@@ -1891,6 +1902,7 @@ def _record_screen_close(
         blind_count_paisa=forward_total,
         allow_uncounted_total=not rows,
         origin=origin,
+        bank_deposit_paisa=bank_deposit_paisa,
         actor=actor,
     )
     if not res.get("ok"):

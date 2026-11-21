@@ -7084,3 +7084,52 @@ class TestR22TheRuleThroughFaultsAndClocks:
                              "till_session_id": None, "closed_at": closed, "counted": 100.0})
         found = till.drawer_counts(db, drawer)
         assert [c["session_id"] for c in found["unknown"]] == ["CR-IST-IN"]
+
+
+class TestR22OneCountOneFigure:
+    def test_a_deposit_on_the_close_that_counts_the_drawer_is_in_the_tills_count_too(self, db, monkeypatch):
+        """D127: one count, one figure. The register close that makes the
+        drawer's count banks Rs 1,000 and balances at Rs 2,000; the till's
+        own count of the same drawer read Rs 1,000 SHORT (the deposit was
+        unknown to it): in the totals, and its Z-Read lock demanded a note
+        and alerted the manager for cash recorded as banked."""
+        alerts = _alerts(monkeypatch)
+        sid = _open(db)
+        _cash_sale(db, 3000)
+        out = _register(db, monkeypatch, "CR-R22-D", opened="04:00:00", closed="12:00:00",
+                        pieces=4, bank=1000.0)
+        assert _judged(out) == _balanced(2000.0)
+        t = _till(db, sid)
+        assert (t["blind_count_paisa"], t["expected_cash_paisa"], t["variance_paisa"],
+                t["bank_deposit_paisa"]) == (200000, 200000, 0, 100000)
+        res = _recon_summary(db, monkeypatch)
+        assert (res["totals"]["shortage"], res["totals"]["counted_cash"]) == (0, 2000.0)
+        assert till.lock_session(db, sid, actor=MANAGER)["ok"] and alerts == []
+
+    def test_control_a_blind_eod_count_has_no_deposit(self, db):
+        sid = _short_tally_count(db)
+        assert (_till(db, sid)["bank_deposit_paisa"], _till(db, sid)["variance_paisa"]) == (0, -50000)
+
+
+def test_r22_a_deposit_on_the_counting_close_on_real_mongo(monkeypatch):
+    """Native: the register close that counts the drawer banks Rs 1,000 and
+    balances; the till's stored count balances too, the lock asks no note
+    and no task is stored."""
+    client, real_db, name = _real_till_db()
+    try:
+        till.ensure_till_indexes(real_db)
+        tasks = _real_task_repo(monkeypatch, real_db)
+        ndb = _NativeDB(real_db)
+        drawer = _open(real_db)
+        _cash_sale(real_db, 3000, datetime(2026, 11, 4, 5, 0))
+        out = _register(ndb, monkeypatch, "CR-R22-D", opened="04:00:00", closed="12:00:00",
+                        pieces=4, bank=1000.0)
+        assert _judged(out) == _balanced(2000.0)
+        row = real_db.till_sessions.find_one({"_id": drawer})
+        assert (row["expected_cash_paisa"], row["variance_paisa"], row["bank_deposit_paisa"]) == (
+            200000, 0, 100000)
+        assert till.lock_session(real_db, drawer, actor=MANAGER)["ok"]
+        assert tasks.count_documents({}) == 0
+    finally:
+        client.drop_database(name)
+        client.close()

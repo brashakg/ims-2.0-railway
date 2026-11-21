@@ -329,6 +329,9 @@ async def close_cash_register(
         # A count this close lands on the till is marked as THIS session's
         # (D120 tells it from a count made through another door).
         origin=body.session_id,
+        # The cash banked out of the drawer at this close: the till's own
+        # expected figure for the count nets it, as this close's does.
+        bank_deposit_paisa=cash_denom.rupees_to_paisa(body.bank_deposit or 0),
         actor=current_user,
     )
 
