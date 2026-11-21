@@ -88,14 +88,18 @@ class PayoutSnapshotRepository(BaseRepository):
             return None
 
     def find_locked(
-        self, store_id: str, year: int, month: int
+        self, store_id: str, year: int, month: int, *, strict: bool = False
     ) -> Optional[Dict]:
+        """``strict``: a read failure raises instead of reading as "none"
+        (payroll must not pay 0 because the snapshot could not be read)."""
         try:
             return self.collection.find_one({
                 "store_id": store_id, "year": year, "month": month,
                 "status": {"$in": ["LOCKED", "PAID"]},
             })
         except Exception:
+            if strict:
+                raise
             return None
 
     def list_for_store_year(

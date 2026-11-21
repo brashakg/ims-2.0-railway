@@ -31,6 +31,9 @@ export interface SalaryConfig {
   pf_wage_ceiling_cap?: boolean;
   esi_applicable?: boolean | null;
   pt_applicable?: boolean;
+  /** For the Professional Tax slab in a state whose slab differs by gender.
+   *  '' / null / absent = not set: the general slab applies. */
+  gender?: 'MALE' | 'FEMALE' | '' | null;
   tds_monthly?: number;
   // IDs
   uan?: string;
@@ -126,6 +129,15 @@ export const payrollApi = {
   lockRun: async (req: PayrollBatchAction) => {
     const res = await api.post('/payroll/lock', req);
     return res.data as { status: string; locked: number };
+  },
+
+  /** Remove DRAFT payroll rows (admin only): one employee's, or every draft
+   *  of one shop, for the month. An approved or paid row is refused. */
+  discardDraft: async (
+    req: { month: number; year: number } & ({ employee_id: string } | { store_id: string }),
+  ) => {
+    const res = await api.post('/payroll/discard-draft', req);
+    return res.data as { status: string; discarded: number };
   },
 
   // --- Exports (Phase 4) ---------------------------------------------------

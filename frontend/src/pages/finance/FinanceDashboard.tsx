@@ -22,6 +22,7 @@ import type {
   VendorPaymentData,
 } from './financeTypes';
 import { financeApi } from '../../services/api/finance';
+import { ApiError } from '../../services/api/client';
 import { istDayString } from '../../utils/datetime';
 import { NoShopNotice, hasNoShop } from '../../components/common/NoShopNotice';
 import { PurchaseShopLabel, PurchaseShopPicker, usePurchaseShop } from '../purchase/purchaseShop';
@@ -371,13 +372,28 @@ export default function FinanceDashboard() {
       return;
     }
     const [y, m] = dateTo.split('-').map(Number);
-    try {
-      await financeApi.lockPeriod(m, y);
-      setPeriodLocked(true);
-      toast.success(`Period ${m}/${y} locked`);
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Failed to lock period');
-    }
+    const lock = async (withoutPayroll: boolean): Promise<void> => {
+      try {
+        await financeApi.lockPeriod(m, y, withoutPayroll);
+        setPeriodLocked(true);
+        toast.success(`Period ${m}/${y} locked`);
+      } catch (e) {
+        // Payroll not run for someone: a locked month can never get it, so the
+        // server asks first. A draft (plain 409) has no "lock anyway".
+        if (
+          !withoutPayroll &&
+          e instanceof ApiError &&
+          e.code === 'PAYROLL_NOT_RUN' &&
+          window.confirm(`${e.message}
+
+Lock ${m}/${y} anyway? This cannot be undone.`)
+        ) {
+          return lock(true);
+        }
+        toast.error(e instanceof Error ? e.message : 'Failed to lock period');
+      }
+    };
+    await lock(false);
   };
 
   const handleUnlockPeriod = () => {

@@ -33,6 +33,7 @@ const EMPTY_FORM: SalaryConfig = {
   pf_wage_ceiling_cap: true,
   esi_applicable: null,
   pt_applicable: true,
+  gender: '',
   tds_monthly: 0,
   uan: '',
   esi_ip_number: '',
@@ -41,6 +42,14 @@ const EMPTY_FORM: SalaryConfig = {
   bank_ifsc: '',
   bank_name: '',
 };
+
+// Owner ruling 2026-11-11 (audit L3-17): the admin fills the employee's gender
+// here and Payroll Run uses it for the Professional Tax slab. Leaving it
+// unset keeps what Payroll Run did before the field existed, and the screen
+// says so in these words wherever the field or the slabs are shown.
+const GENDER_LABEL: Record<string, string> = { MALE: 'Male', FEMALE: 'Female', '': 'Not set' };
+const GENDER_NOT_SET_NOTE =
+  'While gender is not set, Payroll Run charges Professional Tax on the general (male) slab, as before.';
 
 // esi_applicable is tri-state: null = auto (by gross), true = yes, false = no
 function esiToSelect(v: boolean | null | undefined): string {
@@ -65,6 +74,9 @@ export function SalarySetupPage() {
   const [entities, setEntities] = useState<Entity[]>([]);
   const [stores, setStores] = useState<StoreOption[]>([]);
   const [ptSlabs, setPtSlabs] = useState<PtSlab[]>([]);
+  // A read that failed is never shown as "none configured" (b27 hunt).
+  const [configsFailed, setConfigsFailed] = useState(false);
+  const [ptSlabsFailed, setPtSlabsFailed] = useState(false);
   const [loading, setLoading] = useState(true);
 
   const [modalOpen, setModalOpen] = useState(false);
@@ -74,6 +86,8 @@ export function SalarySetupPage() {
 
   const [importOpen, setImportOpen] = useState(false);
   const [csvText, setCsvText] = useState('');
+  // Rows of the pasted CSV that were NOT imported, with the reason for each.
+  const [skippedRows, setSkippedRows] = useState<SkippedCsvRow[]>([]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -81,16 +95,19 @@ export function SalarySetupPage() {
       const [cfg, ents, pt, st] = await Promise.all([
         payrollApi.listConfigs(),
         entitiesApi.list().catch(() => ({ entities: [] as Entity[], total: 0 })),
-        payrollApi.listPtSlabs().catch(() => ({ pt_slabs: [] as PtSlab[], total: 0, source: '' })),
+        payrollApi.listPtSlabs().catch(() => null),
         storeApi.getStores().catch(() => ({ stores: [] as StoreOption[] })),
       ]);
       setConfigs(cfg.configs || []);
       setEntities(ents.entities || []);
-      setPtSlabs(pt.pt_slabs || []);
+      setPtSlabsFailed(pt === null);
+      setPtSlabs(pt?.pt_slabs || []);
       setStores((st?.stores || st || []) as StoreOption[]);
       setNoAccess(null);
+      setConfigsFailed(false);
     } catch (e) {
       setConfigs([]);
+      setConfigsFailed(!isForbiddenError(e));
       // Owner ruling 2026-08-09: the salary-config list is ADMIN-only. Without
       // this branch the page shows "No salary configs yet", which reads as
       // "payroll was never set up" -- a lie for a manager who simply cannot see it.
@@ -166,17 +183,31 @@ export function SalarySetupPage() {
   };
 
   const runImport = async () => {
-    const rows = parseCsv(csvText);
+    const { rows, skipped } = parseSalaryCsv(csvText);
+    setSkippedRows(skipped);
     if (rows.length === 0) {
-      toast.error('No valid rows found. Need a header row with at least employee_id and basic.');
+      toast.error(
+        skipped.length > 0
+          ? 'Nothing was imported: every row has a problem. They are listed below.'
+          : 'No valid rows found. Need a header row with at least employee_id and basic.',
+      );
       return;
     }
     setSaving(true);
     try {
       const r = await payrollApi.bulkConfigs(rows);
-      toast.success(`Imported ${r.total} (${r.created} new, ${r.updated} updated)`);
-      setImportOpen(false);
-      setCsvText('');
+      if (skipped.length > 0) {
+        // Say it, and KEEP the window open on the list: a row that was left
+        // out is an employee whose salary did not change.
+        toast.warning(
+          `Imported ${r.total} (${r.created} new, ${r.updated} updated). `
+          + `${skipped.length} row${skipped.length === 1 ? ' was' : 's were'} NOT imported - see the list.`,
+        );
+      } else {
+        toast.success(`Imported ${r.total} (${r.created} new, ${r.updated} updated)`);
+        setImportOpen(false);
+        setCsvText('');
+      }
       await load();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'Import failed');
@@ -197,7 +228,7 @@ export function SalarySetupPage() {
         {canEdit && (
           <div className="flex flex-wrap gap-2">
             <button className="btn-secondary" onClick={seedPt}>Seed PT slabs</button>
-            <button className="btn-secondary" onClick={() => setImportOpen(true)}>Bulk import (CSV)</button>
+            <button className="btn-secondary" onClick={() => { setSkippedRows([]); setImportOpen(true); }}>Bulk import (CSV)</button>
             <button className="btn-primary" onClick={openCreate}>+ Add salary</button>
           </div>
         )}
@@ -206,7 +237,11 @@ export function SalarySetupPage() {
       {/* PT slabs strip */}
       <div className="card p-4">
         <div className="text-sm font-medium text-gray-700 mb-2">Professional Tax slabs</div>
-        {ptSlabs.length === 0 ? (
+        {ptSlabsFailed ? (
+          <p role="alert" className="text-sm text-red-700">
+            Professional Tax slabs could not be loaded. Reload the page to try again.
+          </p>
+        ) : ptSlabs.length === 0 ? (
           <p className="text-sm text-gray-500">
             No PT slabs configured. {canEdit && 'Click "Seed PT slabs" to load Jharkhand + Maharashtra defaults.'}
           </p>
@@ -219,6 +254,12 @@ export function SalarySetupPage() {
             ))}
           </div>
         )}
+        {ptSlabs.some((s) => s.gender_aware) && (
+          <p className="text-xs text-gray-500 mt-2">
+            {ptSlabs.filter((s) => s.gender_aware).map((s) => s.state_name || s.state_code).join(', ')}
+            {' '}has a separate slab for women. {GENDER_NOT_SET_NOTE}
+          </p>
+        )}
       </div>
 
       {/* Configs table */}
@@ -227,6 +268,11 @@ export function SalarySetupPage() {
           <div className="p-6 text-center text-gray-500">Loading…</div>
         ) : noAccess ? (
           <PayrollAccessNotice message={noAccess} what="salary setup" />
+        ) : configsFailed ? (
+          <div role="alert" className="p-6 text-center text-red-700">
+            Salary setups could not be loaded.{' '}
+            <button type="button" className="underline" onClick={() => load()}>Try again</button>
+          </div>
         ) : configs.length === 0 ? (
           <div className="p-6 text-center text-gray-500">
             No salary configs yet. {canEdit && 'Add one or bulk-import via CSV.'}
@@ -241,6 +287,7 @@ export function SalarySetupPage() {
                 <th className="px-3 py-2 text-right">Basic</th>
                 <th className="px-3 py-2 text-right">Gross</th>
                 <th className="px-3 py-2 text-center">PF/ESI/PT</th>
+                <th className="px-3 py-2 text-left">Gender</th>
                 {canEdit && <th className="px-3 py-2"></th>}
               </tr>
             </thead>
@@ -260,6 +307,7 @@ export function SalarySetupPage() {
                   <td className="px-3 py-2 text-center text-xs text-gray-500">
                     {c.pf_applicable ? 'PF' : '—'} / {c.esi_applicable === false ? '—' : 'ESI'} / {c.pt_applicable ? 'PT' : '—'}
                   </td>
+                  <td className="px-3 py-2 text-xs text-gray-500">{GENDER_LABEL[c.gender || '']}</td>
                   {canEdit && (
                     <td className="px-3 py-2 text-right">
                       <button className="text-bv-red-600 hover:underline" onClick={() => openEdit(c)}>Edit</button>
@@ -363,6 +411,15 @@ export function SalarySetupPage() {
                   <option value="no">No</option>
                 </select>
               </Field>
+              <Field label="Gender (for Professional Tax)">
+                <select className="input-field" value={form.gender || ''}
+                  onChange={(e) => setField('gender', e.target.value)}>
+                  <option value="">Not set</option>
+                  <option value="MALE">Male</option>
+                  <option value="FEMALE">Female</option>
+                </select>
+                <span className="block text-xs text-gray-500 mt-1">{GENDER_NOT_SET_NOTE}</span>
+              </Field>
               <Field label="TDS / month (manual)">
                 <input type="number" className="input-field" value={form.tds_monthly || 0}
                   onChange={(e) => setField('tds_monthly', num(e.target.value))} />
@@ -405,8 +462,9 @@ export function SalarySetupPage() {
             <h2 className="text-lg font-semibold mb-2">Bulk import (CSV)</h2>
             <p className="text-sm text-gray-500 mb-3">
               First line is the header. Supported columns: <code>employee_id, basic, hra, conveyance,
-              medical, special_allowance, designation, entity_id, store_id, pan, uan, tds_monthly</code>.
-              <code>employee_id</code> and <code>basic</code> are required.
+              medical, special_allowance, designation, entity_id, store_id, pan, uan, tds_monthly, gender</code>.
+              <code>employee_id</code> and <code>basic</code> are required. <code>gender</code> is MALE or FEMALE;
+              leave the column out to keep what is already saved.
             </p>
             <textarea
               className="input-field h-48 font-mono text-xs"
@@ -414,6 +472,20 @@ export function SalarySetupPage() {
               value={csvText}
               onChange={(e) => setCsvText(e.target.value)}
             />
+            {skippedRows.length > 0 && (
+              <div role="alert" className="mt-3 max-h-40 overflow-y-auto rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                <p className="font-medium">
+                  {skippedRows.length === 1 ? '1 row was not imported:' : `${skippedRows.length} rows were not imported:`}
+                </p>
+                <ul className="mt-1 list-disc pl-5">
+                  {skippedRows.map((r) => (
+                    <li key={r.line}>
+                      Line {r.line}{r.employee_id ? ` (${r.employee_id})` : ''}: {r.reason}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
             <div className="flex justify-end gap-2 mt-4">
               <button className="btn-secondary" onClick={() => setImportOpen(false)} disabled={saving}>Cancel</button>
               <button className="btn-primary" onClick={runImport} disabled={saving}>
@@ -440,23 +512,59 @@ const NUMERIC_COLS = new Set([
   'basic', 'hra', 'conveyance', 'medical', 'special_allowance', 'tds_monthly',
 ]);
 
-/** Minimal CSV parser (no quoted-comma support) -> SalaryConfig[]. */
-function parseCsv(text: string): SalaryConfig[] {
-  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-  if (lines.length < 2) return [];
-  const headers = lines[0].split(',').map((h) => h.trim());
-  const out: SalaryConfig[] = [];
-  for (let i = 1; i < lines.length; i++) {
-    const cells = lines[i].split(',').map((c) => c.trim());
+export interface SkippedCsvRow {
+  /** 1-based line of the pasted text, counting the header and blank lines. */
+  line: number;
+  employee_id: string;
+  reason: string;
+}
+
+/** Minimal CSV parser (no quoted-comma support).
+ *
+ *  A row that cannot be imported is RETURNED in `skipped` with its line and
+ *  the reason. It used to be dropped without a word, so an import of one good
+ *  and one bad row said "Imported 1" and nobody learned an employee was left
+ *  out. The checks are the server's own (basic > 0, every other amount >= 0),
+ *  so one bad row no longer costs the whole batch either. */
+export function parseSalaryCsv(text: string): { rows: SalaryConfig[]; skipped: SkippedCsvRow[] } {
+  const lines = text
+    .split(/\r?\n/)
+    .map((l, i) => ({ line: i + 1, text: l.trim() }))
+    .filter((l) => l.text);
+  const rows: SalaryConfig[] = [];
+  const skipped: SkippedCsvRow[] = [];
+  if (lines.length < 2) return { rows, skipped };
+  const headers = lines[0].text.split(',').map((h) => h.trim());
+  for (const { line, text: lineText } of lines.slice(1)) {
+    const cells = lineText.split(',').map((c) => c.trim());
     const row: Record<string, string | number> = {};
+    let reason = '';
     headers.forEach((h, idx) => {
       const raw = cells[idx] ?? '';
-      row[h] = NUMERIC_COLS.has(h) ? Number(raw || 0) : raw;
+      if (!NUMERIC_COLS.has(h)) {
+        row[h] = raw;
+        return;
+      }
+      const n = Number(raw || 0);
+      row[h] = n;
+      if (reason) return;
+      if (!Number.isFinite(n)) reason = `${h} "${raw}" is not a number`;
+      else if (n < 0) reason = `${h} cannot be negative`;
     });
-    if (!row.employee_id || !row.basic || Number(row.basic) <= 0) continue;
-    out.push(row as unknown as SalaryConfig);
+    if ('gender' in row) {
+      // The server knows MALE, FEMALE or empty (not set), nothing else.
+      row.gender = String(row.gender).toUpperCase();
+      if (!reason && !(row.gender in GENDER_LABEL)) reason = 'gender must be MALE or FEMALE (or empty)';
+    }
+    if (!row.employee_id) reason = 'employee_id is missing';
+    else if (!reason && !(Number(row.basic) > 0)) reason = 'basic must be greater than 0';
+    if (reason) {
+      skipped.push({ line, employee_id: String(row.employee_id || ''), reason });
+      continue;
+    }
+    rows.push(row as unknown as SalaryConfig);
   }
-  return out;
+  return { rows, skipped };
 }
 
 export default SalarySetupPage;
