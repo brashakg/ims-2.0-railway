@@ -296,20 +296,87 @@ def test_points_being_redeemed_right_now_are_not_expired_underneath_the_customer
     client, auth_headers, env
 ):
     """A redeem has taken the balance but its REDEEM row is not written yet.
-    The sweep must not debit again (balance -100); once the row lands the lot
-    simply has nothing left to shed."""
+    The sweep must not debit again (balance -100): nothing above the valid
+    lots' share is left, so the lot finishes having shed nothing, and once the
+    row lands ledger and account agree."""
     env.seed("c8", _earn("L8", 100, "c8"), balance=0)
 
-    mid = client.post(URL, headers=auth_headers)
-    assert mid.status_code == 503 and mid.json()["detail"]["incomplete_lots"] == ["L8"]
+    first = client.post(URL, headers=auth_headers)
+    assert first.status_code == 200 and first.json() == {"expired_txns": 0, "points_expired": 0}
     assert env.balance("c8") == 0 and env.expire_rows("c8") == []
-    assert env.marked("L8") is False
+    assert env.marked("L8") is True
 
     env.txns.insert_one({"_id": "R8", "txn_id": "R8", "type": "REDEEM", "points": 100,
                          "customer_id": "c8", "created_at": datetime(2026, 1, 20)})
     assert client.post(URL, headers=auth_headers).json() == {"expired_txns": 0, "points_expired": 0}
     assert env.balance("c8") == 0 and env.expire_rows("c8") == []
-    assert env.marked("L8") is True
+
+
+def _redeem(env, cid, txn_id, points, when):
+    """The /loyalty/redeem route's two writes: guarded debit, then the row."""
+    assert env.a_repo.try_debit(cid, points) is not None
+    env.txns.insert_one({"_id": txn_id, "txn_id": txn_id, "type": "REDEEM", "points": points,
+                         "customer_id": cid, "created_at": when})
+
+
+def test_redeem_landing_after_the_sweep_read_the_ledger_never_takes_a_valid_lots_points(
+    client, auth_headers, env, monkeypatch
+):
+    """Due lot A (100) and valid lot B (60); balance 160. The customer redeems
+    60 after the sweep has read the ledger. FIFO charges the redeem to A, so A
+    sheds 40 and B keeps 60. Before: the sweep debited its stale 100 and the
+    customer was left with 0 -- B's 60 valid points expired."""
+    env.seed("c14", _earn("A14", 100, "c14"),
+             _earn("B14", 60, "c14", created=T0 + timedelta(days=5), expires=datetime(2099, 1, 1)))
+    real = env.t_repo.ledger_for_expiry
+
+    def ledger_then_redeem(customer_id):
+        rows = real(customer_id)
+        _redeem(env, "c14", "R14", 60, T0 + timedelta(days=10))
+        return rows
+
+    monkeypatch.setattr(env.t_repo, "ledger_for_expiry", ledger_then_redeem)
+    first = client.post(URL, headers=auth_headers)
+    monkeypatch.setattr(env.t_repo, "ledger_for_expiry", real)
+
+    assert first.status_code == 200 and first.json() == {"expired_txns": 1, "points_expired": 40}
+    assert client.post(URL, headers=auth_headers).json() == {"expired_txns": 0, "points_expired": 0}
+    assert env.balance("c14") == 60
+    assert [(r["source_earn_txn_id"], r["points"]) for r in env.expire_rows("c14")] == [("A14", 40)]
+    assert env.marked("A14") is True and env.marked("B14") is False
+    from api.services.loyalty_engine import expirable_points_by_lot
+    assert expirable_points_by_lot(list(env.txns.docs), datetime(2100, 1, 1)) == {"B14": 60}
+
+
+def test_redeem_landing_between_the_balance_read_and_the_debit_makes_the_lot_wait(
+    client, auth_headers, env, monkeypatch
+):
+    """Same customer shape; the redeem lands inside debit_for_expiry, after it
+    read the balance and before its guarded write. The guard (balance must
+    still hold the valid lots' 60 after the debit) refuses, the lot waits, and
+    the next sweep sheds the right 40."""
+    env.seed("c15", _earn("A15", 100, "c15"),
+             _earn("B15", 60, "c15", created=T0 + timedelta(days=5), expires=datetime(2099, 1, 1)))
+    real = env.accounts.find_one_and_update
+    fired = []
+
+    def redeem_first(flt, upd, *a, **k):
+        if not fired and "money_ledger.idempotency_key" in flt:
+            fired.append(1)
+            monkeypatch.setattr(env.accounts, "find_one_and_update", real)
+            _redeem(env, "c15", "R15", 60, T0 + timedelta(days=10))
+        return real(flt, upd, *a, **k)
+
+    monkeypatch.setattr(env.accounts, "find_one_and_update", redeem_first)
+    first = client.post(URL, headers=auth_headers)
+    assert fired and first.status_code == 503, first.text
+    assert first.json()["detail"]["incomplete_lots"] == ["A15"]
+    assert env.balance("c15") == 100 and env.expire_rows("c15") == []
+    assert env.marked("A15") is False
+
+    assert client.post(URL, headers=auth_headers).json() == {"expired_txns": 1, "points_expired": 40}
+    assert env.balance("c15") == 60
+    assert [(r["source_earn_txn_id"], r["points"]) for r in env.expire_rows("c15")] == [("A15", 40)]
 
 
 # ---------------------------------------------------------------------------
@@ -325,10 +392,10 @@ def test_two_sweeps_holding_the_same_lot_expire_it_once(env):
     real_debit = env.a_repo.debit_for_expiry
     counted = {}
 
-    def a_is_overtaken(customer_id, lot_id, points, actor=None):
+    def a_is_overtaken(customer_id, lot_id, points, **k):
         env.a_repo.debit_for_expiry = real_debit
         counted["B"] = expire_lot(env.t_repo, env.a_repo, "c9", "L9", 100, "u", "run-B")
-        return real_debit(customer_id, lot_id, points, actor)
+        return real_debit(customer_id, lot_id, points, **k)
 
     env.a_repo.debit_for_expiry = a_is_overtaken
     counted["A"] = expire_lot(env.t_repo, env.a_repo, "c9", "L9", 100, "u", "run-A")
