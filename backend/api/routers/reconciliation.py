@@ -274,15 +274,14 @@ async def get_tally_tender_receipt_jv(
     # SAME order selection as finance.get_tally_sales_jv -- never DRAFT/CANCELLED,
     # same datetime-typed created_at range -- so Sales + Receipt vouchers cover
     # the exact same order set.
-    from .finance import real_sale_match, _apply_created_at_range, _store_maps
+    from .finance import real_sale_match, _apply_created_at_range, _company_shop_ids
 
     match: Dict[str, Any] = {**real_sale_match(db)}
     store_ids = None
     if store_id:
         store_ids = [store_id]
     elif entity_id:
-        s2e, _ = _store_maps(db)
-        store_ids = [sid for sid, eid in s2e.items() if eid == entity_id]
+        store_ids = _company_shop_ids(db, entity_id)
     if store_ids is not None:
         match["store_id"] = {"$in": store_ids}
     _apply_created_at_range(match, from_date, to_date)
