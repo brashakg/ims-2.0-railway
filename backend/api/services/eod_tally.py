@@ -970,8 +970,10 @@ def standing_count(db, drawer: Dict[str, Any], own: Optional[str] = None) -> Dic
         "at": _instant(drawer.get("blind_submitted_at")),
         "counted_paisa": int(drawer.get("blind_count_paisa") or 0),
     }
-    banked = sum(c["bank_deposit_paisa"] for c in later["banked"] if c["at"] >= start["at"])
-    unknown = any(c["at"] > start["at"] for c in later["unknown"])
+    # A count with no stored instant (a legacy row) is before every close.
+    since = start["at"] or datetime.min
+    banked = sum(c["bank_deposit_paisa"] for c in later["banked"] if c["at"] >= since)
+    unknown = any(c["at"] > since for c in later["unknown"])
     result = {
         "paisa": int(start["counted_paisa"]) - banked,
         "at": start["at"],
