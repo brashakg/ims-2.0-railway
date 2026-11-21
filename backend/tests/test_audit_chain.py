@@ -76,7 +76,8 @@ def test_compute_entry_hash_changes_when_prev_or_seq_changes():
 
 
 def test_verify_empty_collection_is_intact():
-    """No rows -> nothing to tamper with -> intact:true, 0 checked."""
+    """A trail that was READ and holds no rows -> verified, intact, 0 checked
+    (an unreadable one is the opposite: test_audit_b10_approvals_audit_chain)."""
 
     class _Empty:
         def find(self, *_a, **_k):
@@ -86,8 +87,12 @@ def test_verify_empty_collection_is_intact():
 
             return _C()
 
+        def count_documents(self, *_a, **_k):
+            return 0
+
     res = verify_chain(_Empty())
-    assert res == {"intact": True, "broken_at_seq": None, "entries_checked": 0}
+    assert res == {"intact": True, "verified": True, "reason": None,
+                   "broken_at_seq": None, "entries_checked": 0, "unchained_rows": 0}
 
 
 # ===========================================================================

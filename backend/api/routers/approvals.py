@@ -29,10 +29,29 @@ other action type refuses them (insufficient_tier), as before. Whoever raised
 an 'rtv' cannot approve it ('rtv' is maker-checker): a second accounts person
 does.
 
+A journal's request ('journal_entry') is routed to ADMIN / SUPERADMIN only,
+the roles the journal screen lets decide a journal (decision D4, 2026-11-11;
+services/approvals.approver_roles_for), and read only by the journal readers
+(ADMIN / SUPERADMIN / ACCOUNTANT; owner decision 2026-10-18, FU-17). A store
+or area manager gets no bell for one, does not find it in the inbox, and
+opening, approving, rejecting or spending it by id answers 404, as an 'rtv'
+does (services/approvals._hidden_from). An ACCOUNTANT sees it without buttons.
+An Admin's decision here is the journal's decision (je_service.sync_with_request).
+
 Approving, rejecting and spending by id (/approve, /reject, /consume) follow
 the rule GET applies (_request_in_reach): its maker or consumer, else a caller
 whose shops it is in. Anyone else gets exactly what a missing id gets (404),
 checked before any role, tier or PIN gate could tell the two apart.
+
+Every route that reads requests reads them strictly (_decision_engine,
+_strictly) -- /approve, /reject, /consume, GET by id, the inbox and "mine": a
+request (or list) that could not be read at the database is 503 "try again",
+never the 404 a missing request gets, never an empty list, and never a
+decision or a spend made without the reach check and the journal's note rule
+(the type of a request that cannot be read is not known, so this holds for
+every action type). A decision or spend whose write landed with its reply lost is 503 too;
+the same press again answers "already reviewed" / "already consumed" and the
+engine writes the audit row the lost reply skipped (ApprovalEngine._record_trail).
 """
 
 from __future__ import annotations
@@ -45,9 +64,10 @@ from pydantic import BaseModel, Field
 
 from .auth import get_current_user, require_roles
 from ..dependencies import user_store_scope, validate_store_access
-from ..services.approvals import ApprovalEngine, may_approve
+from ..services import je_service
+from ..services.approvals import ApprovalEngine, _hidden_from
 from ..services.cost_mask import AP_ROLES
-from ..services.payables_mask import SUPPLIER_MONEY_ACTIONS, strip_approval_money
+from ..services.payables_mask import strip_approval_money
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -72,6 +92,25 @@ def _get_db():
 
 def _engine() -> ApprovalEngine:
     return ApprovalEngine(db=_get_db())
+
+
+def _decision_engine() -> ApprovalEngine:
+    """The engine as every route that reads requests uses it: its reads raise
+    when they could not be made (the engine's opt-in strict mode)."""
+    return ApprovalEngine(db=_get_db(), strict=True)
+
+
+def _strictly(fn, *args, **kwargs):
+    """One call into the decision engine: a database failure inside it is 503
+    "try again" -- not an unhandled error, and not the engine's 404 for a
+    request it could not read."""
+    try:
+        return fn(*args, **kwargs)
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[APPROVALS] the request could not be read or decided: %s", e)
+        raise HTTPException(status_code=503, detail={"error": "approval_unreadable"}) from e
 
 
 def _roles(user: Dict[str, Any]) -> List[str]:
@@ -225,13 +264,15 @@ async def get_inbox(
     rule, validate_store_access), never another shop's queue. Each row
     carries ``can_approve``: whether approve / reject would pass this caller's
     role, maker-checker and shop gates (ApprovalEngine.can_act), so a screen
-    offers the buttons only where they work."""
-    eng = _engine()
+    offers the buttons only where they work. An inbox that could not be read
+    is 503, never an empty list (D112)."""
+    eng = _decision_engine()
     if store_id:
         validate_store_access(store_id, current_user)
     scoped = [store_id] if store_id else _store_ids(current_user)
     roles = _roles(current_user)
-    rows = eng.list_inbox(
+    rows = _strictly(
+        eng.list_inbox,
         approver_roles=roles,
         store_ids=scoped,
         status=status or "REQUESTED",
@@ -253,8 +294,10 @@ async def get_inbox(
 async def get_my_requests(
     current_user: Dict[str, Any] = Depends(get_current_user),
 ):
-    """A maker's own requests + their status (and approval_token once approved)."""
-    rows = _engine().list_mine(requested_by=current_user.get("user_id"), limit=200)
+    """A maker's own requests + their status (and approval_token once approved).
+    A list that could not be read is 503, never an empty one (D112)."""
+    rows = _strictly(_decision_engine().list_mine,
+                     requested_by=current_user.get("user_id"), limit=200)
     _resolve_names(rows)
     rows = [strip_approval_money(r, current_user) for r in rows]
     return {"requests": rows, "total": len(rows)}
@@ -268,7 +311,7 @@ def _request_in_reach(eng: ApprovalEngine, doc: Dict[str, Any], user: Dict[str, 
     uid = user.get("user_id")
     if uid and uid in (doc.get("requested_by"), doc.get("consumed_by")):
         return True
-    if doc.get("action_type") in SUPPLIER_MONEY_ACTIONS and not may_approve(doc, _roles(user)):
+    if _hidden_from(doc, _roles(user)):
         return False
     _cross, stores = user_store_scope(user)
     # The engine's one shop rule, reused rather than copied.
@@ -276,14 +319,39 @@ def _request_in_reach(eng: ApprovalEngine, doc: Dict[str, Any], user: Dict[str, 
     return eng._store_scope_ok(doc.get("store_id"), set(_roles(user)), sorted(stores))
 
 
-def _in_reach_or_missing(eng: ApprovalEngine, request_id: str, user: Dict[str, Any]) -> None:
+def _in_reach_or_missing(
+    eng: ApprovalEngine, request_id: str, user: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
     """approve / reject: a request the caller may not open by id (the rule GET
     applies, _request_in_reach) answers exactly what a missing id answers --
     the engine's 404 not_found -- before the engine's tier, maker-checker,
-    store or PIN gate can tell another shop's request from no request (F63)."""
-    doc = eng.get(request_id)
+    store or PIN gate can tell another shop's request from no request (F63).
+    Returns the request (None when there is none); 503 when it could not be
+    read (``eng`` is the strict _decision_engine)."""
+    doc = _strictly(eng.get, request_id)
     if doc is not None and not _request_in_reach(eng, doc, user):
         _decode({"ok": False, "http": 404, "error": "not_found"}, success_keys=())
+    return doc
+
+
+def _decided(res: Dict[str, Any]) -> bool:
+    """The engine's answer says the request is decided: by this press, or
+    already (already_reviewed) -- which is what the press after a decision
+    whose reply was lost (503) gets, when the journal has not moved yet."""
+    return bool(res.get("ok") or res.get("error") == "already_reviewed")
+
+
+def _move_journal(doc: Optional[Dict[str, Any]]) -> None:
+    """A journal's own request decided here moves its journal in the same call
+    (L3-25): the inbox used to update only the request, leaving the journal
+    SUBMITTED where Post refused not_approved and the journal's own Approve
+    refused already_reviewed. One rule decides whether and how, in je_service
+    (_take_request_decision). Fail-soft: the decision stands on the request,
+    and every journal door catches the journal up from it."""
+    try:
+        je_service.sync_with_request(_get_db(), doc)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[APPROVALS] journal sync after decision failed: %s", e)
 
 
 @router.get("/requests/{request_id}")
@@ -302,9 +370,9 @@ async def get_request(
     Anyone else gets the same 404 a missing request gets -- never another
     shop's amount, context or reviewer by typing its id. An 'rtv' request
     answers the same 404 to anyone who may not approve one (R1) unless it is
-    their own."""
-    eng = _engine()
-    doc = eng.get(request_id)
+    their own. A request that could not be read is 503, never that 404 (D112)."""
+    eng = _decision_engine()
+    doc = _strictly(eng.get, request_id)
     if not doc or not _request_in_reach(eng, doc, current_user):
         raise HTTPException(status_code=404, detail="Request not found")
     uid = current_user.get("user_id")
@@ -330,15 +398,18 @@ async def approve_request(
     mint are a single atomic op inside the engine. An 'rtv' request is the
     accounts roles' at any tier (R1); a manager gets 404 for one, and so does
     anyone for another shop's request (_in_reach_or_missing)."""
-    eng = _engine()
-    _in_reach_or_missing(eng, request_id, current_user)
-    res = eng.approve(
+    eng = _decision_engine()
+    doc = _in_reach_or_missing(eng, request_id, current_user)
+    res = _strictly(
+        eng.approve,
         request_id,
         approver_user_id=current_user.get("user_id"),
         approver_roles=_roles(current_user),
         pin=body.pin,
         approver_store_ids=_store_ids(current_user),
     )
+    if _decided(res):
+        _move_journal(doc)
     return _decode(res, success_keys=("approval_token", "status", "reviewed_at", "request_id"))
 
 
@@ -349,10 +420,17 @@ async def reject_request(
     current_user: Dict[str, Any] = Depends(require_roles(*_DECIDE_ROLES)),
 ):
     """Reject a request with the approver's PIN. Same routing and the same
-    shop rule as approve."""
-    eng = _engine()
-    _in_reach_or_missing(eng, request_id, current_user)
-    res = eng.reject(
+    shop rule as approve. A rejection that rejects a journal needs the
+    journal's checker note (400 note_required without one)."""
+    eng = _decision_engine()
+    doc = _in_reach_or_missing(eng, request_id, current_user)
+    # Rejecting a journal's request rejects the journal: the journal screen's
+    # checker-note rule (je_service) is held before anything is decided.
+    refusal = je_service.inbox_reject_refusal(_get_db(), doc, _roles(current_user), body.reason)
+    if refusal:
+        _decode(refusal, success_keys=())
+    res = _strictly(
+        eng.reject,
         request_id,
         approver_user_id=current_user.get("user_id"),
         approver_roles=_roles(current_user),
@@ -360,7 +438,15 @@ async def reject_request(
         reason=body.reason,
         approver_store_ids=_store_ids(current_user),
     )
+    if _decided(res):
+        _move_journal(doc)
     return _decode(res, success_keys=("status", "request_id"))
+
+
+_DOMAIN_ONLY = {
+    "REFUND_APPROVAL_MATRIX": "A refund approval is used by the refund itself.",
+    "journal_entry": "A journal approval is used by the journal's own Post.",
+}
 
 
 @router.post("/requests/{request_id}/consume")
@@ -379,17 +465,22 @@ async def consume_request(
     the engine's shop rule over the caller's shops). Anyone else gets the 404
     a missing request gets here, and the approval is left unspent: a request
     id alone never spends another shop's approval."""
-    if body.action_type == "REFUND_APPROVAL_MATRIX":
-        # Only the refund door spends a refund approval: it binds the bill,
-        # the store, the amount and the tier. Spent here it would bind nothing.
-        raise HTTPException(status_code=400, detail="A refund approval is used by the refund itself.")
-    eng = _engine()
-    doc = eng.get(request_id)
-    if doc is not None and doc.get("action_type") == "REFUND_APPROVAL_MATRIX":
-        raise HTTPException(status_code=400, detail="A refund approval is used by the refund itself.")
+    # Some approvals are spent only by their own door, which binds what they
+    # approve; spent here they would bind nothing. A refund approval: the
+    # refund (bill, store, amount, tier). A journal approval: the journal's
+    # Post (D54) -- spent here, the journal could never post.
+    if body.action_type in _DOMAIN_ONLY:
+        raise HTTPException(status_code=400, detail=_DOMAIN_ONLY[body.action_type])
+    # Read strictly, as /approve and /reject: read as "no such request", an
+    # unreadable one skipped the reach check below and was spent by its id.
+    eng = _decision_engine()
+    doc = _strictly(eng.get, request_id)
     if doc is not None and not _request_in_reach(eng, doc, current_user):
         raise HTTPException(status_code=404, detail="not_found")
-    res = eng.consume_approval(
+    if doc is not None and doc.get("action_type") in _DOMAIN_ONLY:
+        raise HTTPException(status_code=400, detail=_DOMAIN_ONLY[doc["action_type"]])
+    res = _strictly(
+        eng.consume_approval,
         consumed_by=current_user.get("user_id"),
         action_type=body.action_type,
         request_id=request_id,
