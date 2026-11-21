@@ -2424,6 +2424,10 @@ def _post_locked(
     # on the shelf again (the returnable-qty answer, asked again now).
     if _ims_cancel_door_ran(order):
         return_lines = [line.model_copy(update={"restock": False}) for line in return_lines]
+    # What this post asks to put back, before the cap: the stock step settles
+    # another run's booking of these lines first (restock_refund), and only
+    # then caps -- a booking left by a post that died is no unit back.
+    asked_lines = list(return_lines)
     return_lines, _, unknown = _cap_restock_to_returnable(return_lines, order, refund_id)
     # An unreadable SOLD answer: restock nothing now and keep the restock OPEN
     # (applied=False, a task, the /returns/{id}/restock retry) -- the same
@@ -2526,12 +2530,14 @@ def _post_locked(
             # Booked on the order lines first (_restock_booked): Goods back or
             # the retry door may run for this refund too, before or after.
             # None: one of them just put the units back -- nothing to restock.
-            restock_result = _restock_booked(order, return_lines, refund_id, lambda ls: _restock_good_items(
+            restock_result = restock_refund(order, asked_lines, refund_id, return_id or refund_id,
+                                            lambda ls, keys: _restock_good_items(
                 ls,
                 billing_store,
                 return_id or refund_id,
                 order_id=order_id,
                 user_id="SYSTEM_SHOPIFY_REFUND",
+                slot_keys=keys,
                 # No human counter on this door (it runs as SYSTEM), and the
                 # stored review-row proposal is NOT a routing signal: it is
                 # derived from the same stamps as tier-1, so it is either
@@ -2844,52 +2850,301 @@ class ReturnSlotIndexMissing(RuntimeError):
     be read): no Shopify refund door places a unit."""
 
 
-def _restock_booked(
-    order: Dict[str, Any], lines: List[Any], refund_id: str,
-    restock: Callable[[List[Any]], Dict[str, Any]],
+class StockUnreadable(RuntimeError):
+    """A Shopify refund door could not read what is still out (the caps):
+    nothing is booked or placed on a guess."""
+
+
+class SlotConflict(RuntimeError):
+    """A booking was refused because another run's booking of this refund
+    named one of its slots in the meantime: plan again (restock_refund)."""
+
+
+def restock_refund(
+    order: Dict[str, Any], lines: List[Any], refund_id: str, return_id: str,
+    restock: Callable[[List[Any], Optional[List[str]]], Dict[str, Any]],
     processing_store_id: Optional[str] = None,
     owner: Optional[str] = None,
+    before_booking: Optional[Callable[[Optional[List[str]]], None]] = None,
 ) -> Optional[Dict[str, Any]]:
-    """The ONE way a Shopify refund's units go back in stock: Goods back, the
-    confirm / AUTO post and the /returns/{id}/restock retry each call it with
-    lines already capped by _cap_restock_to_returnable, and `restock` (their
-    returns._restock_good_items call). Every restock line is first booked on
-    its order line (_hold_returned_qty): its returned_qty, which the counter
-    return door and every cap read, and this refund's mark (its units put
-    back on that line), so the refund never restocks a unit of the line a
-    second time, whichever door runs first. A unit that did not land is
-    un-booked; a landed one never is. A HISTORICAL order (our own Shopify
-    order-history import, older than IMS stock) is booked the same way but
-    never restocked by any door (owner 2026-10-01): its booking raises ONE
-    task to add the frames through stock-in (_stock_in_task).
-    None: another door booked those units first (nothing restocked).
+    """THE stock step of a Shopify refund, for every door that runs it (D129):
+    the confirm / AUTO post and its re-drive, Goods back, and the record's
+    claimed step ('Update stock', 'Retry stock step', the hourly sweep:
+    returns._retry_claimed). Every run has an owner (`owner`: the record
+    claim's token; a door with none gets a fresh id) and books each piece
+    under a token naming that run, the order line, the refund and the return
+    SLOT of each piece (booking_token): the booking IS its intent, written in
+    the same write that counts it on the line, so no slot is ever chosen and
+    not yet reserved.
 
-    `owner`: the claim token of the record's stock step that calls this
-    (returns._retry_claimed). Its bookings then carry tokens of its own
-    (booking_token) and a historical order's stock-in task its own ref
-    (stock_in_ref), so the worker that continues one which died between its
-    booking and its unit write -- the un-booking below is a `finally` a dead
-    process never runs -- can tell that booking from a landed one and from
-    another door's (returns._settle_stopped_booking, D122(3)).
+    1. settle_bookings: every booking of this refund ANOTHER run left on
+       these lines with a piece whose slot no stock row holds -- a run that
+       died, stalled, or is still between its booking and its unit write --
+       is TAKEN OVER (its token replaced by one of this run's, same units,
+       same slots): this run places those pieces on those SAME slots, so a
+       late write of the other run hits a used slot and is credited, and its
+       un-booking finds its token gone. On a historical order the booking
+       stays and its stock-in task is raised under that run's fixed id.
+    2. The rest is capped on the lines as they now stand
+       (_cap_restock_to_returnable; StockUnreadable when unreadable).
+    3. New pieces get the lowest free slots that no stock row holds and no
+       booking of this refund names (returns._return_slot_keys `reserved`).
+    4. `before_booking(slot_keys)` (the claimed step renews its claim:
+       _ClaimLost books nothing), then the new pieces are booked -- refused
+       while any booking of this refund names one of their slots
+       (SlotConflict: planned again) -- and every piece is placed
+       (_restock_booked; `restock` is the door's returns._restock_good_items
+       call, given the lines and their slots in plan order).
+
+    None: nothing of this refund was left to put back (another door booked
+    it). D82(2): ReturnSlotIndexMissing before anything is written."""
+    from ..routers import returns as _r
+
+    owner = owner or uuid.uuid4().hex
+    historical = bool(order.get("historical"))
+    if not historical and not _r._return_slot_index_ok():
+        raise ReturnSlotIndexMissing(refund_id)
+    for _attempt in range(3):
+        slot_keys: Optional[List[str]] = None
+        try:
+            # Read the lines as they stand now (a run refused on a slot reads
+            # them again: the booking that refused it is on them).
+            adopted = settle_bookings(_with_fresh_lines(order), lines, refund_id, return_id, owner)
+            order = _with_fresh_lines(order)
+            others = _others_booked(order, refund_id, owner)
+            capped, _, unknown = _cap_restock_to_returnable(lines, order, refund_id)
+            if not historical and not unknown:
+                stock_repo = _r.get_stock_repository()
+                if stock_repo is not None:
+                    units = _r.restock_engine.plan_restock([ln.model_dump() for ln in capped]).get("units", [])
+                    slot_keys = _r._return_slot_keys(stock_repo, return_id, "back", units, None, None,
+                                                     _slots_named(order, refund_id))
+        except Exception as exc:  # noqa: BLE001 -- no answer: nothing is placed on a guess
+            logger.warning("[SHOPIFY_REFUND] stock step of refund=%s could not read its bookings or slots: %s",
+                           refund_id, exc)
+            raise StockUnreadable(refund_id) from exc
+        if unknown:
+            raise StockUnreadable(refund_id)
+        if before_booking is not None:
+            before_booking(slot_keys)
+        try:
+            out = _restock_booked(order, capped, refund_id, lambda ls, keys=None: restock(ls, keys),
+                                  processing_store_id=processing_store_id,
+                                  owner=owner, slot_keys=slot_keys, adopted=adopted)
+        except SlotConflict:
+            continue
+        if out is not None:
+            # A booking of another run still on the lines after the settle (a
+            # landed one): what this run's 'applied' may rest on.
+            out["booked_before"] = others
+        return out
+    raise StockUnreadable(refund_id)
+
+
+def _with_fresh_lines(order: Dict[str, Any]) -> Dict[str, Any]:
+    """The order with its lines (and their bookings) read again: a settle or
+    a concurrent door may have changed them. A removed line the caller had
+    merged in (returns._with_removed_lines) stays merged. RAISES when the
+    order cannot be read (nothing is placed on a guess)."""
+    from ..routers import returns as _r
+
+    coll = _r._orders_coll()
+    if coll is None or not order.get("order_id"):
+        return order
+    fresh = coll.find_one({"order_id": order.get("order_id")}, {"items": 1, "removed_lines": 1})
+    if not fresh:
+        return order
+    ids = {str(it.get("item_id")) for it in order.get("items") or [] if isinstance(it, dict)}
+    merged = [it for it in fresh.get("removed_lines") or []
+              if isinstance(it, dict) and str(it.get("item_id")) in ids]
+    return {**order, "items": [*(fresh.get("items") or []), *merged]}
+
+
+def _refund_tokens(order: Dict[str, Any], refund_id: str) -> List[Tuple[Dict[str, Any], str, Tuple]]:
+    """(order line, token, parsed) of every booking_token of this refund on
+    the order's lines."""
+    out = []
+    for it in order.get("items") or []:
+        for token in (it.get("claim_tokens") or []) if isinstance(it, dict) else []:
+            got = parse_booking_token(token)
+            if got is not None and got[3] == refund_id:
+                out.append((it, str(token), got))
+    return out
+
+
+def _slots_named(order: Dict[str, Any], refund_id: str) -> set:
+    """Every slot a booking of this refund names: no new piece takes one."""
+    return {k for _it, _t, got in _refund_tokens(order, refund_id) for k in got[4]}
+
+
+def _others_booked(order: Dict[str, Any], refund_id: str, owner: str) -> bool:
+    """Some unit of this refund is booked on these lines by another run (or
+    by a booking with no run): this run did not land it."""
+    mine = sum(got[1] for _it, _t, got in _refund_tokens(order, refund_id) if got[0] == owner)
+    total = sum(_f((it.get("restocked_refunds") or {}).get(refund_id))
+                for it in order.get("items") or [] if isinstance(it, dict))
+    return total > mine + 1e-9
+
+
+_Adopted = List[Tuple[Any, Tuple[Dict[str, Any], float, str, str], List[str]]]
+
+
+def settle_bookings(order: Dict[str, Any], lines: List[Any], refund_id: str, return_id: str,
+                    owner: str) -> _Adopted:
+    """D122(3), D129: what this run takes over of the bookings ANOTHER run of
+    this refund's stock step left on the lines it restocks. The other run may
+    have died, stalled, or still be running between its booking and its unit
+    write -- the slots make all three safe:
+
+    * every slot of its booking held by a stock row (now or in its history):
+      the pieces landed -- the booking stays the other run's;
+    * a slot no row holds: the booking is TAKEN OVER whole (_adopt: its token
+      replaced by this run's, the same units and slots, one write; the line's
+      counts never move) and this run places its pieces on those SAME slots.
+      A held slot among them is credited, never placed twice; a late write
+      of the other run hits a used slot and is credited; its un-booking finds
+      its token gone and takes nothing back;
+    * a HISTORICAL order has no stock rows: its booking IS the piece and its
+      stock-in task the one thing behind it. A run's bookings with no task
+      get that task raised here, once for the run's units, under that run's
+      own ref and fixed id (stock_in_task_id), so the run, if it wakes, finds
+      it or is refused by the database: one task per booking, never two
+      (D129(1)). The booking stays.
+
+    Bookings of THIS run (an earlier attempt of it that was refused on a
+    slot) are its own to place. Returns [(line to place, held row, slots)].
+    RAISES when the stock, the tasks or a line cannot be read or written:
+    nothing is placed on a guess."""
+    from ..routers import returns as _r
+
+    historical = bool(order.get("historical"))
+    stock_repo = None if historical else _r.get_stock_repository()
+    idx = _r._order_line_index(order)
+    adopted: _Adopted = []
+    tasks_owed: Dict[str, List[Any]] = {}
+    seen: set = set()
+    for ln in lines:
+        orig = _r._resolve_original_line(ln, idx)
+        if orig is None or not ln.restock or id(orig) in seen:
+            continue
+        seen.add(id(orig))
+        pid = str(ln.product_id or "")
+        for token in list(orig.get("claim_tokens") or []):
+            got = parse_booking_token(token)
+            if got is None or got[3] != refund_id:
+                continue
+            run, qty, _line, _refund, slots = got
+            if historical:
+                if run != owner:
+                    row = tasks_owed.setdefault(run, [0.0, set()])
+                    row[0] += qty
+                    row[1].add(str(ln.sku or ln.product_id))
+                continue
+            if getattr(stock_repo, "collection", None) is None or len(slots) != int(qty):
+                # No slot to read (a stock store with no collection), or a
+                # token that names none: no answer -- left as it is.
+                continue
+            if run != owner:
+                if all(_r._slot_holder(stock_repo, k) is not None for k in slots):
+                    continue  # landed
+                token = _adopt(order, orig, str(token), owner, qty, refund_id, slots)
+                if token is None:
+                    continue  # taken back or taken over meanwhile: the cap reads it again
+            piece = ln.model_copy(update={"return_qty": qty, "restock": True})
+            adopted.append((piece, (orig, qty, pid, str(token)), list(slots)))
+    for run, (units, items) in tasks_owed.items():
+        if task_on(_task_repo(), stock_in_ref(refund_id, run)) is None:
+            out = raise_stock_in_task(order, units, items, f"Shopify refund {refund_id}",
+                                      stock_in_ref(refund_id, run), None, refund_id=refund_id,
+                                      task_id=stock_in_task_id(refund_id, run))
+            if not out.get("applied"):
+                raise RuntimeError(f"the stock-in task of a booking on order {order.get('order_id')} "
+                                   "could not be raised")
+    return adopted
+
+
+def _adopt(order: Dict[str, Any], orig: Dict[str, Any], token: str, owner: str, qty: float,
+           refund_id: str, slots: List[str]) -> Optional[str]:
+    """Take over ANOTHER run's booking `token` on one order line: the token
+    is replaced by this run's, naming the same units and slots, in ONE write
+    matched on the old token (the line's returned_qty and the refund's mark
+    do not move). Returns the new token; None when the old one is no longer
+    on the line (its run took it back, or another run took it over first).
+    An error is decided by reading the line again (a lost reply)."""
+    from ..routers.returns import _orders_coll
+
+    coll = _orders_coll()
+    item_id = orig.get("item_id") or orig.get("id")
+    new = booking_token(owner, orig, qty, refund_id, slots)
+    ident = {"item_id": item_id} if item_id else {"product_id": orig.get("product_id")}
+    match = {"order_id": order.get("order_id"), "items": {"$elemMatch": {**ident, "claim_tokens": token}}}
+    try:
+        res = coll.update_one(match, {"$set": {"items.$[i].claim_tokens.$[t]": new}},
+                              array_filters=[{f"i.{k}": v for k, v in ident.items()}, {"t": token}])
+        if getattr(res, "matched_count", 0):
+            return new
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[SHOPIFY_REFUND] take-over of booking %s errored: %s", token, exc)
+    mine = {"order_id": order.get("order_id"), "items": {"$elemMatch": {**ident, "claim_tokens": new}}}
+    return new if coll.find_one(mine) is not None else None
+
+
+def _task_repo() -> Any:
+    from ..dependencies import get_task_repository
+
+    return get_task_repository()
+
+
+def _restock_booked(
+    order: Dict[str, Any], lines: List[Any], refund_id: str,
+    restock: Callable[..., Dict[str, Any]],
+    processing_store_id: Optional[str] = None,
+    owner: Optional[str] = None,
+    slot_keys: Optional[List[str]] = None,
+    adopted: Optional[_Adopted] = None,
+) -> Optional[Dict[str, Any]]:
+    """Book and place a Shopify refund's capped restock lines (every door
+    reaches it through restock_refund, which settles and caps first). Every
+    restock line is first booked on its order line (_hold_returned_qty): its
+    returned_qty, which the counter return door and every cap read, and this
+    refund's mark (its units put back on that line), so the refund never
+    restocks a unit of the line a second time, whichever door runs first. A
+    unit that did not land is un-booked; a landed one never is. A HISTORICAL
+    order (our own Shopify order-history import, older than IMS stock) is
+    booked the same way but never restocked by any door (owner 2026-10-01):
+    its booking raises ONE task to add the frames through stock-in
+    (_stock_in_task). None: another door booked those units first (nothing
+    restocked).
+
+    `owner` / `slot_keys`: the run and the slots its pieces were given; each
+    booking's token names both (booking_token), so whoever runs next can tell
+    a piece that landed from one that did not (settle_bookings). `adopted`:
+    the bookings this run took over (settle_bookings), placed first, on their
+    own slots. `restock(pieces)` -- from restock_refund `restock(pieces,
+    slots)`, one slot per unit in plan order -- places them.
 
     D82(2): RAISES ReturnSlotIndexMissing, before anything is booked or
     written, when the unique return-slot indexes are missing or unreadable
-    (returns._return_slot_index_ok): they are what keeps one returned piece
-    to one stock row, for these doors as for the counter."""
+    (returns._return_slot_index_ok)."""
     if not order.get("historical"):
         from ..routers.returns import _return_slot_index_ok
 
         if not _return_slot_index_ok():
             raise ReturnSlotIndexMissing(refund_id)
-    held = _hold_returned_qty(order, lines, refund_id, owner)
-    if held is None:
+    adopted = list(adopted or [])
+    held = _hold_returned_qty(order, lines, refund_id, owner, slot_keys)
+    if held is None and not adopted:
         return None
     if order.get("historical"):
-        return _stock_in_task(order, lines, held, refund_id, processing_store_id, owner)
+        return _stock_in_task(order, lines, held or [], refund_id, processing_store_id, owner)
+    pieces = [piece for piece, _row, _slots in adopted] + (list(lines) if held is not None else [])
+    keys = ([k for _piece, _row, slots in adopted for k in slots]
+            + (list(slot_keys or []) if held is not None else []))
+    held = [row for _piece, row, _slots in adopted] + (held or [])
     result: Dict[str, Any] = {"applied": False}
     unbooked = 0.0
     try:
-        result = restock(lines)
+        result = restock(pieces, keys or None) if (adopted or slot_keys is not None) else restock(pieces)
     finally:
         unbooked = _release_unlanded(order, held, result, refund_id)
     # What this call took back off the order lines (returns._reopen_by_booking).
@@ -2901,18 +3156,42 @@ def _restock_booked(
     return result
 
 
-def booking_token(owner: str, orig_line: Dict[str, Any], qty: float) -> str:
-    """The token of a claimed stock step's booking on ONE order line: its
-    claim, its units, the line. Deterministic, so the same worker booking the
-    same line again changes nothing, and the worker that continues it finds
-    it and knows how many units it holds."""
-    return f"{owner}|{qty:g}|{orig_line.get('item_id') or orig_line.get('id') or orig_line.get('product_id')}"
+def booking_token(owner: str, orig_line: Dict[str, Any], qty: float, refund_id: str = "",
+                  slots: Optional[List[str]] = None) -> str:
+    """The token of one run's booking on ONE order line:
+    "<run>|<units>|<line>|<refund>|<slot>,<slot>". Deterministic, so the same
+    run booking the same line again changes nothing, and whoever runs next
+    finds it and knows which run, how many units, which refund and which
+    slots (parse_booking_token, settle_bookings)."""
+    line = orig_line.get("item_id") or orig_line.get("id") or orig_line.get("product_id")
+    return f"{owner}|{qty:g}|{line}|{refund_id}|{','.join(slots or [])}"
+
+
+def parse_booking_token(token: Any) -> Optional[Tuple[str, float, str, str, List[str]]]:
+    """(run, units, line, refund, slots) of a booking_token; None for any
+    other token (a counter return's, a booking with no run)."""
+    parts = str(token).split("|", 4)
+    if len(parts) != 5:
+        return None
+    try:
+        qty = float(parts[1])
+    except ValueError:
+        return None
+    return parts[0], qty, parts[2], parts[3], [s for s in parts[4].split(",") if s]
 
 
 def stock_in_ref(refund_id: str, owner: Optional[str] = None) -> str:
     """The ref of the stock-in task one booking of a historical order's
-    refund raises: its own per booking (a claimed stock step's: its claim)."""
+    refund raises: its own per booking (its run)."""
     return f"historical_stock_in:{refund_id}:{owner or uuid.uuid4().hex[:8]}"
+
+
+def stock_in_task_id(refund_id: str, owner: str) -> str:
+    """The FIXED id of that task: the run itself and whoever settles its
+    booking raise it under the same id, so the database keeps one."""
+    import hashlib
+
+    return "TSK-HSI-" + hashlib.sha1(f"{refund_id}:{owner}".encode()).hexdigest()[:16].upper()
 
 
 def task_on(tasks: Any, source_ref: str) -> Optional[Dict[str, Any]]:
@@ -2928,7 +3207,8 @@ def task_on(tasks: Any, source_ref: str) -> Optional[Dict[str, Any]]:
 
 
 def _hold_returned_qty(order: Dict[str, Any], lines: List[Any], refund_id: str,
-                       owner: Optional[str] = None) -> Optional[_Held]:
+                       owner: Optional[str] = None,
+                       slot_keys: Optional[List[str]] = None) -> Optional[_Held]:
     """Book each restock line on its order line through the counter return
     door's own atomic claim (returns._claim_returnable_qty, with this
     refund's mark, within the refund's own units on the line: all its lines
@@ -2937,7 +3217,9 @@ def _hold_returned_qty(order: Dict[str, Any], lines: List[Any], refund_id: str,
     in full: its "cancel" and its "return"). All or nothing: None when a
     line has no returnable unit left or this refund's mark has no room for
     them (another door just restocked them); a claim that cannot be written
-    raises. Either way the claims already taken are released."""
+    raises. Either way the claims already taken are released. `slot_keys`
+    (one per unit, in plan order): each line's booking names the slots of its
+    pieces (booking_token), taken per product in that order."""
     from ..routers.returns import _claim_returnable_qty, _order_line_index, _resolve_original_line
 
     idx = _order_line_index(order)
@@ -2950,20 +3232,38 @@ def _hold_returned_qty(order: Dict[str, Any], lines: List[Any], refund_id: str,
             if line.restock:
                 row[1] += float(line.return_qty)
                 row[3] = str(line.product_id or "")
+    queue: Dict[str, List[str]] = {}
+    if slot_keys:
+        from ..routers.returns import restock_engine
+
+        units_plan = restock_engine.plan_restock([ln.model_dump() for ln in lines]).get("units", [])
+        for unit, key in zip(units_plan, slot_keys):
+            queue.setdefault(str(unit.get("product_id") or ""), []).append(key)
     held: _Held = []
     try:
         for orig, qty, units, pid in want.values():
             if qty <= 0:
                 continue
-            token = booking_token(owner, orig, qty) if owner else uuid.uuid4().hex
-            if not _claim_returnable_qty(order.get("order_id"), orig, qty, refund_id, units, token):
+            slots = [queue[pid].pop(0) for _ in range(int(qty)) if queue.get(pid)]
+            token = booking_token(owner, orig, qty, refund_id, slots) if owner else uuid.uuid4().hex
+            if not _claim_returnable_qty(order.get("order_id"), orig, qty, refund_id, units, token,
+                                         free_slots=slots):
                 _release_unlanded(order, held, {}, refund_id)
+                if slots and _slot_named_meanwhile(order, refund_id, slots):
+                    raise SlotConflict(refund_id)
                 return None
             held.append((orig, qty, pid, token))
     except Exception:
         _release_unlanded(order, held, {}, refund_id)
         raise
     return held
+
+
+def _slot_named_meanwhile(order: Dict[str, Any], refund_id: str, slots: List[str]) -> bool:
+    """A booking refused: was it because another run's booking of this
+    refund now names one of these slots (plan again), not because the line
+    has no room (another door booked it)? RAISES when unreadable."""
+    return bool(set(slots) & _slots_named(_with_fresh_lines(order), refund_id))
 
 
 def _release_unlanded(order: Dict[str, Any], held: _Held, result: Dict[str, Any], refund_id: str) -> float:
@@ -3003,7 +3303,9 @@ def _stock_in_task(order: Dict[str, Any], lines: List[Any], held: _Held, refund_
         order, sum(row[1] for row in held),
         {str(ln.sku or ln.product_id) for ln in lines if ln.restock},
         f"Shopify refund {refund_id}", stock_in_ref(refund_id, owner),
-        processing_store_id, refund_id=refund_id)
+        processing_store_id, refund_id=refund_id,
+        # A run that settles this booking raises the same task (settle_bookings).
+        task_id=stock_in_task_id(refund_id, owner) if owner else None)
     if not out["applied"]:
         out["unbooked"] = _release_unlanded(order, held, {}, refund_id)
     return out
@@ -3111,6 +3413,56 @@ def _close_blocked_task(tasks: Any, refund_id: Optional[str], return_id: Optiona
                        refund_id, return_id, exc_info=True)
 
 
+def _take_over_goods_back(coll: Any, review_id: Any, user_id: Optional[str]) -> str:
+    """A press of Goods back on a row an earlier press claimed. That press
+    put the goods back ("duplicate"), is still running ("in_progress"), or
+    STOPPED part way -- it died or stalled after its claim, maybe after its
+    booking, before its stamp: no goods_restock and a claim older than a
+    stock step runs (returns._STOCK_CLAIM_STALE_SECONDS). That one is taken
+    over ("taken") and run again: its booking with no unit behind it is
+    settled and its piece placed on the slot it chose (restock_refund), its
+    landed pieces credited. Before (D122(3)): the row answered "already put
+    back" for ever with the unit SOLD."""
+    from ..routers.returns import _STOCK_CLAIM_STALE_SECONDS, _step_stale
+
+    try:
+        row = coll.find_one({"review_id": review_id}) or {}
+        at = row.get("goods_back_at")
+        if row.get("goods_restock") or not at:
+            return "duplicate"
+        if not _step_stale(at, _STOCK_CLAIM_STALE_SECONDS):
+            return "in_progress"
+        took = coll.update_one(
+            {"review_id": review_id, "goods_back_at": at, "goods_restock": None},
+            {"$set": {"goods_back_at": datetime.now(timezone.utc).isoformat(), "goods_back_by": user_id}})
+    except Exception:  # noqa: BLE001
+        logger.warning("[SHOPIFY_REFUND] goods-back takeover failed for review=%s", review_id, exc_info=True)
+        return "in_progress"
+    return "taken" if getattr(took, "modified_count", 0) else "in_progress"
+
+
+def finish_stopped_goods_back(db) -> int:
+    """D122(3), the hourly sweep: every Goods back press that STOPPED part
+    way (_take_over_goods_back) on a row nobody presses again is run again
+    here, as the system. Returns how many it ran."""
+    from ..routers.returns import _STOCK_CLAIM_STALE_SECONDS, _step_stale
+
+    try:
+        coll = db.get_collection(_REVIEW_COLLECTION)
+        rows = list(coll.find({"goods_back_at": {"$ne": None}, "goods_restock": None}))
+    except Exception:  # noqa: BLE001
+        logger.error("[SHOPIFY_REFUND] stopped Goods back presses unreadable", exc_info=True)
+        return 0
+    ran = 0
+    for row in rows:
+        if _step_stale(row.get("goods_back_at"), _STOCK_CLAIM_STALE_SECONDS):
+            ran += 1
+            out = goods_back(db, row, user_id="system:returns-sweep")
+            logger.info("[SHOPIFY_REFUND] sweep ran the stopped Goods back of review=%s: %s",
+                        row.get("review_id"), out.get("status"))
+    return ran
+
+
 def goods_back(db, review: Dict[str, Any], *, user_id: Optional[str]) -> Dict[str, Any]:
     """A person says the goods of this Shopify refund physically came back:
     put its units back in stock. This is the goods leg of a refund whose goods
@@ -3146,7 +3498,9 @@ def goods_back(db, review: Dict[str, Any], *, user_id: Optional[str]) -> Dict[st
                        exc_info=True)
         return {"status": "not_restocked", "review_id": review_id, "reason": "claim_failed"}
     if not getattr(claim, "modified_count", 0):
-        return {"status": "duplicate", "review_id": review_id}
+        taken = _take_over_goods_back(coll, review_id, user_id)
+        if taken != "taken":
+            return {"status": taken, "review_id": review_id}
 
     result: Dict[str, Any] = {"applied": False}
     reason = "order_unreadable"
@@ -3157,24 +3511,26 @@ def goods_back(db, review: Dict[str, Any], *, user_id: Optional[str]) -> Dict[st
                 line.model_copy(update={"restock": True})
                 for line in _return_lines_from_proposed(review.get("proposed_restock") or [])
             ]
-            lines, _, unknown = _cap_restock_to_returnable(lines, order, refund_id)
-            reason = "stock_unreadable" if unknown else "not_routed"
-            if not unknown:
-                from ..routers.returns import _restock_good_items
+            from ..routers.returns import _restock_good_items
 
-                booked = _restock_booked(order, lines, refund_id, lambda ls: _restock_good_items(
-                    ls,
-                    order.get("store_id"),
-                    review.get("return_id") or refund_id,
-                    order_id=order.get("order_id"),
-                    user_id=user_id,
-                    processing_store_id=None,
-                    order=order,
-                ))
-                if booked is None:
-                    reason = "already_returned"
-                else:
-                    result = booked
+            reason = "not_routed"
+            return_id = review.get("return_id") or refund_id
+            booked = restock_refund(order, lines, refund_id, return_id, lambda ls, keys: _restock_good_items(
+                ls,
+                order.get("store_id"),
+                return_id,
+                order_id=order.get("order_id"),
+                user_id=user_id,
+                processing_store_id=None,
+                order=order,
+                slot_keys=keys,
+            ))
+            if booked is None:
+                reason = "already_returned"
+            else:
+                result = booked
+    except StockUnreadable:
+        reason = "stock_unreadable"
     except ReturnSlotIndexMissing:
         reason = "slot_index_missing"  # D82(2): the door answers the counter's 503
     except Exception:  # noqa: BLE001

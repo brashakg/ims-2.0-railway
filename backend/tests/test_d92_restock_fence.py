@@ -48,6 +48,15 @@ from tests.test_pos_money_doors_r12 import tasks  # noqa: E402,F401
 pytestmark = pytest.mark.usefixtures("gst_numbers")
 
 
+def _task_age():
+    """A record older than the D95 task's wait (10 minutes) and younger than
+    the 15 minutes after which the hourly sweep STARTS a counter record's step
+    nobody started (D130(1)): the task is raised, the step still waits."""
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+    return (_dt.now(_tz.utc) - _td(minutes=11)).isoformat()
+
+
 def _stall_after_money_out(till, monkeypatch, out, then=None):
     """The press stalls right after its money-out mark; Cash paid answers
     (and ``then`` runs) before it wakes."""
@@ -155,7 +164,7 @@ def test_a_press_that_cannot_start_its_stock_step_restocks_nothing_and_says_so(t
     assert "Update stock" in r.json()["stock_note"] and "do not add them by hand" in r.json()["stock_note"]
     rid = r.json()["return_id"]
     assert tasks == []  # younger than any press: the sweep raises it once it is not
-    rcoll.update_one({"return_id": rid}, {"$set": {"created_at": "2026-01-01T00:00:00+00:00"}})
+    rcoll.update_one({"return_id": rid}, {"$set": {"created_at": _task_age()}})
     assert returns_router.sweep_stuck_return_holds() == 1
     raised = [t for t in tasks if t.get("dedupe_ref") == f"return_restock_blocked:{rid}"]
     assert len(raised) == 1 and raised[0]["priority"] == "P1", tasks

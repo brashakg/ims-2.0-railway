@@ -517,6 +517,13 @@ async def goods_back_refund_review(
     result = goods_back(db, row, user_id=current_user.get("user_id"))
     if result["status"] == "duplicate":
         raise HTTPException(status_code=409, detail="The goods of this refund were already put back.")
+    if result["status"] == "in_progress":
+        # D122(3): an earlier press is still placing them -- or stopped part
+        # way, and is run again by the next press after two minutes (or by
+        # the hourly sweep): never "already put back" while a unit is out.
+        raise HTTPException(status_code=409, detail=(
+            "Goods back is still running for this refund. If it has not finished in two minutes, "
+            "press Goods back again: IMS then finishes it, each unit once."))
     _write_audit("SHOPIFY_REFUND_REVIEW_GOODS_BACK", review_id, row, result, current_user)
     if result["status"] not in ("restocked", "stock_in"):
         if result.get("reason") == "slot_index_missing":

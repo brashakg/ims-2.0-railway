@@ -57,6 +57,15 @@ pytestmark = pytest.mark.usefixtures("gst_numbers")
 REAL_INSERT, REAL_FIND_ONE = Collection.insert_one, Collection.find_one
 
 
+def _task_age():
+    """A record older than the D95 task's wait (10 minutes) and younger than
+    the 15 minutes after which the hourly sweep STARTS a counter record's step
+    nobody started (D130(1)): the task is raised, the step still waits."""
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+    return (_dt.now(_tz.utc) - _td(minutes=11)).isoformat()
+
+
 def _connect(url):
     return MongoClient(url, serverSelectionTimeoutMS=2000)
 
@@ -548,7 +557,7 @@ def test_an_abandoned_unconfirmed_press_is_netted_once_and_owes_nothing(native, 
     assert db["returns"].count_documents({}) == 1 and b["owed_tasks"] == 0  # no payout row either
     assert b["units"] == ["SOLD", "SOLD"] and b["restock_tasks"] == []
     assert returns_router.sweep_stuck_return_holds() == 0  # younger than any press
-    db["returns"].update_one({"return_id": rid}, {"$set": {"created_at": "2026-01-01T00:00:00+00:00"}})
+    db["returns"].update_one({"return_id": rid}, {"$set": {"created_at": _task_age()}})
     assert returns_router.sweep_stuck_return_holds() == 1 and returns_router.sweep_stuck_return_holds() == 0
     assert _books(db)["restock_tasks"] == ["OPEN"]
     assert _restock(rid)["restock_applied"] is True and _restock(rid)["message"] == "Already restocked"

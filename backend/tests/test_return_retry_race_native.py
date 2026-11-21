@@ -266,7 +266,7 @@ def test_a_shopify_retry_never_reads_a_stale_booking_that_failed_as_applied(nati
     monkeypatch.setattr(SR, "_cap_restock_to_returnable", lambda lines, order, rid: (lines, None, []))
     seen = {}
 
-    def booked(order, lines, rid, restock, processing_store_id=None, owner=None):
+    def booked(order, lines, rid, restock, processing_store_id=None, owner=None, **_kw):
         if seen:
             return None  # B: A's booking fills the refund's mark
         seen["a"] = True
@@ -422,13 +422,16 @@ def test_a_shopify_taker_of_a_stopped_booking_whose_holder_then_lands_stays_one_
     assert doc["restock_applied"] is True and doc["restock_in_progress"] is False
 
 
-# --- A taker that DID rest on a stale retry's booking: the stale retry booked LATE ---------------
-# A stalls between its intent and its booking. B takes the step over (nothing
-# of A's is booked yet), reads the order and caps; only then does A's booking
-# land. B's own booking finds the refund's mark full ("another door booked
-# them") and B saves 'applied' on A's booking. A then reaches its first unit
-# write, finds its claim taken over, writes nothing and un-books: the record
-# must reopen (1413-R7-SHOPIFY-BOOKING), whatever the order of the writes.
+# --- A stale retry that booked LATE, under its taker (D129) ------------------------------------
+# A stalls between its claim check and its booking. B takes the step over
+# (nothing of A's is booked yet), reads the order, caps and picks its slots;
+# only then does A's booking land, naming the SAME slot. Before D129 B's own
+# booking found the refund's mark full and B saved 'applied' on A's booking;
+# A then stopped at its first unit write and un-booked, and the record had to
+# reopen (1413-R7-SHOPIFY-BOOKING). Now B's booking is refused on the slot
+# A's names (shopify_refund.SlotConflict), B plans again, TAKES OVER A's
+# booking (no unit behind it) and places the piece on that slot: the record
+# is never 'applied' on a booking with no unit, whatever the order of writes.
 
 
 def _late_booking(native, monkeypatch, b_after_booking=None):
@@ -458,11 +461,11 @@ def _late_booking(native, monkeypatch, b_after_booking=None):
         out["b"] = True
         b_capped.set()
         assert a_booked.wait(30)
-        held = real_hold(*a, **k)
-        assert held is None  # the refund's mark is full: A's late booking
+        with pytest.raises(SR.SlotConflict):  # A's late booking names B's slot
+            real_hold(*a, **k)
         if b_after_booking:
             b_after_booking()
-        return held
+        raise SR.SlotConflict("RF-1")  # B plans again (the real refusal, re-raised after the hook)
 
     def run_a():
         try:
@@ -480,32 +483,27 @@ def _late_booking(native, monkeypatch, b_after_booking=None):
 
 
 def _reopened_and_finished_once(native, by):
-    assert native.stock_units.find_one({"_id": "U1"})["status"] == "SOLD"
-    assert _booked_rf1(native) == 0
-    doc = native.returns.find_one({"return_id": RID})
-    assert doc.get("restock_completed_at"), "the taker's save never reached the record"
-    assert doc["restock_applied"] is False, "record reads applied, the piece is SOLD and un-booked"
-    assert doc["restock_in_progress"] is False
-    if by == "sweep":
-        # D122(3): reopened with its task closed and no label -- IMS finishes it.
-        assert R.finish_stopped_stock_steps() == 0  # reopened just now: not yet
-        ago = lambda m: (datetime.now(timezone.utc) - timedelta(minutes=m)).isoformat()  # noqa: E731
-        native.returns.update_one({"return_id": RID}, {"$set": {  # the same record, ten minutes later
-            "restock_started_at": ago(10), "restock_completed_at": ago(11)}})
-        assert R.finish_stopped_stock_steps() == 1
-    else:
-        assert R._retry_restock(RID, USER, STORE)["restock_applied"] is True
-    assert _back(native) == ["U1"] and native.stock_units.count_documents({}) == 1 and _booked_rf1(native) == 1
-    assert native.returns.find_one({"return_id": RID})["restock_applied"] is True
-    assert R._retry_restock(RID, USER, STORE)["message"] == "Already restocked"
-    assert R.finish_stopped_stock_steps() == 0
+    """The piece is back ONCE, booked once, the record applied -- and it stays
+    so through the next press and the hourly sweep (`by`: which runs first)."""
+    for _ in range(2):
+        assert _back(native) == ["U1"] and native.stock_units.count_documents({}) == 1
+        assert _booked_rf1(native) == 1
+        doc = native.returns.find_one({"return_id": RID})
+        assert doc["restock_applied"] is True, "record does not read applied with the piece back"
+        assert doc["restock_in_progress"] is False
+        if by == "sweep":
+            assert R.finish_stopped_stock_steps() == 0
+            assert R._retry_restock(RID, USER, STORE)["message"] == "Already restocked"
+        else:
+            assert R._retry_restock(RID, USER, STORE)["message"] == "Already restocked"
+            assert R.finish_stopped_stock_steps() == 0
 
 
 @pytest.mark.parametrize("by", ["press", "sweep"])
 def test_a_shopify_taker_on_a_late_stale_booking_that_is_then_given_up_keeps_the_step_open(native, monkeypatch, by):
-    """B finishes first ('applied' on A's late booking); A then stops at its
-    first unit write and un-books. The record reopens; the next retry -- or
-    the hourly sweep, nobody pressing -- puts the one piece back, once."""
+    """B finishes first: it takes over A's late booking and places the piece
+    on its slot. A then stops at its first unit write; its un-booking finds
+    its token gone. One piece back, booked once (D129)."""
     thread_a, run_b, go = _late_booking(native, monkeypatch)
     b = run_b()
     go.set()
@@ -515,9 +513,9 @@ def test_a_shopify_taker_on_a_late_stale_booking_that_is_then_given_up_keeps_the
 
 
 def test_a_stale_shopify_retry_that_gives_up_while_its_taker_runs_keeps_the_takers_save(native, monkeypatch):
-    """A un-books while B still holds the claim. A never drops B's claim:
-    B's own save reaches the record, then the record reopens because B's
-    'applied' rested on the booking A released."""
+    """A un-books while B still holds the claim (between B's refused booking
+    and its second plan). A never drops B's claim; B books the piece afresh
+    and places it: one piece back, booked once."""
     box = {}
     thread_a, run_b, go = _late_booking(native, monkeypatch, lambda: (box["go"].set(), box["a"].join(30)))
     box["a"], box["go"] = thread_a, go

@@ -45,6 +45,15 @@ from tests.test_pos_money_doors_r13 import _complete  # noqa: E402
 pytestmark = pytest.mark.usefixtures("gst_numbers")
 
 
+def _task_age():
+    """A record older than the D95 task's wait (10 minutes) and younger than
+    the 15 minutes after which the hourly sweep STARTS a counter record's step
+    nobody started (D130(1)): the task is raised, the step still waits."""
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+    return (_dt.now(_tz.utc) - _td(minutes=11)).isoformat()
+
+
 def _press(payload, key):
     return _advance_client().post("/api/v1/returns", json=payload,
                                   headers={**_hdr("STORE_MANAGER"), "Idempotency-Key": key})
@@ -199,7 +208,7 @@ def test_a_stock_step_left_open_by_a_stopped_press_gets_one_task(till, monkeypat
     rid = rec["return_id"]
     assert rec["status"] == "COMPLETED" and rec["stock_pending"] is True and restocks == []
     assert returns_router.sweep_stuck_return_holds() == 0 and tasks == []  # younger than any press
-    rcoll.update_one({"return_id": rid}, {"$set": {"created_at": "2026-01-01T00:00:00+00:00"}})
+    rcoll.update_one({"return_id": rid}, {"$set": {"created_at": _task_age()}})
     assert returns_router.sweep_stuck_return_holds() == 1
     assert [t["dedupe_ref"] for t in tasks] == [f"return_restock_blocked:{rid}"]
     assert "Update stock" in tasks[0]["description"]

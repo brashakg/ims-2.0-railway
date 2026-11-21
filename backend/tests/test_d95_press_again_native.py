@@ -53,6 +53,15 @@ from tests.test_pos_money_doors import _user, returns_router  # noqa: E402
 pytestmark = pytest.mark.usefixtures("gst_numbers")
 
 
+def _task_age():
+    """A record older than the D95 task's wait (10 minutes) and younger than
+    the 15 minutes after which the hourly sweep STARTS a counter record's step
+    nobody started (D130(1)): the task is raised, the step still waits."""
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+    return (_dt.now(_tz.utc) - _td(minutes=11)).isoformat()
+
+
 def _once(state, name):
     """True the first time only."""
     if state.get(name):
@@ -217,7 +226,7 @@ def test_update_stock_that_could_not_set_the_damaged_unit_aside_stays_open(nativ
     with pytest.raises(RuntimeError):
         _press(_payload(condition="DAMAGED"))
     rid = db["returns"].find_one({})["return_id"]
-    db["returns"].update_one({"return_id": rid}, {"$set": {"created_at": "2026-01-01T00:00:00+00:00"}})
+    db["returns"].update_one({"return_id": rid}, {"$set": {"created_at": _task_age()}})
     assert returns_router.sweep_stuck_return_holds() == 1
     _stock_unreadable_once(monkeypatch, state)
     first = _restock(rid)

@@ -2096,7 +2096,7 @@ def test_a_booking_that_errors_part_way_releases_the_line_it_booked(monkeypatch)
     lines = [ReturnLine(order_item_id=i, product_id=i, return_qty=1, unit_price=0.0) for i in "ab"]
     calls = []
 
-    def claim(oid, orig, qty, rid, units, token):
+    def claim(oid, orig, qty, rid, units, token, **_kw):
         if orig["item_id"] == "b":
             raise RuntimeError("orders write down")
         calls.append(("claim", orig["item_id"]))

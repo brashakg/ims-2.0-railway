@@ -382,19 +382,17 @@ def test_the_same_through_a_door_that_reads_the_slots_live(native, monkeypatch):
 # --- D122(3): the sweep finishes every step that stopped part way ----------------------------------
 
 
-def test_the_sweep_never_starts_a_step_no_worker_ever_started(native):
-    """DECISION (D95(2), D95(5) stay). A counter record whose press stopped
-    before its claim never answered 201; when its 503 'Do not pay yet' was
-    abandoned the customer may have left WITH the goods. IMS does not put
-    that unit on sale on its own: the sweep raises the one task naming
-    'Update stock' (test_d95_one_record_native, test_d92r12), a person who
-    can see the frame presses it, and IMS then places it once."""
+def test_the_sweep_starts_a_counter_step_no_worker_ever_started(native):
+    """D130(1) (supersedes the builder's earlier D95(2)/(5) reading): the
+    goods of a counter record were handed over at the counter, so a step its
+    press never claimed is STARTED by the sweep once the record is 15 minutes
+    old, and placed once; a person's press after it changes nothing."""
     _seed(native, units=["U1"])
     native.returns.update_one({"return_id": RID}, {"$set": {"stock_pending": True, "created_at": OLD}})
-    assert R.finish_stopped_stock_steps() == 0
-    assert _units(native) == {"U1": ("SOLD", OID)}
-    assert R._retry_restock(RID, USER, STORE)["restock_applied"] is True
+    assert R.finish_stopped_stock_steps() == 1
     assert _units(native) == {"U1": ("AVAILABLE", None)}
+    assert R._retry_restock(RID, USER, STORE)["message"] == "Already restocked"
+    assert _units(native) == {"U1": ("AVAILABLE", None)} and native.stock_units.count_documents({}) == 1
 
 
 @pytest.mark.parametrize("refund", [False, True])

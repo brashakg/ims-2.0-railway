@@ -75,6 +75,15 @@ REAL_UPDATE = Collection.update_one
 OLD = "2026-01-01T00:00:00+00:00"
 
 
+def _task_age():
+    """A record older than the D95 task's wait (10 minutes) and younger than
+    the 15 minutes after which the hourly sweep STARTS a counter record's step
+    nobody started (D130(1)): the task is raised, the step still waits."""
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+    return (_dt.now(_tz.utc) - _td(minutes=11)).isoformat()
+
+
 def _mixed(db):
     """The bill gains a Rs 100 line (P2) with its own SOLD unit U3. The
     return takes ONE P1 piece back GOOD and the P2 piece back DAMAGED."""
@@ -139,7 +148,7 @@ def test_r2_a_pending_step_is_finished_once_by_update_stock(native, monkeypatch)
     rec = _rec(db, rid)
     assert (rec["restock_applied"], rec["stock_pending"], rec.get("restock_in_progress")) == (False, True, None)
     assert _rows(db) == {"p1": ["SOLD", "SOLD"], "p2": "SOLD", "rows": 3}
-    db["returns"].update_one({"return_id": rid}, {"$set": {"created_at": OLD}})
+    db["returns"].update_one({"return_id": rid}, {"$set": {"created_at": _task_age()}})
     assert returns_router.sweep_stuck_return_holds() == 1 and _tasks(db) == [("OPEN", False)]
     row = [x for x in _history(db)["returns"] if x["return_id"] == rid][0]
     assert row["stock_pending"] is True and not row.get("stock_step_stopped")

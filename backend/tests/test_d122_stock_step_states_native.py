@@ -76,6 +76,15 @@ DONE = {"p1": ["AVAILABLE", "SOLD"], "p2": "QUARANTINED", "rows": 3}
 BY_HAND = ("check each unit", "add one by hand", "add one only", "stopped part way")
 
 
+def _task_age():
+    """A record older than the D95 task's wait (10 minutes) and younger than
+    the 15 minutes after which the hourly sweep STARTS a counter record's step
+    nobody started (D130(1)): the task is raised, the step still waits."""
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+    return (_dt.now(_tz.utc) - _td(minutes=11)).isoformat()
+
+
 def _never_by_hand(*texts):
     for text in texts:
         low = str(text or "").lower()
@@ -320,7 +329,7 @@ def test_closing_the_task_of_an_open_step_is_refused_once_and_never_marks_the_st
     placed the units."""
     db = native["db"]
     rid = _stopped_record(db, monkeypatch, _mixed(db))
-    db["returns"].update_one({"return_id": rid}, {"$set": {"created_at": OLD}})
+    db["returns"].update_one({"return_id": rid}, {"$set": {"created_at": _task_age()}})
     assert returns_router.sweep_stuck_return_holds() == 1
     with pytest.raises(HTTPException) as err:
         _complete_task(db, monkeypatch, rid)
@@ -359,7 +368,7 @@ def test_cancelling_the_task_of_an_open_step_is_refused_once_like_completing_it(
     the step stays open until IMS has placed the units."""
     db = native["db"]
     rid = _stopped_record(db, monkeypatch, _mixed(db))
-    db["returns"].update_one({"return_id": rid}, {"$set": {"created_at": OLD}})
+    db["returns"].update_one({"return_id": rid}, {"$set": {"created_at": _task_age()}})
     assert returns_router.sweep_stuck_return_holds() == 1
     with pytest.raises(HTTPException) as err:
         _cancel_task(db, monkeypatch, rid)
