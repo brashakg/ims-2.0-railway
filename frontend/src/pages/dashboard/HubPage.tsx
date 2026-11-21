@@ -415,6 +415,10 @@ export default function HubPage() {
     // would allow it — mirrors the nav item + /online-store route guard.
     // hasModuleAccess is deny-only (never grants), so the role check still runs.
     if (m.moduleKey && !hasModuleAccess(m.moduleKey)) return false;
+    // R08: a card is offered only when its destination's own route gate lets
+    // this person in (the same check ProtectedRoute runs), so no card lands
+    // an Accountant on /unauthorized from POS, Clinical or Customers.
+    if (!canOpenPath(auth, m.to)) return false;
     if (!m.requireRoles) return true;
     return m.requireRoles.some((r) => hasRole([r as any]));
   });

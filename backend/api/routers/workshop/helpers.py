@@ -60,7 +60,7 @@ def _job_in_reach(job, current_user: dict) -> bool:
     return bool(job) and bool(_jobs_in_reach([job], current_user))
 
 
-def _jobs_in_reach(jobs, current_user: dict) -> list:
+def _jobs_in_reach(jobs, current_user: dict, strict: bool = False) -> list:
     """THE store rule of a workshop job (PR #1376 F3): the job's own shop AND
     its ORDER's shop (the canonical owner) must both be the caller's. A legacy
     job stamped with one shop but attached to another shop's order -- the
@@ -68,17 +68,25 @@ def _jobs_in_reach(jobs, current_user: dict) -> list:
     resolved are therefore admin-only until an authorized repair; a correct
     same-shop job is unchanged. SUPERADMIN/ADMIN reach every job. One order
     read for the whole list, so a rollup can run it over a shop's jobs; an
-    unreadable order store hides the jobs (fail closed)."""
+    unreadable order store hides the jobs (fail closed); with `strict` it
+    raises instead, so a count is never an unreadable zero."""
     jobs = [j for j in (jobs or []) if j]
     is_cross, stores = user_store_scope(current_user)
     if is_cross:
         return jobs
     mine = [j for j in jobs if can_access_store_scoped(j.get("store_id"), current_user)]
     order_repo = get_order_repository()
-    if not mine or order_repo is None:
+    if not mine:
         return []
-    owned = order_repo.ids_in_stores(
-        {j.get("order_id") for j in mine if j.get("order_id")}, stores
+    if order_repo is None:
+        if strict:
+            raise RuntimeError("order store unavailable")
+        return []
+    ids = {j.get("order_id") for j in mine if j.get("order_id")}
+    owned = (
+        order_repo.ids_in_stores(ids, stores, strict=True)
+        if strict
+        else order_repo.ids_in_stores(ids, stores)
     )
     return [j for j in mine if j.get("order_id") in owned]
 
@@ -275,6 +283,31 @@ def _stamp_job_actor_names(jobs: list) -> None:
         )
     except Exception:  # noqa: BLE001
         pass
+    # L2-WS-F02: neither create door stores the order's identity on the job,
+    # so the board, the drawer and the printed card showed a blank customer
+    # and order. Read it from the job's own order on the way out (one batched
+    # read; the job already passed THE job rule, which checks this order's
+    # shop). A field the job itself carries wins; nothing is written back.
+    try:
+        need = [j for j in jobs if isinstance(j, dict) and j.get("order_id")]
+        db = get_db() if need else None
+        if db is None:
+            return
+        fields = ("order_number", "customer_name", "customer_phone", "customer_id")
+        orders = {
+            o.get("order_id"): o
+            for o in db.get_collection("orders").find(
+                {"order_id": {"$in": list({j["order_id"] for j in need})}},
+                {"_id": 0, "order_id": 1, **{f: 1 for f in fields}},
+            )
+        }
+        for j in need:
+            o = orders.get(j["order_id"]) or {}
+            for f in fields:
+                if not j.get(f) and o.get(f):
+                    j[f] = o[f]
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def job_to_frontend(job: dict, user: Optional[dict] = None) -> dict:
@@ -331,5 +364,31 @@ def job_to_frontend(job: dict, user: Optional[dict] = None) -> dict:
         else:
             # Keep other fields as-is
             result[key] = value
+
+    # L2-WS-F02: the flat display fields the board, drawer and job card read,
+    # derived from what both create doors DO store. A stored flat field wins.
+    frame = result.get("frameDetails") if isinstance(result.get("frameDetails"), dict) else {}
+    lens = result.get("lensDetails") if isinstance(result.get("lensDetails"), dict) else {}
+    if not result.get("frameName"):
+        name = str(frame.get("name") or "").strip()
+        brand = str(frame.get("brand") or "").strip()
+        result["frameName"] = (
+            f"{brand} {name}" if brand and name and not name.lower().startswith(brand.lower())
+            else (name or brand or None)
+        )
+    if not result.get("lensType"):
+        # POS lens_details: {type, material, index, coatings}; the safety
+        # net's fallback for a catalogue lens: {product_id, name}.
+        kind = lens.get("lens_type") or lens.get("type")
+        result["lensType"] = (
+            " ".join(str(p) for p in (kind, lens.get("material")) if p)
+            if kind
+            else (lens.get("name") or None)
+        )
+    if not result.get("promisedDate"):
+        result["promisedDate"] = result.get("expectedDate") or None
+    # No create door stores a priority; every job is worked as NORMAL.
+    if not result.get("priority"):
+        result["priority"] = "NORMAL"
 
     return mask_cost(result, user, "product")
