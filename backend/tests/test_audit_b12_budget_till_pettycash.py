@@ -7045,3 +7045,42 @@ def test_r22_d127_d128_on_real_mongo(monkeypatch):
     finally:
         client.drop_database(name)
         client.close()
+
+
+class TestR22TheRuleThroughFaultsAndClocks:
+    def test_a_second_drawers_count_whose_register_read_fails_is_refused(self, db, monkeypatch):
+        """D127(3) reads the register sheets on the earlier drawer. Unreadable
+        is refused (503) and the drawer stays OPEN -- never read as "no
+        sheets", which charged the second drawer with the first's cash."""
+        _alerts(monkeypatch)
+        sid, _first = _one_drawer_counted_by_a_register(db, monkeypatch)
+        assert till.lock_session(db, sid, actor=MANAGER)["ok"]
+        t2 = till.open_session(db, store_id=STORE, session_date=DATE, opening_float_paisa=300000,
+                               shift="PM", actor=CASHIER)["session"]["session_id"]
+        registers = db.get_collection("cash_register_sessions")
+        real_find = registers.find
+
+        def _fault(query=None, *a, **k):
+            raise AutoReconnect("cash register sessions read fault")
+
+        registers.find = _fault
+        try:
+            res = till.blind_submit(db, t2, blind_denominations=[{"face": 500, "kind": "note", "pieces": 6}],
+                                    actor=CASHIER)
+        finally:
+            registers.find = real_find
+        assert (res["ok"], res["error"], res["http"]) == (False, "drawer_read_failed", 503)
+        assert _till(db, t2)["status"] == till.STATUS_OPEN
+
+    def test_a_close_that_names_no_drawer_is_placed_on_the_ist_day(self, db):
+        """The unplaced close is found by the drawer's shop and IST day: a
+        close at 20:00 UTC on the 3rd is 01:30 IST on the 4th (this day); one
+        at 19:00 UTC on the 4th is 00:30 IST on the 5th (not this day)."""
+        drawer = {"session_id": "T-IST", "store_id": STORE, "session_date": DATE,
+                  "blind_count_paisa": 100000, "blind_submitted_at": datetime(2026, 11, 3, 19, 0)}
+        coll = db.get_collection("cash_register_sessions")
+        for sid, closed in (("CR-IST-IN", "2026-11-03T20:00:00"), ("CR-IST-OUT", "2026-11-04T19:00:00")):
+            coll.insert_one({"_id": sid, "session_id": sid, "store_id": STORE, "status": "CLOSED",
+                             "till_session_id": None, "closed_at": closed, "counted": 100.0})
+        found = till.drawer_counts(db, drawer)
+        assert [c["session_id"] for c in found["unknown"]] == ["CR-IST-IN"]
