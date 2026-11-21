@@ -660,14 +660,12 @@ async def close_cash_register(
         ),
         # A new sheet stored over this session's own first count: the cash it
         # was charged with after that count, for the next session (D120).
-        "till_since_count": (
-            {
-                k: since_count[k]
-                for k in ("cash_sales_paisa", "cash_refunds_paisa", "cash_payouts_paisa", "by_mode")
-            }
-            if since_count is not None
-            else None
-        ),
+        "till_since_count": {
+            k: v
+            for k, v in (since_count or {}).items()
+            if k in ("cash_sales_paisa", "cash_refunds_paisa", "cash_payouts_paisa", "by_mode")
+        }
+        or None,
         "cash_sales": cash_sales,
         "cash_refunds": cash_refunds,
         "cash_expenses": cash_expenses,
