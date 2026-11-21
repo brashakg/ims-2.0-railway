@@ -321,6 +321,37 @@ def test_goods_back_beside_a_stopped_update_stock_puts_both_pieces_back(native, 
     _all_back_once(native, ["U1", "U2"], 2.0)
 
 
+def test_a_booking_is_refused_on_a_slot_another_run_booked_since_it_chose_it(native, monkeypatch):
+    """The window between choosing a slot and booking it. W1 (Update stock,
+    li1's piece) chose slot 0 and stalls before its booking; Goods back (li2's
+    piece only) chooses slot 0 too, books it and places its unit there. W1's
+    booking naming slot 0 is REFUSED in its own write (the slot is booked),
+    W1 plans again and places its piece on slot 1. Without that refusal W1
+    booked slot 0, its unit write was refused on the used slot and it was
+    credited Goods back's unit: li1's unit SOLD for good, both lines booked."""
+    _seed(native, units=["U1", "U2"])
+    native.orders.update_one({"order_id": OID}, {"$push": {"items": {
+        "item_id": "li2", "product_id": PID, "sku": "F1", "product_name": "Frame",
+        "quantity": 1, "unit_price": 1000.0}}})
+    later = {**LINE, "order_item_id": "li2", "restock": False}
+    native.returns.update_one({"return_id": RID}, {"$set": {"shopify_refund_id": RF,
+                                                            "items": [dict(LINE), later]}})
+    row = _review(native, lines=(later,))
+    real, seen = R._note_intent, {}
+
+    def stalled(*a, **k):
+        if not seen:
+            seen["goods"] = SR.goods_back(native, row, user_id="u1")["status"]
+            assert native.stock_units.count_documents({"return_slot": SLOT0}) == 1
+        return real(*a, **k)
+
+    monkeypatch.setattr(R, "_note_intent", stalled)
+    w1 = R._retry_restock(RID, USER, STORE)
+    assert seen["goods"] == "restocked" and w1["restock_applied"] is True
+    assert _line_bookings(native) == {"li1": 1.0, "li2": 1.0}
+    _all_back_once(native, ["U1", "U2"], 2.0)
+
+
 def test_a_flip_that_lost_its_race_is_credited_by_its_slot_and_keeps_its_booking(native, monkeypatch):
     """A routed online order (its units are exactly the ones its claim sold
     to it: IMS mints nothing). Another attempt's write of the same piece
