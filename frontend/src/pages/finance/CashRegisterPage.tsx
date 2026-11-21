@@ -169,9 +169,12 @@ export default function CashRegisterPage() {
         );
       } else if (closed.variance_status === 'COMPARISON_UNAVAILABLE') {
         // The day's drawers could not be read, so nobody knows whether this
-        // count is the whole day's: no variance is claimed.
+        // count is the whole day's: no variance is claimed. D127(2): or an
+        // earlier close could not be placed on one drawer.
         toast.warning(
-          'Closed. The day\'s cash drawers could not be read, so no variance is shown. Count the drawer on the Blind EOD Tally (Z-Read) screen to compare it.',
+          closed.comparison_withheld_message
+            ? `Closed. ${closed.comparison_withheld_message}`
+            : 'Closed. The day\'s cash drawers could not be read, so no variance is shown. Count the drawer on the Blind EOD Tally (Z-Read) screen to compare it.',
         );
       } else if (closed.variance_status === 'SEVERAL_DRAWERS') {
         // D53: no single variance is true for a day with several drawers.
@@ -355,6 +358,16 @@ export default function CashRegisterPage() {
                               Earlier count {inr(s.till_standing_count)}
                             </span>
                           )}
+                        {s.till_count_variance != null && s.till_count_variance !== 0 && (
+                          <span
+                            data-testid="earlier-count-difference"
+                            title="The drawer's earlier count today (Blind EOD Tally or Day-End) was beyond the allowed band. Its note is taken when its Z-Read is locked; the manager has been told."
+                            className="block text-[10px] font-medium text-red-600"
+                          >
+                            Earlier count {inr(Math.abs(s.till_count_variance))}{' '}
+                            {s.till_count_variance < 0 ? 'short' : 'over'} - explained on the till
+                          </span>
+                        )}
                       </td>
                       <td className="px-4 py-2 text-right">
                         {s.status !== 'CLOSED' ? (
@@ -652,7 +665,10 @@ function VarianceChip({ session }: { session: CashRegisterSession }) {
     return (
       <span
         data-testid="comparison-unavailable-verdict"
-        title="The day's cash drawers could not be read at close, so no variance is shown."
+        title={
+          session.comparison_withheld_message ||
+          "The day's cash drawers could not be read at close, so no variance is shown."
+        }
         className="inline-block rounded px-2 py-0.5 text-xs font-medium bg-gray-100 text-gray-600"
       >
         Comparison not available

@@ -176,3 +176,48 @@ describe('Cash reconciliation - later closes named beside the totals (D121)', ()
     expect(screen.queryByTestId('later-closes')).toBeNull();
   });
 });
+
+// D128(1): a later register close SHOWS the drawer's earlier count that is
+// beyond the band (its note is taken at the Z-Read lock). D127(2): a close
+// not compared because an earlier close could not be placed says why.
+// D128(2): a till row counted and not yet locked is on the console.
+describe('Round 22 (D127, D128)', () => {
+  it('shows the earlier count short, explained on the till', async () => {
+    history(closed({ till_count_variance: -500, till_standing_count: 2500 }));
+    render(<CashRegisterPage />);
+    const tag = await screen.findByTestId('earlier-count-difference');
+    expect(tag.textContent).toMatch(/Earlier count .*500(\.00)? short - explained on the till/);
+  });
+
+  it('says why nothing was compared after a close IMS could not place', async () => {
+    history(closed({
+      variance: null, variance_status: 'COMPARISON_UNAVAILABLE',
+      comparison_withheld_reason: 'EARLIER_CLOSE_DRAWER_UNKNOWN',
+      comparison_withheld_message: 'An earlier Cash Register close today could not be placed on one drawer.',
+    }));
+    render(<CashRegisterPage />);
+    const chip = await screen.findByTestId('comparison-unavailable-verdict');
+    expect(chip.getAttribute('title')).toContain('could not be placed on one drawer');
+  });
+
+  it('CONTROL: no earlier-count difference, no tag', async () => {
+    history(closed({ till_count_variance: null }));
+    render(<CashRegisterPage />);
+    await screen.findByText('CR-2');
+    expect(screen.queryByTestId('earlier-count-difference')).toBeNull();
+  });
+
+  it('a till row counted and not yet locked says so', async () => {
+    recon.summary.mockResolvedValue({
+      rows: [row({
+        session_id: 'TILL-1', source: 'BLIND_EOD', blind: true, locked: false, zread_number: null,
+        counted_cash: 2500, expected_cash: 3000, variance: -500, variance_status: 'SHORT',
+        also_counted_on_till: false,
+      })],
+      totals: { sessions: 1, also_counted_on_till: 0, cash_sales: 3000, counted_cash: 2500 },
+    });
+    render(<CashReconciliationPage />);
+    const line = await screen.findByTestId('zread-not-locked');
+    expect(line.textContent).toContain('Counted, not locked yet');
+  });
+});

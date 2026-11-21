@@ -509,6 +509,16 @@ function RowGroup({
               Also counted on the till
             </span>
           )}
+          {/* D128(2): a drawer counted and not yet locked is in the totals too. */}
+          {row.blind && row.locked === false && (
+            <span
+              data-testid="zread-not-locked"
+              title="This drawer has been counted; its Z-Read is not locked yet. It is in the totals."
+              className="ml-1 inline-flex items-center rounded px-2 py-0.5 text-xs font-medium bg-gray-100 text-gray-600"
+            >
+              Counted, not locked yet
+            </span>
+          )}
         </td>
         <td className="px-3 py-2 text-right text-gray-600">{inr(row.opening_float)}</td>
         <td className="px-3 py-2 text-right text-gray-600">{row.cash_sales == null ? 'Not available' : inr(row.cash_sales)}</td>

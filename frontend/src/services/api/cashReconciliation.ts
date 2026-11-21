@@ -63,6 +63,9 @@ export interface ReconRow {
   // variance. Never render a null as zero.
   counted_cash: number | null;
   blind: boolean;
+  // D128(2): a till row is in the range totals whether or not its Z-Read is
+  // locked yet; false = counted, not locked.
+  locked?: boolean;
   variance: number | null;
   variance_status: ReconStatus;
   tolerance: number;

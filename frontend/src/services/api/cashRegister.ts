@@ -74,6 +74,14 @@ export interface CashRegisterSession {
   // float typed at opening, and covers the cash moved since that count.
   till_counted_earlier?: boolean;
   till_standing_count?: number | null;
+  // D128(1): the drawer's earlier count (Blind EOD / Day-End) was beyond the
+  // band and not yet explained; this close shows it (the Z-Read lock takes
+  // its note). Rupees, the count's own difference.
+  till_count_variance?: number | null;
+  // D127(2): why nothing was compared (an earlier close could not be placed
+  // on one drawer), and the sentence for staff.
+  comparison_withheld_reason?: string | null;
+  comparison_withheld_message?: string | null;
   // Cash drawers on this shop-day. Above 1, `counted` is the latest drawer's
   // count only, not the day's total (D40).
   till_drawers_on_day?: number | null;
