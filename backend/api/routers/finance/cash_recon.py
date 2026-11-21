@@ -23,7 +23,8 @@ from .cash_drawer_window import _CASH_SESSIONS, _ist_day_face
 # can see, per store per day, whether the cash drawer tallied:
 #   * cash_register_sessions (CR-...) -- the manual close-by-denomination flow
 #     (status CLOSED): counted/expected/variance in RUPEES, by_mode_breakdown.
-#   * till_sessions (TILL-...)        -- the BLIND EOD count (status LOCKED):
+#   * till_sessions (TILL-...)        -- the drawer's count (BLIND_SUBMITTED
+#     or LOCKED; D128(2): a drawer counted and never locked is in the totals):
 #     blind_count_paisa/expected_cash_paisa/variance_paisa in PAISA, by_mode.
 # Both already compute the variance; this endpoint ONLY reads + normalises them
 # into one row shape and applies store-scoping. NO new variance math, NO writes
@@ -154,8 +155,22 @@ async def cash_reconciliation_summary(
     # D88: Cash Register closes whose figures are not one till drawer's own
     # (the link failed, or the day had several drawers). See 2c.
     unattributed_ids = set()
-    # (closed_at, close id, drawer id) of each close that landed on one drawer.
-    linked_closes: List[tuple] = []
+
+    # The COUNTED till drawers in scope (D128(2): counted, locked or not).
+    # Read first: which Cash Register close is a LATER count of its drawer is
+    # the one D127 rule (eod_tally.close_as_count), and it needs the drawer.
+    # Unreadable is not "no drawers".
+    till_match: Dict = {
+        "status": {"$in": [till_service.STATUS_BLIND_SUBMITTED, till_service.STATUS_LOCKED]}
+    }
+    if scoped_store:
+        till_match["store_id"] = scoped_store
+    try:
+        till_sessions = list(db.get_collection("till_sessions").find(till_match, {"_id": 0}))
+    except Exception:  # noqa: BLE001
+        logger.exception("Till sessions unreadable")
+        raise HTTPException(status_code=503, detail="Till closes could not be read - try again")
+    drawers_by_id = {d.get("session_id"): d for d in till_sessions if d.get("session_id")}
 
     # --- 1) Manual close-by-denomination sessions (rupees) -----------------
     cr_match: Dict = {"status": "CLOSED"}
@@ -212,22 +227,16 @@ async def cash_reconciliation_summary(
         closed_by = s.get("closed_by")
         if closed_by and not s.get("closed_by_name"):
             pending_user_ids.append(closed_by)
-        if withheld or s.get("till_link_ok") is False:
+        # D127: a LATER count of an already counted drawer -- a D120 session,
+        # a new sheet over its own first count, a close whose till link
+        # failed, a several-drawer close IMS cannot place -- by the ONE rule.
+        # Never in the totals; named on the D121 line with its own difference.
+        later_count = (
+            till_service.close_as_count(s, drawers_by_id.get(s.get("till_session_id")))
+            is not None
+        )
+        if (withheld or s.get("till_link_ok") is False) and not later_count:
             unattributed_ids.add(s.get("session_id"))
-        elif (
-            s.get("till_session_id")
-            and counted is not None
-            and not s.get("till_counted_earlier")
-        ):
-            # Only a close that HOLDS A COUNT (D88). One closed without a
-            # count names the drawer too, but it must not stand in for the
-            # close that counted it; it keeps adding its own window.
-            # Not a later close on an already counted drawer (D121): it is
-            # never in the totals, so it does not hold the drawer's place
-            # in them either.
-            linked_closes.append(
-                (str(closed_at or ""), str(s.get("session_id")), s["till_session_id"])
-            )
         rows.append(
             {
                 "session_id": s.get("session_id"),
@@ -247,7 +256,8 @@ async def cash_reconciliation_summary(
                     or 0,
                     2,
                 ),
-                "counted_earlier_on_till": bool(s.get("till_counted_earlier")),
+                "counted_earlier_on_till": later_count,
+                "till_link_ok": s.get("till_link_ok"),
                 # D86(3): a close that could not read the day's drawers covers
                 # an unknown set of them -- its cash figures are not available
                 # and stay out of the totals (they would add a drawer twice).
@@ -302,16 +312,7 @@ async def cash_reconciliation_summary(
             }
         )
 
-    # --- 2) Blind EOD (Z-Read) sessions, paisa -> rupees -------------------
-    till_match: Dict = {"status": "LOCKED"}
-    if scoped_store:
-        till_match["store_id"] = scoped_store
-    try:
-        till_cursor = db.get_collection("till_sessions").find(till_match, {"_id": 0})
-        till_sessions = list(till_cursor)
-    except Exception:  # noqa: BLE001
-        logger.exception("Till sessions unreadable")
-        raise HTTPException(status_code=503, detail="Till closes could not be read - try again")
+    # --- 2) The till drawers' counts (Z-Read), paisa -> rupees -------------
 
     def _p2r(paisa) -> float:
         try:
@@ -343,8 +344,12 @@ async def cash_reconciliation_summary(
             None if (counted is None or no_comparison) else round(counted - expected, 2)
         )
         tol = _p2r(s.get("tolerance_paisa"))
-        locked_by = s.get("locked_by")
-        if locked_by and not s.get("locked_by_name"):
+        # D128(2): the drawer's count is its first count of the day and is in
+        # the totals whether or not a manager has locked the Z-Read yet, so
+        # the totals neither drop a drawer nor change at the lock.
+        locked = s.get("status") == till_service.STATUS_LOCKED
+        locked_by = s.get("locked_by") if locked else s.get("blind_submitted_by")
+        if locked_by and not (locked and s.get("locked_by_name")):
             pending_user_ids.append(locked_by)
         rows.append(
             {
@@ -392,9 +397,10 @@ async def cash_reconciliation_summary(
                 "off_till_expense_advisory": bool(s.get("off_till_expense_advisory")),
                 "negative_expected_advisory": bool(s.get("negative_expected_advisory")),
                 "closed_by": locked_by,
-                "closed_by_name": s.get("locked_by_name"),
-                "closed_at": s.get("locked_at"),
+                "closed_by_name": s.get("locked_by_name") if locked else None,
+                "closed_at": s.get("locked_at") if locked else s.get("blind_submitted_at"),
                 "zread_number": s.get("zread_number"),
+                "locked": locked,
             }
         )
 
@@ -423,14 +429,18 @@ async def cash_reconciliation_summary(
         survivors: List[dict] = []
         for r in rows:
             linked = r.get("till_session_id")
-            # A D111 session's figures are its OWN (a later sheet, the cash
-            # taken after the drawer's count), not the drawer's: its row
-            # stays, marked and out of the totals (2c), so a difference on
-            # that sheet is still on this console after the Z-Read locks.
+            # A later count's figures are its OWN (a later sheet, a new sheet
+            # over its own first count, the cash taken after the drawer's
+            # count), not the drawer's: its row stays, marked and out of the
+            # totals (2c), so its difference is on this console before and
+            # after the lock alike (D127(4)). A close whose count never
+            # reached the till is not the till's count either: it stays,
+            # marked (D88).
             if (
                 r.get("source") == "CASH_REGISTER"
                 and linked in till_row_ids
                 and not r.get("counted_earlier_on_till")
+                and r.get("till_link_ok") is not False
             ):
                 by_id[linked]["also_closed_from"] = r.get("session_id")
                 by_id[linked]["also_closed_from_source"] = "CASH_REGISTER"
@@ -450,41 +460,19 @@ async def cash_reconciliation_summary(
         for r in rows
         if r.get("source") == "BLIND_EOD"
     }
-    # Several Cash Register closes that hold a count of the SAME drawer:
-    # until its Z-Read locks and 2b folds them, only the EARLIEST of them
-    # adds; a later one is marked too.
-    drawers_seen = set()
-    repeat_ids = set()
-    for _closed, cr_id, drawer_id in sorted(linked_closes):
-        if drawer_id in drawers_seen:
-            repeat_ids.add(cr_id)
-        drawers_seen.add(drawer_id)
-    # A close holding a till drawer's count is a till count of its day too:
-    # a close whose count did NOT reach the till, beside one that did, would
-    # add the same drawer twice before any Z-Read locks (close 1 fails to
-    # link, the drawer is counted on the Blind EOD Tally, close 2 counts it).
-    linked_ids = {cr_id for _closed, cr_id, _drawer in linked_closes}
-    counted_days = zread_days | {
-        (r.get("store_id"), r.get("session_date"))
-        for r in rows
-        if r.get("source") == "CASH_REGISTER" and r.get("session_id") in linked_ids
-    }
+    # Every counted drawer is its till row now (D128(2)), so the close that
+    # holds a drawer's first count is folded into that row in 2b, locked or
+    # not, and no close stands in for a drawer until its lock.
     for r in rows:
         r["also_counted_on_till"] = r.get("source") == "CASH_REGISTER" and (
-            r.get("session_id") in repeat_ids
-            or (
+            (
                 r.get("session_id") in unattributed_ids
-                and (r.get("store_id"), r.get("session_date")) in counted_days
+                and (r.get("store_id"), r.get("session_date")) in zread_days
             )
             # D121: a later Cash Register close on an already counted drawer
-            # is never in the totals -- beside its drawer's Z-Read row (2b),
-            # and also while that drawer's count (made on the Blind EOD
-            # Tally or Day-End) is not locked yet. It used to add until the
-            # lock and leave at it, so a past day's totals changed at the
-            # lock and, before it, called a drawer "balanced" whose first
-            # count was short. The totals read low until the Z-Read locks
-            # (D88(5)); the close is named beside them with its own
-            # difference.
+            # is never in the totals; the drawer is there once, at its first
+            # count (its till row), and the close is named beside the totals
+            # with its own difference.
             or r.get("counted_earlier_on_till")
         )
 

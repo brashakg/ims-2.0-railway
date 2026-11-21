@@ -203,75 +203,6 @@ def _already_closed(coll, stored: dict):
     )
 
 
-def _later_closes(coll, till_session_id, own_id):
-    """D120: what OTHER Cash Register sessions already closed on this till
-    drawer after its count, as ``(sheets, banked_paisa, count_noted)``.
-
-    ``sheets``: the sessions judged on their OWN sheet, oldest first, in the
-    shape ``eod_tally.moved_since_count`` takes. Each is a later count of the
-    same drawer (a drawer's till count is made once, so every one of them is
-    later than it); the last is where the next session starts. That is a
-    session that started from a count it did not make (D120), and also the
-    session that MADE the till's count and was then stored on another sheet
-    (``till_since_count``): its new sheet is the later count. Left out, the
-    next session started from the first sheet and was charged again, or let
-    off, with the difference between the two. Its counted
-    cash is what was left AFTER the bank deposit recorded on it -- its own
-    expected figure was already net of that deposit -- so it is the starting
-    figure as stored.
-    ``banked_paisa``: the bank deposits recorded after that starting point on
-    closes that carried NO sheet (or one nothing could be compared with):
-    cash recorded as banked that no count has seen leave the drawer.
-    ``count_noted``: one of them already took the note and owed the alert
-    for the drawer's own count (``till_count_variance``), so the next close
-    does not ask for it a second time.
-
-    RAISES when the read fails: read as "none", a deposit or a shortage an
-    earlier session already accounted for is charged again."""
-    sheets, banked, count_noted = [], [], False
-    for s in coll.find({"till_session_id": till_session_id, "status": "CLOSED"}):
-        at = _to_dt(s.get("closed_at"))
-        # The cash a new sheet was charged with AFTER the till's count. Its
-        # stored cash_sales / refunds / expenses cover its whole window, most
-        # of which the till's count already holds.
-        since = s.get("till_since_count")
-        if (
-            s.get("session_id") == own_id
-            or at is None
-            or not (s.get("till_counted_earlier") or since)
-        ):
-            continue
-        count_noted = count_noted or s.get("till_count_variance") is not None
-        if (
-            s.get("counted") is None
-            or s.get("counted_from_shared_record")
-            or s.get("variance_status") == cash_register.COMPARISON_UNAVAILABLE
-        ):
-            banked.append((at, cash_denom.rupees_to_paisa(s.get("bank_deposit") or 0)))
-            continue
-        sheets.append(
-            {
-                "at": at,
-                "counted_paisa": cash_denom.rupees_to_paisa(s["counted"]),
-                **(
-                    since
-                    or {
-                        "cash_sales_paisa": cash_denom.rupees_to_paisa(s.get("cash_sales") or 0),
-                        "cash_refunds_paisa": cash_denom.rupees_to_paisa(s.get("cash_refunds") or 0),
-                        "cash_payouts_paisa": cash_denom.rupees_to_paisa(s.get("cash_expenses") or 0),
-                        "by_mode": s.get("by_mode_breakdown") or {},
-                    }
-                ),
-            }
-        )
-    sheets.sort(key=lambda c: c["at"])
-    return (
-        sheets,
-        sum(p for at, p in banked if not sheets or at >= sheets[-1]["at"]),
-        count_noted,
-    )
-
-
 @router.post("/cash-register/close")
 async def close_cash_register(
     body: CashRegisterClose,
@@ -422,30 +353,27 @@ async def close_cash_register(
     # hand read Rs 500 short). The till's count is not replaced (L3-12).
     # A count THIS close landed itself (refused for its note and sent again)
     # is not such a count: count_by_another tells them apart by who made it.
-    # The cash since the count is NOT re-read from the count's instant:
-    # payouts are booked by day and orders are read by created_at, so that
-    # read took the day's payouts off twice (a false excess) and missed a
-    # balance paid later on an earlier order. It is the day so far minus what
-    # the counted drawers and the later sheets were charged with (D60).
+    # Where the close starts and the cash since it are ONE rule (D127,
+    # ``eod_tally.standing_count``): the drawer's latest count by any door --
+    # a later sheet of an earlier register session included -- less a bank
+    # deposit recorded after it on a close with no sheet, plus the day so
+    # far minus what every count of the day was charged with (D60).
     standing = till_service.count_by_another(till_link, _to_dt(start_iso), body.session_id)
     moved = None
     banked_since = 0
     count_noted = False
+    drawer_unknown = False
     if standing is not None:
-        # The LATEST sheet is the starting point: an earlier session judged
-        # on its own sheet already accounted for its cash, its bank deposit
-        # and any shortage it noted. Starting again from the till's count
-        # charged all three to this session as well.
-        sheets, banked_since, count_noted = _strict(
-            lambda: _later_closes(coll, till_link.get("session_id"), body.session_id)
+        reading = _strict(
+            lambda: till_service.standing_count(db, till_link["session"], body.session_id)
         )
-        if sheets:
-            standing = {"paisa": sheets[-1]["counted_paisa"], "at": sheets[-1]["at"]}
+        standing = {"paisa": reading["paisa"], "at": reading["at"]}
+        banked_since = reading["banked_paisa"]
+        count_noted = reading["count_noted"]
+        drawer_unknown = reading["unknown"]
         start_iso = standing["at"].isoformat()
-        opening_float = cash_denom.paisa_to_rupees(standing["paisa"] - banked_since)
-        moved = _strict(
-            lambda: till_service.moved_since_count(db, till_link["session"], sheets)
-        )
+        opening_float = cash_denom.paisa_to_rupees(standing["paisa"])
+        moved = reading["moved"]
         if moved is not None:
             cash_sales = cash_denom.paisa_to_rupees(moved["cash_sales_paisa"])
             cash_refunds = cash_denom.paisa_to_rupees(moved["cash_refunds_paisa"])
@@ -493,12 +421,8 @@ async def close_cash_register(
         # and any later sheet were charged with. Stored with the close
         # (``_later_closes`` reads it). Unreadable = refused, nothing stored.
         since_count = _strict(
-            lambda: till_service.moved_since_count(
-                db,
-                till_link["session"],
-                _later_closes(coll, till_link.get("session_id"), body.session_id)[0],
-            )
-        )
+            lambda: till_service.standing_count(db, till_link["session"], body.session_id)
+        )["moved"]
 
     summary = cash_register.build_close_summary(
         opening_float=opening_float,
@@ -596,9 +520,10 @@ async def close_cash_register(
     # Not for a D120 session (see ``withheld`` above).
     several_drawers = withheld is not None
     # A D111 session whose cash since the count is not known (a counted
-    # drawer of the day holds an older-code snapshot, D76): nothing is
-    # compared and its window figures are not shown as its own (D86(3)).
-    uncompared = standing is not None and moved is None
+    # drawer of the day holds an older-code snapshot, D76), or after a close
+    # IMS could not place on one drawer (D127(2)): nothing is compared and
+    # its window figures are not shown as its own (D86(3)).
+    uncompared = standing is not None and (moved is None or drawer_unknown)
     if several_drawers or uncompared:
         summary["variance"] = None
         summary["variance_status"] = withheld or cash_register.COMPARISON_UNAVAILABLE
@@ -625,23 +550,24 @@ async def close_cash_register(
 
     # THE DRAWER'S OWN COUNT, BEYOND THE BAND AND NEVER EXPLAINED (owner
     # ruling 2026-08-25). A D120 close starts from a count made through
-    # another door. The Blind EOD Tally and Day-End take no note at the
-    # count; its note and alert wait for the Z-Read lock. Such a close reads
-    # balanced on its own sheet, so a count Rs 500 short that nobody locked
-    # closed the day with no note and no manager alert, where the register
-    # close used to demand both. This close takes the note and owes the
-    # alert under the DRAWER's own key (the lock's key, so a later lock
-    # raises no second task). Its own figures stay as D120 computes them.
-    # Asked ONCE: not when the drawer is LOCKED, not when the count was made
-    # by another register's close (noted there), not when an earlier close
-    # on this drawer already took it (``count_noted``). The same holds for
-    # this session's own refused count when a new sheet is sent (above): a
-    # sheet retyped to balance does not escape the note.
+    # another door, whose note waits for the Z-Read lock. D128(1): that
+    # count's difference is explained ONCE, by the door that owns it, so
+    # this close asks NO note for it: it shows it (``till_count_variance``)
+    # and owes the count's alert under the count's own id (the lock's,
+    # insert-once), so a shortage nobody locked still reaches the manager
+    # and a later lock raises nothing more. Its own figures stay as D120
+    # computes them. Not when the drawer is LOCKED, not when the count was
+    # made by another register's close (noted there), not when an earlier
+    # close on this drawer already met it (``count_noted``). This session's
+    # OWN refused count, when a new sheet is sent (above), is its own door's
+    # count: that one still needs the note here, so a sheet retyped to
+    # balance does not escape it.
     count_owed = None
     if (standing is not None and not count_noted) or resheeted:
         count_owed = till_service.count_awaiting_its_note(
             till_link.get("session"), body.session_id, judged_band_paisa
         )
+    count_needs_note = count_owed is not None and resheeted
 
     # MANDATORY NOTE ABOVE THE BAND (owner ruling 2026-08-25). Checked AFTER
     # the shared-record adoption so the figure judged is the ONE counted figure
@@ -661,7 +587,7 @@ async def close_cash_register(
                 "explaining the variance is required to close."
             ),
         )
-    if count_owed is not None and not close_note:
+    if count_needs_note and not close_note:
         raise HTTPException(
             status_code=400,
             detail=(
@@ -683,7 +609,11 @@ async def close_cash_register(
         "closing_count": cash_denom.restate_amount(
             closing_block, cash_denom.rupees_to_paisa(counted)
         ),
-        "till_session_id": till_link.get("session_id"),
+        # The drawer this close is on. When the close could not read the till
+        # it keeps the drawer it OPENED on (D127(2)): a close that names no
+        # drawer cannot be placed, and its bank deposit then reached no later
+        # session (a false shortage on the next close).
+        "till_session_id": till_link.get("session_id") or session.get("till_session_id"),
         "till_link_ok": bool(till_link.get("ok")),
         "till_link_error": till_link.get("error"),
         "till_already_counted": bool(till_link.get("already_counted")),
@@ -717,8 +647,9 @@ async def close_cash_register(
         ),
         "till_standing_counted_at": start_iso if standing is not None else None,
         # The drawer's own earlier count was beyond the band and unexplained:
-        # this close's note explains it and this close owes its alert. The
-        # difference of THAT count (rupees), not of this sheet.
+        # shown here and its alert owed by this close (D128(1)); noted here
+        # only when it is this session's own refused count. The difference
+        # of THAT count (rupees), not of this sheet.
         "till_count_variance": (
             cash_denom.paisa_to_rupees(count_owed["variance_paisa"])
             if count_owed is not None
@@ -761,6 +692,15 @@ async def close_cash_register(
         "variance_status": summary["variance_status"],
         "tolerance": summary["tolerance"],
         "closing_note": body.note,
+        # Why nothing was compared, when the reason is not the status itself.
+        "comparison_withheld_reason": (
+            till_service.EARLIER_CLOSE_DRAWER_UNKNOWN if uncompared and drawer_unknown else None
+        ),
+        "comparison_withheld_message": (
+            till_service.EARLIER_CLOSE_DRAWER_UNKNOWN_MESSAGE
+            if uncompared and drawer_unknown
+            else None
+        ),
     }
     # WHAT THIS CLOSE OWES THE MANAGER, stored IN the close itself so it cannot
     # be lost between the write below and the lines after it (a lost reply, a
@@ -773,10 +713,23 @@ async def close_cash_register(
     #    nothing has checked it, so the manager is told to count it on the
     #    Z-Read.
     close_day = ist_date_str(_to_dt(end_iso)) or str(end_iso)[:10]
-    # One alert per drawer (D63). A D120 session's difference is its own, not
-    # the drawer's earlier count's: it alerts under its own id, so an alert
-    # still open for that count does not swallow it.
-    own_alert_key = body.session_id if standing is not None else till_link.get("session_id")
+    # One alert per COUNT (D63, D128(1)). When the figure judged here IS the
+    # drawer's till count (this close made it, adopted it, or -- several
+    # drawers -- judged that drawer's own variance) the alert is the count's:
+    # the drawer's key and the count's fixed id, the one the Z-Read lock uses,
+    # so the two doors raise ONE task for it, ever. A D120 session's sheet or
+    # a new sheet over its own first count is a count of its own: its own key
+    # and id, so an alert for the earlier count does not swallow it.
+    drawer_id = till_link.get("session_id")
+    judged_the_drawers_count = standing is None and not resheeted and bool(drawer_id)
+    own_alert_key = drawer_id if judged_the_drawers_count else (
+        body.session_id if standing is not None or resheeted else drawer_id
+    )
+    own_task_id = (
+        till_service.count_task_id(drawer_id)
+        if judged_the_drawers_count
+        else till_service.followup_task_id("variance", body.session_id)
+    )
     update[till_service.FOLLOWUP_FIELD] = till_service.owed_followup(
         {
             "kind": "variance",
@@ -787,13 +740,12 @@ async def close_cash_register(
             "note": close_note,
             "source": "Finance cash-register close",
             "session_id": own_alert_key,
-            "task_id": till_service.followup_task_id("variance", body.session_id),
+            "task_id": own_task_id,
         }
         if variance_out_of_band
         else None,
         # The drawer's own unexplained count, under the drawer's key and day
-        # (the Z-Read lock's key). Not a second entry when this close's own
-        # difference is already owed under that same key.
+        # and the COUNT's fixed id (the Z-Read lock's): insert-once.
         {
             "kind": "variance",
             "store_id": store_id,
@@ -801,12 +753,12 @@ async def close_cash_register(
             "variance_paisa": count_owed["variance_paisa"],
             "tolerance_paisa": count_owed["tolerance_paisa"],
             "note": close_note,
-            "source": "drawer's earlier count, explained at the Finance cash-register close",
-            "session_id": till_link.get("session_id"),
-            "task_id": till_service.followup_task_id("variance", body.session_id, "count"),
+            "source": "drawer's earlier count, seen unexplained at the Finance cash-register close",
+            "session_id": drawer_id,
+            "task_id": till_service.count_task_id(drawer_id),
         }
         if count_owed is not None
-        and not (variance_out_of_band and own_alert_key == till_link.get("session_id"))
+        and not (variance_out_of_band and own_task_id == till_service.count_task_id(drawer_id))
         else None,
         {
             "kind": "uncounted",
@@ -818,6 +770,8 @@ async def close_cash_register(
         if counted is not None and not till_link.get("ok")
         else None,
         # A sheet nothing could judge is checked by hand (as on the till, D76).
+        # Not after a close IMS could not place on one drawer: D127(2) asks
+        # no note and raises no alert for a difference it cannot prove.
         {
             "kind": "uncompared",
             "store_id": store_id,
@@ -825,7 +779,7 @@ async def close_cash_register(
             "session_id": body.session_id,
             "task_id": till_service.followup_task_id("uncompared", body.session_id),
         }
-        if uncompared and not count_adopted
+        if uncompared and not count_adopted and not drawer_unknown
         else None,
     )
     # Guarded on "not yet CLOSED": of two closes sent at once only one lands,
