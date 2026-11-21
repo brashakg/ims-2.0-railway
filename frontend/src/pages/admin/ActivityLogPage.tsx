@@ -138,7 +138,7 @@ export default function ActivityLogPage() {
     (async () => {
       try {
         const data = await adminUserApi.getUsers();
-        const list: any[] = Array.isArray(data) ? data : data?.users || [];
+        const list: any[] = data;
         if (!alive) return;
         const opts = list
           .map((u: any) => ({

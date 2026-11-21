@@ -56,7 +56,7 @@ vi.mock('../../../services/api', () => ({
     },
     getAll: async () => ({ scope: 'global', policies: {} }),
   },
-  adminUserApi: { getUsers: async () => ({ users: [] }) },
+  adminUserApi: { getUsers: async () => [] },
   adminStoreApi: { getStores: async () => ({ stores: [] }) },
   settingsApi: {
     getProfile: async () => ({ full_name: 'Owner', email: 'o@example.com', phone: '9876543210' }),

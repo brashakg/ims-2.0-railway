@@ -205,7 +205,14 @@ def ensure_workshop_job(
             )
         ),
         "prescription_id": rx_id,
-        "fitting_instructions": None,
+        # L2-WS-F03: this job usually beats the POS client's createJob, whose
+        # dedup then returns it unchanged -- so it carries the sale's line
+        # notes itself, in the client's "name: note; ..." form.
+        "fitting_instructions": "; ".join(
+            f"{it.get('product_name') or it.get('name')}: {str(it['item_note']).strip()}"
+            for it in items
+            if str(it.get("item_note") or "").strip()
+        ) or None,
         "special_notes": order.get("notes"),
         "expected_date": exp,
         "status": "PENDING",

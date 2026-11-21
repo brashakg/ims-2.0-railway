@@ -3,6 +3,7 @@
 // was removed); its state and handlers live in
 // PayrollLayout and arrive through <Outlet context>.
 
+import { useEffect } from 'react';
 import { Loader2, Plus, Check, Clock, X } from 'lucide-react';
 import { PayrollAccessNotice } from '../../../components/hr/PayrollAccessNotice';
 import { usePayrollContext } from './payrollShared';
@@ -14,6 +15,14 @@ export function SalaryAdvancesSection() {
     loadAdvances, handleRecordAdvance,
   } = usePayrollContext();
 
+  // The list belongs to the picked employee, whichever section picked them:
+  // load it whenever the pick changes, and when this section opens with an
+  // employee already picked on Payslips. It used to load only from this
+  // picker's own onChange, so it kept showing the previous employee's advances.
+  useEffect(() => {
+    if (selectedEmployee) loadAdvances(selectedEmployee);
+  }, [selectedEmployee]); // eslint-disable-line react-hooks/exhaustive-deps
+
   return (
     <div className="space-y-4">
       {/* Employee selector */}
@@ -21,12 +30,7 @@ export function SalaryAdvancesSection() {
         <div className="flex items-center gap-4">
           <select
             value={selectedEmployee}
-            onChange={(e) => {
-              setSelectedEmployee(e.target.value);
-              if (e.target.value) {
-                loadAdvances(e.target.value);
-              }
-            }}
+            onChange={(e) => setSelectedEmployee(e.target.value)}
             title="Select employee for advances"
             className="bg-white border border-gray-300 text-gray-900 px-4 py-2 rounded flex-1"
           >

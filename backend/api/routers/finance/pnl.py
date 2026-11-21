@@ -28,6 +28,8 @@ from ._shared import (
     _get_db,
     _je_cal_day,
     _payroll_cost,
+    _read_or_503,
+    _report_db,
     _ORDER_REVENUE_PROJECTION,
     compute_cogs_with_flag,
     router,
@@ -42,16 +44,8 @@ async def get_revenue(
     current_user: dict = Depends(get_current_user),
 ):
     store_id = resolve_store_scope(store_id, current_user)
-    db = _get_db()
-    if db is None:
-        return {
-            "total_revenue": 0,
-            "total_orders": 0,
-            "total_tax": 0,
-            "total_discount": 0,
-            "prev_revenue": 0,
-            "change_pct": None,
-        }
+    # No database handle answers 503 (_report_db), never a revenue of zero.
+    db = _report_db(_get_db())
     today = ist_today()
 
     if period == "day":
@@ -218,17 +212,9 @@ async def get_pnl(
     current_user: dict = Depends(get_current_user),
 ):
     store_id = resolve_store_scope(store_id, current_user)
-    db = _get_db()
-    if db is None:
-        return {
-            "revenue": 0,
-            "tax": 0,
-            "expenses": 0,
-            "gross_profit": 0,
-            "net_profit": 0,
-            "gross_margin_pct": 0,
-            "net_margin_pct": 0,
-        }
+    # No database handle answers 503 (_report_db): never the all-zero P&L
+    # this used to return before the payroll read was reached.
+    db = _report_db(_get_db())
     # Exclude DRAFT/CANCELLED (never-booked / reversed) and compare the
     # date range as datetimes (created_at is a BSON datetime, so a 'YYYY-MM-DD'
     # string bound matched nothing -> the whole date-ranged P&L read zero).
@@ -296,8 +282,17 @@ async def get_pnl(
     revenue = round(sum(order_revenue_ex_gst(o) for o in period_orders), 2)
     gross_profit = revenue - cogs
 
-    # Payroll cost-to-company for the period's months.
-    payroll_cost = _payroll_cost(db, store_id, from_date, to_date)
+    # Payroll cost-to-company for the period's months. Read only for a reader
+    # who is shown it: everyone else's answer carries no payroll-derived
+    # figure (PAYROLL_DERIVED_PNL_FIELDS are stripped below by this same
+    # test), so their sales and expenses never wait on the payroll read. For
+    # an administrator an unreadable payroll answers 503 (_payroll_cost):
+    # never a P&L that leaves posted wages out.
+    payroll_cost = (
+        _payroll_cost(db, store_id, from_date, to_date)
+        if is_salary_admin(current_user)
+        else 0.0
+    )
 
     # F17/#25: POSTED manual journal entries adjust the P&L (depreciation, bank
     # charges, prior-period corrections). EXPENSE-type debits raise cost;
@@ -309,8 +304,11 @@ async def get_pnl(
     # the window isn't mis-bucketed (the two frames must agree).
     je_from_dt = _je_cal_day(from_date)
     je_to_dt = _je_cal_day(to_date, end=True)
-    je_adj = je_service.pnl_adjustments(
-        db, store_id=store_id, from_dt=je_from_dt, to_dt=je_to_dt
+    # Read strictly (decision D116): journals that cannot be read answer 503,
+    # never this P&L with their adjustment at zero -- for every reader, since
+    # total_expenses carries the journal expenses whoever asks.
+    je_adj = _read_or_503(
+        je_service.pnl_adjustments, db, store_id=store_id, from_dt=je_from_dt, to_dt=je_to_dt
     )
     je_rev = je_adj.get("je_revenue_adjustment", 0.0)
     je_exp = je_adj.get("je_expense_adjustment", 0.0)

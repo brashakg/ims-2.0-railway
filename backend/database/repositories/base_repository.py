@@ -169,6 +169,11 @@ class BaseRepository(ABC, Generic[T]):
             print(f"Error finding {self.entity_name}: {e}")
             return None
 
+    def is_absent(self, id: str) -> bool:
+        """True only when the database confirms there is no such document.
+        RAISES on a database error (find_by_id reports that as None too)."""
+        return self.collection.find_one({self.id_field: id}) is None
+
     def find_one(self, filter: Dict) -> Optional[Dict]:
         """
         Find single document by filter
@@ -191,9 +196,11 @@ class BaseRepository(ABC, Generic[T]):
         sort: List[tuple] = None,
         skip: int = 0,
         limit: int = 100,
+        strict: bool = False,
     ) -> List[Dict]:
         """
-        Find multiple documents
+        Find multiple documents. ``strict``: a database error RAISES instead of
+        reading as an empty list (for screens where empty must mean empty).
 
         Args:
             filter: MongoDB filter
@@ -217,9 +224,17 @@ class BaseRepository(ABC, Generic[T]):
             return [self._clean_id(doc) for doc in cursor]
         except Exception as e:
             print(f"Error finding {self.entity_name}s: {e}")
+            if strict:
+                raise
             return []
 
-    def update(self, id: str, data: Dict) -> bool:
+    def update(
+        self,
+        id: str,
+        data: Dict,
+        expected: Optional[Dict] = None,
+        add_to_set: Optional[Dict] = None,
+    ) -> bool:
         """
         Update document by ID
 
@@ -234,7 +249,16 @@ class BaseRepository(ABC, Generic[T]):
             # Add updated timestamp
             data["updated_at"] = utc_now_naive()
 
-            result = self.collection.update_one({self.id_field: id}, {"$set": data})
+            # ``expected``: extra field values the stored row must still hold
+            # (a compare-and-set); no match -> False, nothing written.
+            # ``add_to_set``: {list_field: value} appended in the SAME write, so
+            # the value lands if and only if the $set does.
+            ops: Dict = {"$set": data}
+            if add_to_set:
+                ops["$addToSet"] = add_to_set
+            result = self.collection.update_one(
+                {self.id_field: id, **(expected or {})}, ops
+            )
             return result.modified_count > 0
         except Exception as e:
             print(f"Error updating {self.entity_name}: {e}")

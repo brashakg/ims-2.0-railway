@@ -174,10 +174,15 @@ export const hrApi = {
     return response.data as { message: string; leave_id: string; status: string };
   },
 
-  /** Own most-recent payslip (same shape as GET /payroll/payslip/{id}). */
+  /** Own most-recent APPROVED or PAID payslip (same shape as GET
+   *  /payroll/payslip/{id}). `not_ready` names a newer month whose payroll is
+   *  still a draft: staff are not shown a draft's figures. */
   getMyPayslip: async () => {
     const response = await api.get('/hr/me/payslip');
-    return response.data as { payslip: MyPayslip | null };
+    return response.data as {
+      payslip: MyPayslip | null;
+      not_ready?: { month: number; year: number };
+    };
   },
 
   /** Own commission for this (or given) month. */
@@ -439,6 +444,8 @@ export interface MyPayslip {
   employee_name?: string;
   month?: number;
   year?: number;
+  /** The payroll row's status: APPROVED / PAID (a DRAFT is never sent here). */
+  status?: string;
   breakdown?: Record<string, unknown> & {
     gross_salary?: number;
     total_deductions?: number;
