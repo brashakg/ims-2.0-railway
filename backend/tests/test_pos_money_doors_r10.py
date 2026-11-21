@@ -346,6 +346,7 @@ async def test_the_generic_consume_route_refuses_a_stored_refund_approval_under_
     eng, db = _engine()
     _approved(db)
     monkeypatch.setattr(ar, "_engine", lambda: eng)
+    monkeypatch.setattr(ar, "_get_db", lambda: db)    # the consume door reads strictly, on its own engine (PR #1411)
     with pytest.raises(HTTPException) as exc:
         await ar.consume_request("REQ-1", ar.ConsumeAction(action_type="refund", amount=1.0),
                                  current_user=_user("ADMIN"))
