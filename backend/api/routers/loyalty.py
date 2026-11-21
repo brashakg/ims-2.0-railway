@@ -49,6 +49,7 @@ from ..services.loyalty_engine import (
     calc_redeem,
     compute_tier,
     expirable_points_by_lot,
+    points_held_by_unexpired_lots,
     expiry_for_earn,
 )
 
@@ -949,6 +950,7 @@ def _expire_lot(
     expirable: int,
     actor: Optional[str],
     run_id: str,
+    keep_points: int = 0,
 ) -> int:
     """Expire ONE lot as a resumable operation; return the points THIS run
     finished expiring (0 = nothing left to shed, or another run finished it).
@@ -962,13 +964,20 @@ def _expire_lot(
     next sweep resumes at the first step that is not stored yet, with the
     amount that was actually debited -- never a second debit, never a second
     row, and never a lot marked finished with one of the two missing.
+    The debit never takes the balance below ``keep_points`` (the unexpired
+    lots' share), so it may take less than ``expirable`` when a redemption
+    landed meanwhile; the EXPIRE row records what was actually taken.
     """
     debited = accounts.expiry_debited_points(customer_id, lot_id)
     if debited is None and expirable > 0:
-        accounts.debit_for_expiry(customer_id, lot_id, expirable, actor)
+        asked = accounts.debit_for_expiry(
+            customer_id, lot_id, expirable, keep_points=keep_points, actor=actor
+        )
         debited = accounts.expiry_debited_points(customer_id, lot_id)
         if debited is None:
-            raise RuntimeError(f"expiry debit not confirmed for {lot_id}")
+            if asked:
+                raise RuntimeError(f"expiry debit not confirmed for {lot_id}")
+            debited = 0  # nothing above the valid lots' share left to expire
     if debited:
         expire_id = f"EXPIRE-{lot_id}"
         if txns.collection.find_one({"txn_id": expire_id}) is None:
@@ -1054,6 +1063,7 @@ async def expire_sweep(
             incomplete.extend(r.get("txn_id") for r in rows)
             continue
         expirable_by_lot = expirable_points_by_lot(ledger, now)
+        keep_points = points_held_by_unexpired_lots(ledger, now)
 
         for row in rows:
             lot_id = row.get("txn_id")
@@ -1063,6 +1073,7 @@ async def expire_sweep(
                 points = _expire_lot(
                     txns, accounts, customer_id, lot_id,
                     int(expirable_by_lot.get(lot_id, 0)), actor, run_id,
+                    keep_points=keep_points,
                 )
             except Exception:  # noqa: BLE001
                 logger.exception("[LOYALTY] expiry not finished for lot %s", lot_id)

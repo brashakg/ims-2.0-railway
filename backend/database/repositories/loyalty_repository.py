@@ -119,28 +119,44 @@ class LoyaltyAccountRepository(BaseRepository):
         return None
 
     def debit_for_expiry(
-        self, customer_id: str, lot_id: str, points: int, actor: Optional[str] = None
-    ) -> None:
-        """Take an expired lot's unspent points off the balance, once per lot.
+        self,
+        customer_id: str,
+        lot_id: str,
+        points: int,
+        keep_points: int = 0,
+        actor: Optional[str] = None,
+    ) -> int:
+        """Take an expired lot's unspent points off the balance, once per lot,
+        and return how many points this call ASKED to take (0 = nothing to take).
 
         Keyed on the lot, so a retry, a lost reply or a second sweep running at
-        the same moment cannot debit twice; guarded on the balance, so points
-        being redeemed right now are never expired underneath the customer.
-        Returns nothing on purpose: the caller reads expiry_debited_points --
-        the stored marker, not this call's reply, says whether it landed.
+        the same moment cannot debit twice. ``keep_points`` (what the ledger
+        says the customer's unexpired lots hold) is a floor IN the guarded
+        write: a redemption that lands while the sweep works lowers the
+        balance, and the expiry then takes only what is left above the valid
+        lots -- never a valid lot's points. The caller reads
+        expiry_debited_points: the stored marker, not this call's reply, says
+        whether the debit landed. RAISES on a read failure.
         """
         # ponytail: one small marker per expired lot stays on the account
         # document (money_ledger); archive old markers if a customer ever
         # accumulates thousands of expired lots.
         from api.services import money_guard
 
+        keep = max(int(keep_points or 0), 0)
+        doc = self.collection.find_one({"customer_id": customer_id}) or {}
+        take = min(int(points), int(doc.get("balance_points") or 0) - keep)
+        if take <= 0:
+            return 0
         now = utc_now_naive()
         money_guard.debit(
-            self.collection, "LOYALTY", customer_id, int(points),
+            self.collection, "LOYALTY", customer_id, take,
             reason="expire", ref=lot_id, actor=actor,
             idempotency_key=self._expiry_key(lot_id),
+            guard_extra={"balance_points": {"$gte": take + keep}},
             set_extra={"last_activity_at": now, "updated_at": now},
         )
+        return take
 
     def try_debit(
         self,

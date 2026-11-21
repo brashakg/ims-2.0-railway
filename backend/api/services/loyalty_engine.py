@@ -356,6 +356,36 @@ def expirable_points_by_lot(
     AND are past expiry appear in the result (always > 0).
     """
     now = now or utc_now_naive()
+    out: Dict[str, int] = {}
+    for lot in _fifo_lots(ledger):
+        if lot["already_swept"] or lot["remaining"] <= 0:
+            continue
+        exp = lot["expires_at"]
+        if exp is not None and exp <= now and lot["txn_id"]:
+            out[lot["txn_id"]] = int(lot["remaining"])
+    return out
+
+
+def points_held_by_unexpired_lots(
+    ledger: List[Dict[str, Any]],
+    now: Optional[datetime] = None,
+) -> int:
+    """Points the ledger says belong to lots that have NOT expired (no expiry,
+    or expires_at > now). The expiry sweep never lets a debit take the balance
+    below this, so a redemption that lands while the sweep works (its ledger
+    row not read yet) can never make the sweep expire a valid lot's points."""
+    now = now or utc_now_naive()
+    return sum(
+        int(lot["remaining"])
+        for lot in _fifo_lots(ledger)
+        if lot["remaining"] > 0
+        and (lot["expires_at"] is None or lot["expires_at"] > now)
+    )
+
+
+def _fifo_lots(ledger: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Walk the ledger oldest->newest and return every lot with its remaining
+    (unspent, unexpired) points after FIFO consumption."""
     rows = sorted(ledger or [], key=_txn_sort_key)
 
     # Each EARN lot: its remaining (unspent, unexpired) balance, in FIFO order.
@@ -413,12 +443,4 @@ def expirable_points_by_lot(
                         "already_swept": False,
                     }
                 )
-
-    out: Dict[str, int] = {}
-    for lot in lots:
-        if lot["already_swept"] or lot["remaining"] <= 0:
-            continue
-        exp = lot["expires_at"]
-        if exp is not None and exp <= now and lot["txn_id"]:
-            out[lot["txn_id"]] = int(lot["remaining"])
-    return out
+    return lots
