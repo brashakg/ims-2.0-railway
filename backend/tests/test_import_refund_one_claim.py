@@ -1229,6 +1229,24 @@ def test_a_door_with_no_returns_collection_books_nothing():
     assert (out["status"], out["reason"], out["credit_note_issued"]) == ("error", "refund_not_claimed", False), out
 
 
+def test_a_confirm_that_cannot_tell_whether_its_claim_landed_gives_one_instruction(db, monkeypatch):
+    """Decision D125 at the screen: the 'could not tell' answer says to confirm
+    again after 15 minutes; the route does not add a contradicting 'confirm it
+    again' to it."""
+    from fastapi import HTTPException
+
+    monkeypatch.delenv("SHOPIFY_REFUND_AUTO", raising=False)
+    s = seed(db, "CU")
+    assert live_webhook(db, s)["status"] == "queued"
+    fired = claim_insert_fails(monkeypatch, db, s.refund_id, lands=True, read_back_fails=True)
+    with pytest.raises(HTTPException) as refused:
+        confirm_at_the_screen(db, s)
+    detail = refused.value.detail
+    assert fired and refused.value.status_code == 422 and "could not tell" in detail, detail
+    assert "after 15 minutes" in detail and "confirm it again." not in detail.replace("confirm it again after", ""), detail
+    assert not books(db, s).rows
+
+
 def race(db, s, live, timeout=20):
     """The import and a live door on one refund, released together."""
     start, out = threading.Barrier(2, timeout=timeout), {}

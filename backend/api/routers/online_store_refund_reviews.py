@@ -364,6 +364,10 @@ async def confirm_refund_review(
                 # Decisions D118 / D125: the refund's claim could not be read,
                 # or could not be saved -- say so (nothing was booked), never
                 # "duplicate".
+                # The 'could not tell' text already says when to confirm again
+                # (after 15 minutes); no second, contradicting instruction.
+                f"{result.get('store_credit_reason')}"
+                if result.get("reason") == NOT_CLAIMED and result.get("claim_unknown") else
                 f"{result.get('store_credit_reason')} The row stays open: confirm it again."
                 if result.get("reason") in (CLAIM_UNREADABLE, NOT_CLAIMED) else
                 "Credit note could not be issued for this refund "
