@@ -31,6 +31,7 @@ from ._shared import (
     bills_round_off,
     logger,
     router,
+    sale_line_hsn,
 )
 from .pricing import (
     OrderItemCreate,
@@ -106,7 +107,7 @@ async def create_order(
             logger.warning("[ORDERS] idempotency lookup skipped: %s", exc)
         else:
             if existing:
-                return _replay_same_bill(existing, order_body_fingerprint(order))
+                return _replay_same_bill(existing, order)
 
     # W1.4 / OS-005 (owner-approved 2026-07-23): an ONLINE store (BV-ONLINE-01 /
     # WO-ONLINE-01) owns no stock, has no till and no walk-ins -- a manual POS
@@ -557,6 +558,9 @@ async def create_order(
                     "brand": _pdoc.get("brand") or item.brand,
                     "subbrand": item.subbrand,
                     "category": item.category,
+                    # The line's HSN from the live product master, frozen at
+                    # sale time (sale_line_hsn; GST rates it below).
+                    "hsn_code": sale_line_hsn(_pdoc_by_pid.get(item.product_id or ""), item.item_type),
                     # The DISCOUNT TIER (MASS/PREMIUM/LUXURY/SERVICE/
                     # NON_DISCOUNTABLE) from the product master. The promo
                     # engine's cap clamp reads this field; it was never
@@ -890,7 +894,7 @@ async def create_order(
         except HTTPException:
             twin = _twin_of(order_repo, idem_key, store_id)
             if twin:
-                return _replay_same_bill(twin, body_fp)
+                return _replay_same_bill(twin, order)
             saving = _still_saving(order_repo, idem_key)
             if saving is not None:
                 raise saving
@@ -959,7 +963,7 @@ async def create_order(
                     )
             twin = _twin_of(order_repo, idem_key, store_id)
             if twin:
-                return _replay_same_bill(twin, body_fp)
+                return _replay_same_bill(twin, order)
             raise
         except Exception as exc:  # noqa: BLE001
             # Non-blocking soft failure (mongo blip, etc.). Tag the
@@ -1073,7 +1077,27 @@ async def create_order(
         approval_spent = False
 
         def _order_was_saved() -> bool:
-            return bool(order_repo.find_one({"order_id": precomputed_order_id}))
+            # The RAW collection, not order_repo.find_one: the repo swallows a
+            # read error into None ("not saved") and the rollback would free
+            # stock under a bill that exists. A read error must raise, so every
+            # give-back below fails closed.
+            return bool(order_repo.collection.find_one({"order_id": precomputed_order_id}))
+
+        async def _give_back_lens_cells() -> None:
+            # Never under a bill that exists (as the units). Fail-soft: a cell
+            # that could not be freed stays reserved under its audit row.
+            for idx, oi in enumerate(items_data):
+                try:
+                    await release_for_cancel(
+                        order_item=oi,
+                        order_id=precomputed_order_id,
+                        line_index=_lens_reservation_key(oi, idx),
+                        store_id=store_id or "",
+                        user=current_user,
+                        was_saved=_order_was_saved,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
 
         try:
             # Every unit the bill takes is claimed (atomic) BEFORE the save: a
@@ -1119,22 +1143,7 @@ async def create_order(
                 discount_approval.give_back(
                     discount_approver, current_user, _order_was_saved
                 )
-            try:
-                from ...services.lens_stock_hook import release_for_cancel
-
-                for idx, oi in enumerate(items_data):
-                    try:
-                        await release_for_cancel(
-                            order_item=oi,
-                            order_id=precomputed_order_id,
-                            line_index=_lens_reservation_key(oi, idx),
-                            store_id=store_id or "",
-                            user=current_user,
-                        )
-                    except Exception:  # noqa: BLE001
-                        pass  # fail-soft compensating action
-            except Exception:  # noqa: BLE001
-                pass
+            await _give_back_lens_cells()
             # Two presses of one bill (same Idempotency-Key) at once: the
             # first holds the units / the approval (a 409 here), or the unique
             # (store_id, idempotency_key) index refused this insert -- either
@@ -1142,7 +1151,7 @@ async def create_order(
             if idem_key and (isinstance(create_exc, HTTPException) or _is_idempotency_duplicate(create_exc)):
                 twin = _twin_of(order_repo, idem_key, store_id)
                 if twin:
-                    return _replay_same_bill(twin, body_fp)
+                    return _replay_same_bill(twin, order)
             if isinstance(create_exc, HTTPException):
                 saving = _still_saving(order_repo, idem_key)
                 if saving is not None:
@@ -1265,6 +1274,7 @@ async def create_order(
 
         _release_claimed_units(precomputed_order_id, claimed_units, _order_was_saved)
         discount_approval.give_back(discount_approver, current_user, _order_was_saved)
+        await _give_back_lens_cells()
         raise HTTPException(status_code=500, detail="Failed to create order")
 
     return {
@@ -1340,20 +1350,55 @@ ORDER_NOT_LIVE = "ORDER_NOT_LIVE"
 BILL_STORE_MISMATCH = "BILL_STORE_MISMATCH"
 
 
-def order_body_fingerprint(order: OrderCreate) -> str:
+def _lens_identity(line: Dict[str, Any]) -> str:
+    """A line's clinical identity (powers, axis, lens options/details), read
+    the same from a request line and a saved order line; "" when it has none."""
+    import json
+
+    def _power(v):
+        return "" if v is None else round(float(v), 2) + 0.0  # -0.0 is 0.0
+
+    lens = [_power(line.get("sph")), _power(line.get("cyl")), _power(line.get("axis")), _power(line.get("add")),
+            line.get("lens_options") or {}, line.get("lens_details") or {}]
+    return "" if lens == ["", "", "", "", {}, {}] else json.dumps(lens, sort_keys=True, default=str)
+
+
+def _bill_line(line: Dict[str, Any], canonical=lambda pid: pid) -> List[Any]:
+    """A line's identity on the bill, read the same from a request line and a
+    saved order line: item, unit, quantity, price, discount, Rx, lens cell."""
+    return [str(line.get("item_type") or "").upper(), canonical(str(line.get("product_id") or "")),
+            str(line.get("stock_id") or ""), int(line.get("quantity") or 0),
+            round(float(line.get("unit_price") or 0), 2), round(float(line.get("discount_percent") or 0), 4),
+            str(line.get("prescription_id") or ""), str(line.get("lens_line_id") or "")]
+
+
+def order_body_fingerprint(order: OrderCreate, legacy: bool = False) -> str:
     """THE identity of a bill (money review 24), from the body the till sends
     (orderPayload.ts builds it; this is its one definition): the lines (item,
     unit, quantity, price, discount, Rx), the customer and member, the sale
     type and the bill discount -- never the dates, notes or salesperson the
-    till may stamp afresh at each press."""
+    till may stamp afresh at each press.
+
+    A lens line's clinical identity (powers, axis, lens options/details) is
+    part of the bill too: the same key with a changed power is another bill
+    (audit L2-POS-F03). It is appended only when the line carries one, so a
+    line without lens data hashes exactly as before.
+
+    ``legacy=True`` is the formula saved before lens data joined it: a bill
+    saved under it is judged by _same_bill, which also checks the lens data
+    against the saved order's own lines."""
     import hashlib
     import json
 
-    lines = sorted(
-        [str(i.item_type or "").upper(), str(i.product_id or ""), str(i.stock_id or ""), int(i.quantity or 0),
-         round(float(i.unit_price or 0), 2), round(float(i.discount_percent or 0), 4), str(i.prescription_id or ""),
-         str(i.lens_line_id or "")]
-        for i in order.items)
+    def _line(i):
+        fields = i.model_dump()
+        line = _bill_line(fields)
+        lens = "" if legacy else _lens_identity(fields)
+        if lens:
+            line.append(lens)
+        return line
+
+    lines = sorted(_line(i) for i in order.items)
     body = {"customer_id": order.customer_id or "", "patient_id": order.patient_id or "",
             "order_type": order.order_type or "", "lines": lines,
             "cart_discount_percent": round(float(order.cart_discount_percent or 0), 4),
@@ -1361,19 +1406,65 @@ def order_body_fingerprint(order: OrderCreate) -> str:
     return hashlib.sha256(json.dumps(body, sort_keys=True).encode("utf-8")).hexdigest()
 
 
-def _replay_same_bill(order: Dict[str, Any], body_fp: str) -> Dict[str, Any]:
+def _bill_lines(lines: List[Dict[str, Any]], canonical=lambda pid: pid, lens_only: bool = False) -> List[List[Any]]:
+    """A bill's lines in a fixed order, each power still tied to its WHOLE
+    line: two prices of one lens are two lines, and swapping their powers is
+    another bill, while listing the same lines the other way round is not."""
+    return sorted(_bill_line(ln, canonical) + [_lens_identity(ln)] for ln in lines
+                  if _lens_identity(ln) or not lens_only)
+
+
+def _same_bill_fields(order: Dict[str, Any], body: OrderCreate) -> bool:
+    """A saved bill's own fields beside this press: sale type, bill discount,
+    customer and member. The discount the bill took is its percent; the amount
+    is the server's own sum, so a sent amount only has to agree to the paise
+    each rounded line can differ by, and a press that sends none is not another
+    bill. The customer is saved as sent, so a retry matches it exactly, blank
+    included. A named member is always saved, so a retry naming one must match;
+    a blank sent proves nothing, as the server resolves that member itself."""
+    sent_amount = float(body.cart_discount_amount or 0)
+    return (str(order.get("order_type") or "") == str(body.order_type or "")
+            and round(float(order.get("cart_discount_percent") or 0), 4) == round(float(body.cart_discount_percent or 0), 4)
+            and (not sent_amount or abs(sent_amount - float(order.get("cart_discount_amount") or 0))
+                 <= 0.01 * (len(body.items) + 1))
+            and str(order.get("customer_id") or "") == str(body.customer_id or "")
+            and (not body.patient_id or body.patient_id == order.get("patient_id")))
+
+
+def _same_bill(order: Dict[str, Any], body: OrderCreate) -> bool:
+    """Is this press the bill the saved order recorded? A hash with lens data
+    in it answers alone. An old-format hash cannot see lens data (and a retry
+    that drops it hashes the same), so the lens lines must ALSO be the saved
+    order's own. Both sides resolve the product alike: a line may hold a SKU.
+
+    A keyed order saved before any fingerprint has only what it stored to go by
+    (owner ruling 2026-11-07: fail closed). Every line and bill field must match
+    it; nothing is back-filled onto it, and a bill edited since is refused."""
+    saved = order.get("body_fingerprint")
+    if saved and saved != order_body_fingerprint(body, legacy=True):
+        return saved == order_body_fingerprint(body)
+    repo = get_product_repository()
+
+    def canon(pid):
+        return _canonical_pid(repo, pid)
+
+    sent, stored = [i.model_dump() for i in body.items], order.get("items") or []
+    if saved:
+        return _bill_lines(sent, canon, lens_only=True) == _bill_lines(stored, canon, lens_only=True)
+    return _bill_lines(sent, canon) == _bill_lines(stored, canon) and _same_bill_fields(order, body)
+
+
+def _replay_same_bill(order: Dict[str, Any], body: OrderCreate) -> Dict[str, Any]:
     """A press with an existing key replays its order -- only for the SAME
     bill. Another body under the key is refused (409): the till then posts
-    no payment and never says the sale is complete. An order saved before
-    the fingerprint existed replays as before."""
+    no payment and never says the sale is complete. _same_bill decides."""
     number = order.get("order_number") or order.get("order_id")
     # A cancelled or void order is never replayed as a sale (money review 25).
     if str(order.get("status") or "").upper() in ("CANCELLED", "VOID", "VOIDED"):
         raise HTTPException(status_code=409, detail={
             "code": ORDER_NOT_LIVE,
             "message": f"Order {number} was cancelled - start a new bill. Nothing was charged."})
-    saved = order.get("body_fingerprint")
-    if saved and saved != body_fp:
+    if not _same_bill(order, body):
         raise HTTPException(status_code=409, detail={
             "code": IDEMPOTENCY_BODY_MISMATCH,
             "message": (f"This bill was already saved as order {number} with different items. Open it on the "
@@ -1419,14 +1510,24 @@ async def quote_bill(
             status_code=403, detail="Your role is not permitted to create orders."
         )
     lines = []
+    product_repo = get_product_repository()
     for item in body.items:
         discount_amount, item_total = bill_line_value(
             item.unit_price, item.quantity, item.discount_percent
         )
+        # The HSN create will stamp (sale_line_hsn), so the quote's tax is
+        # create's. Read-only and fail-soft: a product create would refuse,
+        # or a failed read, is quoted without one.
+        try:
+            pdoc = (_resolve_billable_product(product_repo, item.product_id or "", item.product_name or "")
+                    if product_repo is not None else None)
+        except Exception:  # noqa: BLE001
+            pdoc = None
         lines.append(
             {
                 "item_type": item.item_type,
                 "category": item.category,
+                "hsn_code": sale_line_hsn(pdoc, item.item_type),
                 "discount_amount": discount_amount,
                 "item_total": item_total,
             }
