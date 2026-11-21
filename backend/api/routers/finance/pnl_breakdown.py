@@ -19,6 +19,8 @@ from ._shared import (
     _cost_by_product,
     _get_db,
     _payroll_by_store,
+    _report_db,
+    _company_shop_ids,
     _store_maps,
     _store_name_map,
     compute_cogs_with_flag,
@@ -61,11 +63,12 @@ async def get_pnl_by_store(
     """
     if not is_salary_admin(current_user):
         raise HTTPException(status_code=403, detail=SALARY_RESTRICTED_MESSAGE)
-    db = _get_db()
+    db = _report_db(_get_db())  # no handle: 503, as on GET /pnl
+    # The company filter is THE strict reader's (_company_shop_ids: a shop
+    # list that cannot be read answers 503, never "this company has no shop").
+    # Without the filter the shop list only labels the rows.
+    store_ids = _company_shop_ids(db, entity_id) if entity_id else None
     s2e, _ = _store_maps(db)
-    store_ids = (
-        [sid for sid, eid in s2e.items() if eid == entity_id] if entity_id else None
-    )
 
     # Exclude DRAFT/CANCELLED and compare the date range as datetimes
     # (created_at is a BSON datetime). THE real-sale rule (api/utils/real_sale)
@@ -115,7 +118,9 @@ async def get_pnl_by_store(
     )
     exp_by_store = {e["_id"]: e["amt"] for e in exp}
 
-    pay_by_store = _payroll_by_store(db, from_date, to_date)
+    # The company filter applies to payroll as to every other column; an
+    # unreadable payroll answers 503 (never a table without it).
+    pay_by_store = _payroll_by_store(db, from_date, to_date, store_ids)
 
     # backlog #4: show the store NAME, not the raw store id, on the P&L table.
     store_names = _store_name_map(db)
@@ -165,7 +170,7 @@ async def get_pnl_by_category(
     and a login with no shop reads none (resolve_store_scope); only an admin,
     who reads every shop, can narrow by entity_id."""
     store_id = resolve_store_scope(store_id, current_user)
-    db = _get_db()
+    db = _report_db(_get_db())
     # Exclude DRAFT/CANCELLED; compare the date range as datetimes
     # (created_at is a BSON datetime, so a string bound matched nothing).
     match: dict = {**real_sale_match(db)}
@@ -173,8 +178,7 @@ async def get_pnl_by_category(
     if store_id:
         store_ids = [store_id]
     elif entity_id:
-        s2e, _ = _store_maps(db)
-        store_ids = [sid for sid, eid in s2e.items() if eid == entity_id]
+        store_ids = _company_shop_ids(db, entity_id)
     if store_ids is not None:
         match["store_id"] = {"$in": store_ids}
     _apply_created_at_range(match, from_date, to_date)

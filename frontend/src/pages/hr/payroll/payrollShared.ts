@@ -65,7 +65,23 @@ interface Payslip {
   year: number;
   breakdown: SalaryBreakdown;
   generated_at: string;
+  /** The payroll row's status (DRAFT / APPROVED / PAID); absent on a payslip
+   *  that came from the old salary writer, which has no approval step. */
+  status?: string;
 }
+
+/** A payroll row's status in plain words: ONE wording for the Payslips
+ *  section, the My Work card and the printed slip (the server's printed
+ *  payslip uses the same three: payroll_exports.PAYSLIP_STATUS_LABEL).
+ *  Staff are shown a payslip only once it is Approved or Paid; a Draft is
+ *  seen only by the administrator preparing payroll. A status this map does
+ *  not know is shown as nothing rather than guessed. */
+const PAYSLIP_STATUS_LABEL: Record<string, string> = {
+  DRAFT: 'Draft - not yet approved',
+  APPROVED: 'Approved',
+  PAID: 'Paid',
+};
+const payslipStatusBadge = (status?: string) => (status === 'DRAFT' ? 'badge badge-warning' : 'badge');
 
 const MONTHS = [
   'January', 'February', 'March', 'April', 'May', 'June',
@@ -89,6 +105,7 @@ interface PayrollOutletContext {
   advances: SalaryAdvance[];
   payslip: Payslip | null;
   isLoading: boolean;
+  payslipLoading: boolean;
   noAccess: string | null;
   showAdvanceForm: boolean;
   setShowAdvanceForm: (open: boolean) => void;
@@ -102,5 +119,5 @@ interface PayrollOutletContext {
 
 const usePayrollContext = () => useOutletContext<PayrollOutletContext>();
 
-export { SALARY_ROLES, MONTHS, usePayrollContext };
+export { SALARY_ROLES, MONTHS, PAYSLIP_STATUS_LABEL, payslipStatusBadge, usePayrollContext };
 export type { SalaryRecord, SalaryAdvance, Payslip, PayrollOutletContext };
