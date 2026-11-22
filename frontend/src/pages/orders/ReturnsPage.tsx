@@ -195,6 +195,11 @@ function ReturnsDesk({ canComplete }: { canComplete: boolean }) {
   const [resultDrawerNetted, setResultDrawerNetted] = useState<boolean | null>(null);
   const [resultCashRefunded, setResultCashRefunded] = useState(0);
   const [resultCreditAmount, setResultCreditAmount] = useState(0);
+  // What the press PAID (money or store credit), read off the server's answer:
+  // its net_refund less the points-paid part (_press_answer). The live quote
+  // is dropped once the step leaves 'select', so the done screen must never
+  // read netRefund (it falls back to the local gross, points included).
+  const [resultPays, setResultPays] = useState(0);
   // The server's note when the returned units were NOT put back in stock.
   const [resultStockNote, setResultStockNote] = useState('');
   const [resultCollectAmount, setResultCollectAmount] = useState(0);
@@ -604,6 +609,14 @@ function ReturnsDesk({ canComplete }: { canComplete: boolean }) {
       ) / 100,
     );
     setResultCreditAmount(Number(result?.credit_amount) || 0);
+    // An answer without net_refund (an older record) keeps the quoted figure
+    // the press was confirmed on -- the quote is still live at this point.
+    setResultPays(
+      result?.net_refund != null
+        ? Math.max(0, Math.round(
+          (Number(result.net_refund) - (Number(result?.points_paid_share) || 0)) * 100) / 100)
+        : roundedNet,
+    );
     setResultCollectAmount(Number(result?.collect_amount) || 0);
     setResultCollectMethod(String(result?.collect_method || ''));
     setResultStockNote(String(result?.stock_note || ''));
@@ -1175,7 +1188,7 @@ function ReturnsDesk({ canComplete }: { canComplete: boolean }) {
           </h3>
           <p className="text-gray-500 mt-2">Reference: {resultId}</p>
           <p className="text-2xl font-bold text-bv-red-600 mt-3">
-            {returnType === 'EXCHANGE' ? (exchangeDirection === 'EVEN' ? fc(0) : fc(Math.abs(exchangeDiff))) : fc(netRefund)}
+            {returnType === 'EXCHANGE' ? (exchangeDirection === 'EVEN' ? fc(0) : fc(Math.abs(exchangeDiff))) : fc(resultPays)}
           </p>
           <p className="text-sm text-gray-500 mt-1">
             {returnType === 'CREDIT_NOTE' ? 'Store credit added to customer account' :
@@ -1203,10 +1216,10 @@ function ReturnsDesk({ canComplete }: { canComplete: boolean }) {
               This {fp(resultCashRefunded)} cash refund is now recorded in Day-End — do not also enter it as cash paid out.
             </p>
           )}
-          {returnType === 'RETURN' && resultDrawerNetted === false && roundedNet > 0 && (
+          {returnType === 'RETURN' && resultDrawerNetted === false && resultPays > 0 && (
             <p className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2 mt-3 max-w-md mx-auto">
               This refund could NOT be auto-deducted from the drawer (the order has no verified payment tenders).
-              If you handed back cash, record {fp(netRefund)} as cash paid out at day-end — otherwise the till will read short.
+              If you handed back cash, record {fp(resultPays)} as cash paid out at day-end — otherwise the till will read short.
             </p>
           )}
           {/* An EXCHANGE-COLLECT taken in CASH moves the SAME drawer figure as
@@ -1226,7 +1239,7 @@ function ReturnsDesk({ canComplete }: { canComplete: boolean }) {
             </p>
           )}
           <div className="flex gap-3 justify-center mt-6">
-            <button onClick={() => { setStep('search'); setSelectedOrder(null); setReturnItems([]); setResultId(null); setReplacementItems([]); setProductResults([]); setProductQuery(''); setRestockingFee(0); setRefundTenders([]); setCollectMethod(''); setQuote(null); setQuoteError(null); setResultDrawerNetted(null); setResultCashRefunded(0); setResultCreditAmount(0); setResultCollectAmount(0); setResultCollectMethod(''); setResultStockNote(''); }}
+            <button onClick={() => { setStep('search'); setSelectedOrder(null); setReturnItems([]); setResultId(null); setReplacementItems([]); setProductResults([]); setProductQuery(''); setRestockingFee(0); setRefundTenders([]); setCollectMethod(''); setQuote(null); setQuoteError(null); setResultDrawerNetted(null); setResultCashRefunded(0); setResultCreditAmount(0); setResultPays(0); setResultCollectAmount(0); setResultCollectMethod(''); setResultStockNote(''); }}
               className="px-6 py-2.5 bg-bv-red-600 text-white rounded-lg text-sm font-semibold">New Return</button>
           </div>
         </div>
