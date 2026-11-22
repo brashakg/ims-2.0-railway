@@ -456,7 +456,9 @@ def _already_returned_qty(
             if own_shopify_refund_id and rid == own_shopify_refund_id:
                 refunds[rid] = refunds.get(rid, 0.0) + _own_restock_share(doc, item_id, product_id)
                 continue
-            for prior in doc.get("items") or []:
+            # An imported note (RET-HIST) has no items: its goods_lines are
+            # the goods it gave back, the cost the P&L gives back (D45 b).
+            for prior in doc.get("items") or doc.get("goods_lines") or []:
                 if not isinstance(prior, dict) or not _same_line(prior, item_id, product_id):
                     continue
                 try:

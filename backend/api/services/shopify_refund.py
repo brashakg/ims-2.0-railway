@@ -97,15 +97,112 @@ def _stale_cutoff() -> str:
 
 def _unfinished_claim(db, refund_id: str) -> Optional[Dict[str, Any]]:
     """The refund's returns doc when a run claimed it and never finalized it
-    (status PENDING, no credit note), else None. Fail-soft -> None."""
-    try:
-        coll = db.get_collection(_RETURNS_COLLECTION)
-        doc = coll.find_one({"shopify_refund_id": refund_id}) if coll is not None else None
-    except Exception:  # noqa: BLE001
-        return None
+    (status PENDING, no credit note), else None. A read that fails RAISES
+    (decision D118): no answer is never "nobody holds it" -- the caller
+    answers an error that is retried (CLAIM_UNREADABLE), never "duplicate"."""
+    coll = db.get_collection(_RETURNS_COLLECTION)
+    doc = coll.find_one({"shopify_refund_id": refund_id}) if coll is not None else None
     if doc and doc.get("status") == "PENDING" and doc.get("credit_note_issued") is not True:
         return doc
     return None
+
+
+# Decision D103(1): the order-history import (shopify_ingest) claims a refund
+# with the same returns doc a live door does, written UNFINISHED and stamped
+# finished once its credit-note ledger row is stored. While it is unfinished
+# the refund is the import's: a live door (the webhook, the status sweep, the
+# accountant's Confirm) books nothing for it, never re-claims it and never
+# answers a silent "duplicate" -- it says the import holds it. The next
+# import run finishes it.
+_IMPORT_SOURCE = "shopify_order_history"
+HELD_BY_IMPORT = "held_by_import"
+HELD_BY_IMPORT_TEXT = (
+    "The order-history import has claimed this refund and has not finished booking it, "
+    "so nothing was booked here (no credit note, no restock, no store credit). The import "
+    "must be run again to finish it (ask support); it books this refund once."
+)
+
+
+# Decision D119: an OLDER worker (the code before this claim existed) takes a
+# PENDING claim over as a dead run's once it is 15 minutes old by its
+# `created_at` -- and the import's claim is dated with the refund's own
+# historical date, so it is "stale" the moment it is stored. That worker then
+# books a credit note under the claim's return id and the import a second one
+# under its own key. The import's unfinished claim therefore carries a
+# `reprocessing_at` that never ages: every leg of the old takeover needs it
+# absent or older than the cutoff, so an old worker reads the claim as held
+# by a run still at work (it books nothing), and still reads the refund as
+# claimed, never as absent. Removed when the claim is stamped finished. This
+# version's own doors never look at it (they stop at the claim's `source`).
+IMPORT_CLAIM_MARKER = "9999-12-31T23:59:59+00:00"
+
+# Decision D118: a live door reads a refund's claim strictly. A read that
+# fails is answered as an error the caller retries (the webhook's inbox row is
+# recorded failed, the accountant's row stays open) -- never "duplicate".
+CLAIM_UNREADABLE = "claim_unreadable"
+CLAIM_UNREADABLE_TEXT = (
+    "This refund's record could not be read just now, so nothing was booked here "
+    "(no credit note, no restock, no store credit)."
+)
+
+
+def _claim_unreadable(refund_id: str, **extra: Any) -> Dict[str, Any]:
+    """The answer of a live door whose read of the refund's claim failed."""
+    return {"status": "error", "reason": CLAIM_UNREADABLE, "error": CLAIM_UNREADABLE_TEXT,
+            "refund_id": refund_id, "credit_note_issued": False,
+            "store_credit_reason": CLAIM_UNREADABLE_TEXT, **extra}
+
+
+# Decision D125: a live door never books without its claim. NOT_CLAIMED is
+# its answer when no claim could be saved or read back: an error the caller
+# retries (the webhook's inbox row is recorded failed, the accountant's row
+# stays open), with nothing booked.
+NOT_CLAIMED = "refund_not_claimed"
+NOT_CLAIMED_TEXT = (
+    "This refund's record could not be saved just now, so nothing was booked here "
+    "(no credit note, no restock, no store credit)."
+)
+CLAIM_UNKNOWN_TEXT = (
+    "IMS could not tell whether this refund's record was saved, so nothing was booked here "
+    "(no credit note, no restock, no store credit). Do not give the credit by hand: confirm "
+    "it again after 15 minutes if the row is still open."
+)
+
+
+def _claim(returns_coll, claim_doc: Dict[str, Any]) -> str:
+    """Insert the claim-first returns doc. "claimed": this run holds the claim.
+    "exists": a returns doc of another run already carries the refund id.
+    "none": no claim was saved -- the caller books NOTHING. "unknown": the
+    insert's answer was lost and the read-back failed too -- the caller books
+    nothing, and says the claim may exist (a stale claim is finished later).
+
+    A write error that is not a duplicate key does not say whether the write
+    landed (a lost acknowledgement), so the stored doc decides: this run's own
+    return id and claim stamp on it mean the claim is held, and the post goes
+    on under it exactly as if the insert had answered."""
+    try:
+        returns_coll.insert_one(dict(claim_doc))
+        return "claimed"
+    except Exception as exc:  # noqa: BLE001
+        if _is_dup_key(exc):
+            return "exists"
+        logger.warning("[SHOPIFY_REFUND] claim insert not acknowledged: %s", exc)
+    try:
+        doc = returns_coll.find_one({"shopify_refund_id": claim_doc["shopify_refund_id"]})
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[SHOPIFY_REFUND] claim cannot be read back: %s", exc)
+        return "unknown"
+    if not doc:
+        return "none"
+    mine = all(doc.get(k) == claim_doc[k] for k in ("return_id", "created_at"))
+    return "claimed" if mine else "exists"
+
+
+def import_holds(db, refund_id: str) -> bool:
+    """True while the order-history import's claim of this refund is
+    unfinished (_unfinished_claim, source shopify_order_history). A read
+    that fails RAISES (decision D118)."""
+    return (_unfinished_claim(db, refund_id) or {}).get("source") == _IMPORT_SOURCE
 
 
 def _raise_s34_task(order: Dict[str, Any], return_id: Optional[str], refund_id: Any, why: str) -> None:
@@ -209,16 +306,23 @@ def _is_dup_key(exc: Exception) -> bool:
     return "e11000" in msg or "duplicate key" in msg
 
 
-def _ensure_unique_refund_index(db, collection: str) -> None:
+def _ensure_unique_refund_index(db, collection: str, strict: bool = False) -> None:
     """Lazily create a UNIQUE PARTIAL index on `<collection>.shopify_refund_id`
     (only over docs that carry a string refund id -- legacy / in-store rows with
     no refund id are unaffected). Built the same idempotent way webhooks.py builds
-    uniq_webhook_event_id. Fail-soft: never raises."""
+    uniq_webhook_event_id. Fail-soft: never raises -- unless ``strict`` (the
+    order-history import, PR #1423 review F-1423-G): its claim of a refund is
+    only a claim while this index holds, so an index that cannot be confirmed
+    RAISES and the import books nothing."""
     if db is None:
+        if strict:
+            raise RuntimeError("no database")
         return
     try:
         coll = db.get_collection(collection)
         if coll is None:
+            if strict:
+                raise RuntimeError(f"no {collection} collection")
             return
         coll.create_index(
             "shopify_refund_id",
@@ -227,6 +331,8 @@ def _ensure_unique_refund_index(db, collection: str) -> None:
             name="uniq_shopify_refund_id",
         )
     except Exception:  # noqa: BLE001 -- index build must never break the drain
+        if strict:
+            raise
         logger.debug("[SHOPIFY_REFUND] index build skipped for %s", collection, exc_info=True)
 
 
@@ -253,7 +359,9 @@ def _claim_stale_refund_for_retry(returns_coll, refund_id: str, now: str):
     Returns the existing doc when THIS caller won the right to re-process a
     never-credited row (the caller falls through to the credit-issue + finalize
     path, which update_one's this same doc); returns None for a TRUE duplicate -- a
-    credit note really exists, OR another worker is mid-reprocess. Never raises."""
+    credit note really exists, OR another worker is mid-reprocess. A read or
+    write that fails RAISES (decision D118): None means "a duplicate" to the
+    caller, and no answer is not that one."""
     # SF03: a claim whose run stopped is re-claimable once STALE -- a PENDING
     # doc older than _CLAIM_STALE_SECONDS (the first run died between its claim
     # and its finalize) or a re-drive's reprocessing_at that old. A fresh one
@@ -264,33 +372,30 @@ def _claim_stale_refund_for_retry(returns_coll, refund_id: str, now: str):
     stale = _stale_cutoff()
     fou = getattr(returns_coll, "find_one_and_update", None)
     if callable(fou):
-        base = {"shopify_refund_id": refund_id, "credit_note_issued": {"$ne": True}}
-        try:
-            for extra in (
-                # Only re-claim a FINALIZED row -- never an in-flight brand-new
-                # PENDING claim (closes the concurrent first-ever double-issue).
-                {"reprocessing_at": None, "status": {"$ne": "PENDING"}},
-                # A PENDING claim whose first run is dead.
-                {"reprocessing_at": None, "status": "PENDING", "created_at": {"$lt": stale}},
-                # A re-drive that took the claim and died.
-                {"reprocessing_at": {"$lt": stale}},
-            ):
-                won = fou({**base, **extra}, {"$set": {"reprocessing_at": now}})
-                if won is not None:
-                    return won
-            return None
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[SHOPIFY_REFUND] retry-claim find_one_and_update failed: %s", exc)
-            return None
+        # Never the order-history import's claim (decision D103(1)): it is
+        # finished by the import under its own ledger key, not re-driven here.
+        base = {"shopify_refund_id": refund_id, "credit_note_issued": {"$ne": True},
+                "source": {"$ne": _IMPORT_SOURCE}}
+        for extra in (
+            # Only re-claim a FINALIZED row -- never an in-flight brand-new
+            # PENDING claim (closes the concurrent first-ever double-issue).
+            {"reprocessing_at": None, "status": {"$ne": "PENDING"}},
+            # A PENDING claim whose first run is dead.
+            {"reprocessing_at": None, "status": "PENDING", "created_at": {"$lt": stale}},
+            # A re-drive that took the claim and died.
+            {"reprocessing_at": {"$lt": stale}},
+        ):
+            won = fou({**base, **extra}, {"$set": {"reprocessing_at": now}})
+            if won is not None:
+                return won
+        return None
     # No find_one_and_update (mock / no-DB path): best-effort NON-atomic decision.
     # Still honest -- only re-process when the row was demonstrably never credited.
-    try:
-        existing = returns_coll.find_one({"shopify_refund_id": refund_id})
-    except Exception:  # noqa: BLE001
-        existing = None
+    existing = returns_coll.find_one({"shopify_refund_id": refund_id})
     if (
         existing
         and existing.get("credit_note_issued") is not True
+        and existing.get("source") != _IMPORT_SOURCE
         and (existing.get("status") != "PENDING" or str(existing.get("created_at") or "") < stale)
     ):
         return existing
@@ -346,7 +451,16 @@ def _hist_refund_ref(refund_id: str) -> str:
     return f"SHOPIFY-HIST-REFUND-{refund_id}"
 
 
-def _refund_already_processed(db, refund_id: str) -> bool:
+def hist_return_id(ref: Any) -> Optional[str]:
+    """The returns record ('RET-HIST-<refund id>') that an order-history
+    import ledger row -- named by its ``ref``, _hist_refund_ref -- is the
+    credit note of; None for any other row (decision D117: the GST returns
+    count the pair once, reports.gst_itc._ledger_row_return_ids)."""
+    prefix, ref = _hist_refund_ref(""), str(ref or "")
+    return f"RET-HIST-{ref[len(prefix):]}" if ref.startswith(prefix) and ref != prefix else None
+
+
+def _refund_already_processed(db, refund_id: str, strict: bool = False) -> bool:
     """THE "is this refund booked" rule -- the webhook, the status sweep and the
     order-history import all ask it, so a re-delivered webhook or a re-fed
     refund never double-credits or double-restocks. True when a prior `returns`
@@ -358,7 +472,8 @@ def _refund_already_processed(db, refund_id: str) -> bool:
     the refund arrived before its order was ingested, so once the order exists a
     redelivery (or a re-drive) must be able to reprocess it. Fail-soft -> False
     (the caller then proceeds; a stray double is preferable to dropping a real
-    refund)."""
+    refund). ``strict`` (the order-history import, which a re-run heals): a
+    read that fails RAISES instead -- no answer is never "not booked"."""
     if db is None or not refund_id:
         return False
     try:
@@ -368,13 +483,15 @@ def _refund_already_processed(db, refund_id: str) -> bool:
         ):
             return True
     except Exception:  # noqa: BLE001
-        pass
+        if strict:
+            raise
     try:
         ledger = db.get_collection("credit_note_ledger")
         if ledger is not None and ledger.find_one({"ref": _hist_refund_ref(refund_id)}):
             return True
     except Exception:  # noqa: BLE001
-        pass
+        if strict:
+            raise
     try:
         review_coll = db.get_collection(_REVIEW_COLLECTION)
         if review_coll is not None:
@@ -382,7 +499,8 @@ def _refund_already_processed(db, refund_id: str) -> bool:
             if row is not None and _norm(row.get("status")).upper() != "UNMATCHED":
                 return True
     except Exception:  # noqa: BLE001
-        pass
+        if strict:
+            raise
     return False
 
 
@@ -1198,10 +1316,28 @@ def handle_shopify_refund(
             # a failure so the inbox retries later. A stale one falls through:
             # the post re-claims it (_claim_stale_refund_for_retry) and finishes
             # it without posting either leg twice.
-            unfinished = _unfinished_claim(db, refund_id)
+            # Decision D118: the claim is read strictly -- a read that fails
+            # is an error the inbox retries, never "duplicate".
+            try:
+                unfinished = _unfinished_claim(db, refund_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[SHOPIFY_REFUND] refund=%s: its claim could not be read (%s) "
+                               "-- nothing booked, retried", refund_id, exc)
+                return _claim_unreadable(refund_id, shopify_order_id=shopify_order_id)
             if unfinished is None:
                 return {
                     "status": "duplicate",
+                    "refund_id": refund_id,
+                    "shopify_order_id": shopify_order_id,
+                }
+            if unfinished.get("source") == _IMPORT_SOURCE:
+                # Decision D103(1): the import's claim, not finished -- left
+                # to the next import run, and said so (the inbox row fails
+                # and is retried; never a silent duplicate, never booked here).
+                return {
+                    "status": "error",
+                    "reason": HELD_BY_IMPORT,
+                    "error": HELD_BY_IMPORT_TEXT,
                     "refund_id": refund_id,
                     "shopify_order_id": shopify_order_id,
                 }
@@ -1517,7 +1653,7 @@ def handle_shopify_refund(
                 status=queue_status,
                 note=(
                     (result.get("store_credit_reason") or "")
-                    if result.get("reason") == "order_busy" else
+                    if result.get("reason") in ("order_busy", HELD_BY_IMPORT) else
                     "AUTO restock done but the credit note could not be issued "
                     "(no customer on the order, a ledger error, or the order could "
                     "not be read) -- an accountant must confirm it again. "
@@ -1760,41 +1896,82 @@ def _post_locked(
         returns_coll = db.get_collection(_RETURNS_COLLECTION)
     except Exception:  # noqa: BLE001
         returns_coll = None
-    if returns_coll is not None:
+    held = _claim(returns_coll, claim_doc) if returns_coll is not None else "none"
+    if held in ("none", "unknown"):
+        # Decision D125: CLAIM-FIRST means it. With no claim nothing is booked:
+        # a credit note posted without one had no returns doc to finish or to
+        # re-drive, and for a refund another run holds (the order-history
+        # import, a second delivery) it was a second reversal of the same tax.
+        # "unknown": the claim may have landed -- nobody books by hand.
+        logger.error("[SHOPIFY_REFUND] refund=%s order=%s: no claim held (%s) -- nothing booked",
+                     refund_id, order_id, held)
+        why = CLAIM_UNKNOWN_TEXT if held == "unknown" else NOT_CLAIMED_TEXT
+        return {
+            "status": "error",
+            "reason": NOT_CLAIMED,
+            "error": why,
+            "refund_id": refund_id,
+            "order_id": order_id,
+            "customer_id": customer_id,
+            "credit_note_issued": False,
+            "store_credit_reason": why,
+            **({"claim_unknown": True} if held == "unknown" else {}),
+        }
+    claimed = held == "claimed"
+    if held == "exists":
+        # A returns doc already carries this refund id. Do NOT blindly call
+        # it a duplicate: it may be a STALE claim from an earlier attempt
+        # that never issued the credit note (e.g. a no-customer online
+        # order that finalized CREDIT_FAILED). Atomically claim the retry --
+        # only when the existing row was never credited AND no other worker
+        # is mid-reprocess -- so a genuinely-posted refund is still a true
+        # duplicate but an unposted one gets re-driven (not silently
+        # swallowed while the GST reversal is lost).
+        # Decision D118: whose claim it is, is read strictly -- a
+        # read that fails is an error the caller retries (nothing
+        # was booked), never "duplicate".
         try:
-            returns_coll.insert_one(dict(claim_doc))
-            claimed = True
-        except Exception as exc:  # noqa: BLE001
-            if _is_dup_key(exc):
-                # A returns doc already carries this refund id. Do NOT blindly call
-                # it a duplicate: it may be a STALE claim from an earlier attempt
-                # that never issued the credit note (e.g. a no-customer online
-                # order that finalized CREDIT_FAILED). Atomically claim the retry --
-                # only when the existing row was never credited AND no other worker
-                # is mid-reprocess -- so a genuinely-posted refund is still a true
-                # duplicate but an unposted one gets re-driven (not silently
-                # swallowed while the GST reversal is lost).
-                existing = _claim_stale_refund_for_retry(returns_coll, refund_id, now)
-                prior_doc = existing
-                if existing is None:
-                    logger.info(
-                        "[SHOPIFY_REFUND] refund=%s already credited -- duplicate", refund_id
-                    )
-                    return {
-                        "status": "duplicate",
-                        "refund_id": refund_id,
-                        "order_id": order_id,
-                    }
-                logger.info(
-                    "[SHOPIFY_REFUND] refund=%s re-attempting previously-unposted refund",
-                    refund_id,
-                )
-                claimed = True
-                # A re-drive is the same return: its credit ref, its blocked
-                # task and its retry door name the doc's id, never a new one.
-                return_id = existing.get("return_id") or return_id
-            else:
-                logger.warning("[SHOPIFY_REFUND] claim insert failed: %s", exc)
+            existing = _claim_stale_refund_for_retry(returns_coll, refund_id, now)
+            held_by_import = existing is None and import_holds(db, refund_id)
+        except Exception as read_exc:  # noqa: BLE001
+            logger.warning("[SHOPIFY_REFUND] refund=%s: its claim could not be read (%s) "
+                           "-- nothing booked, retried", refund_id, read_exc)
+            return _claim_unreadable(refund_id, order_id=order_id, customer_id=customer_id)
+        prior_doc = existing
+        if held_by_import:
+            # Decision D103(1): held by the order-history import and
+            # not finished. Nothing is booked here and it is not a
+            # duplicate: the row stays open, the next import run
+            # finishes the refund, and a Confirm after that reads it
+            # as posted.
+            logger.info("[SHOPIFY_REFUND] refund=%s held by the order-history import "
+                        "(unfinished) -- nothing booked", refund_id)
+            return {
+                "status": "credit_failed",
+                "reason": HELD_BY_IMPORT,
+                "refund_id": refund_id,
+                "order_id": order_id,
+                "customer_id": customer_id,
+                "credit_note_issued": False,
+                "store_credit_reason": HELD_BY_IMPORT_TEXT,
+            }
+        if existing is None:
+            logger.info(
+                "[SHOPIFY_REFUND] refund=%s already credited -- duplicate", refund_id
+            )
+            return {
+                "status": "duplicate",
+                "refund_id": refund_id,
+                "order_id": order_id,
+            }
+        logger.info(
+            "[SHOPIFY_REFUND] refund=%s re-attempting previously-unposted refund",
+            refund_id,
+        )
+        claimed = True
+        # A re-drive is the same return: its credit ref, its blocked
+        # task and its retry door name the doc's id, never a new one.
+        return_id = existing.get("return_id") or return_id
 
     # (a) GST credit note -> credit_note_ledger (the CDNR source). Booked under the
     #     BILLING store with the real GST split; card refunds skip the balance bump.
@@ -2068,13 +2245,6 @@ def _post_locked(
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[SHOPIFY_REFUND] returns doc finalize failed: %s", exc)
-    elif returns_coll is not None:
-        # The claim insert did not land (a non-dup DB error) -> best-effort persist
-        # so the credit/restock is still auditable (no idempotency protection).
-        try:
-            returns_coll.insert_one({**claim_doc, **update_fields})
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[SHOPIFY_REFUND] returns doc persist failed: %s", exc)
 
     logger.info(
         "[SHOPIFY_REFUND] AUTO-posted refund=%s order=%s credit=%s tax=%s "
@@ -2355,7 +2525,13 @@ def _stock_in_task(order: Dict[str, Any], lines: List[Any], held: _Held, refund_
         processing_store_id, refund_id=refund_id)
     if not out["applied"]:
         _release_unlanded(order, held, {}, refund_id)
-    return out
+        return out
+    # What this booking put on each order line's mark: Goods back stamps it on
+    # its review row, so the P&L dates those units at the press (D64 b), never
+    # at a note that booked nothing.
+    return {**out, "booked_lines": [
+        {"order_item_id": orig.get("item_id") or orig.get("id"), "product_id": orig.get("product_id"),
+         "qty": qty} for orig, qty, _pid, _token in held]}
 
 
 def raise_stock_in_task(order: Dict[str, Any], units: float, items: Any, source: str, task_ref: str,
@@ -2472,12 +2648,12 @@ def goods_back(db, review: Dict[str, Any], *, user_id: Optional[str]) -> Dict[st
     "not_restocked", ...}."""
     review_id = review.get("review_id")
     refund_id = _norm(review.get("shopify_refund_id"))
+    pressed_at = datetime.now(timezone.utc).isoformat()
     try:
         coll = db.get_collection(_REVIEW_COLLECTION)
         claim = coll.update_one(
             {"review_id": review_id, "goods_back_at": None},
-            {"$set": {"goods_back_at": datetime.now(timezone.utc).isoformat(),
-                      "goods_back_by": user_id}},
+            {"$set": {"goods_back_at": pressed_at, "goods_back_by": user_id}},
         )
     except Exception:  # noqa: BLE001
         logger.warning("[SHOPIFY_REFUND] goods-back claim failed for review=%s", review_id,
@@ -2526,13 +2702,21 @@ def goods_back(db, review: Dict[str, Any], *, user_id: Optional[str]) -> Dict[st
         "restock_store_ids": result.get("restock_store_ids", []),
         "stock_in_task": result.get("stock_in_task"),
         "stock_in_store_id": result.get("stock_in_store_id"),
+        # A historical order's units this press booked, per order line.
+        "booked_lines": result.get("booked_lines") or [],
     }
-    # Landed: record it. Nothing landed: release the press so it can be pressed
-    # again (the caps make a re-press safe even after a partial restock).
-    stamp = ({"goods_restock": out} if out["restock_applied"]
-             else {"goods_back_at": None, "goods_back_by": None})
+    # Landed: record it. Not all landed: release the press so it can be
+    # pressed again (the caps make a re-press safe even after a partial
+    # restock). Every unit that did land is recorded, a partial press's too,
+    # with when it landed (goods_landed): the P&L gives each landed piece's
+    # cost back once from it.
+    stamp: Dict[str, Any] = {"$set": {"goods_restock": out} if out["restock_applied"]
+                             else {"goods_back_at": None, "goods_back_by": None}}
+    landed = [sid for sid in out["restock_stock_ids"] if sid]
+    if landed:
+        stamp["$push"] = {"goods_landed": {"$each": [{"stock_id": sid, "at": pressed_at} for sid in landed]}}
     try:
-        coll.update_one({"review_id": review_id}, {"$set": stamp})
+        coll.update_one({"review_id": review_id}, stamp)
     except Exception:  # noqa: BLE001
         logger.warning("[SHOPIFY_REFUND] goods-back stamp failed for review=%s", review_id,
                        exc_info=True)

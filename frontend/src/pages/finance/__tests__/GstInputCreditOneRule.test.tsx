@@ -182,6 +182,18 @@ describe('section 17(5) on the Cash Flow bill', () => {
     expect(apis.vendorApApi.createBill.mock.calls[0][1]).toMatchObject({ expense_type: 'FOOD', itc_blocked: false });
   });
 
+  it('a services bill never offers "Stock purchases" (decision D42(b))', async () => {
+    apis.vendorApApi.listExpenseTypes.mockResolvedValue([
+      { value: 'RENT', label: 'Rent / lease', blocked_by_default: false },
+      { value: 'STOCK', label: 'Stock purchases', blocked_by_default: false },
+    ]);
+    await openSupplier();
+    fireEvent.click(await screen.findByRole('button', { name: 'Bill' }));
+    fireEvent.change(await screen.findByDisplayValue('This bill is for…'), { target: { value: 'SERVICES' } });
+    await screen.findByRole('option', { name: 'Rent / lease' });
+    expect(screen.queryByRole('option', { name: 'Stock purchases' })).toBeNull();
+  });
+
   it('a booked services bill is ticked later; a locked month is refused in words', async () => {
     apis.vendorApApi.setItcBlocked.mockResolvedValueOnce({ ...FOOD, itc_blocked: true, itc_eligible: false });
     await openSupplier();
