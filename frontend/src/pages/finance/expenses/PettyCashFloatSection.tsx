@@ -11,7 +11,7 @@ import { useToast } from '../../../context/ToastContext';
 import { expensesApi, type PettyCashBalance } from '../../../services/api/expenses';
 import { formatDateIST } from '../../../utils/datetime';
 import { fc, useExpensesContext } from './expenseShared';
-import { Labeled } from './expenseWidgets';
+import { Labeled, FloatUnavailable } from './expenseWidgets';
 import { getErrorMessage } from '../../../utils/errorHandler';
 
 export function PettyCashFloatSection() {
@@ -22,6 +22,9 @@ export function PettyCashFloatSection() {
   // F17 petty-cash float
   const [floatData, setFloatData] = useState<PettyCashBalance | null>(null);
   const [floatLoading, setFloatLoading] = useState(false);
+  // The read FAILED -- kept apart from "no float" (floatData.exists false),
+  // which is an answer. A failure is not one.
+  const [floatError, setFloatError] = useState(false);
   const [showFloatModal, setShowFloatModal] = useState<null | 'open' | 'topup'>(null);
   const [floatAmount, setFloatAmount] = useState('');
   const [floatReason, setFloatReason] = useState('');
@@ -29,12 +32,14 @@ export function PettyCashFloatSection() {
   const [saving, setSaving] = useState(false);
 
   const loadFloat = useCallback(async () => {
-    if (!user?.activeStoreId) { setFloatData(null); return; }
+    if (!user?.activeStoreId) { setFloatData(null); setFloatError(false); return; }
     setFloatLoading(true);
     try {
       setFloatData(await expensesApi.getPettyCashBalance(user.activeStoreId));
+      setFloatError(false);
     } catch {
       setFloatData(null);
+      setFloatError(true);
     } finally {
       setFloatLoading(false);
     }
@@ -76,9 +81,11 @@ export function PettyCashFloatSection() {
           <div className="bg-white rounded-lg border border-gray-200 p-10 text-center text-gray-500 text-sm">
             Select an active store to manage its petty-cash float.
           </div>
-        ) : floatLoading ? (
+        ) : floatLoading || (!floatData && !floatError) ? (
           <div className="flex items-center justify-center h-40"><Loader2 className="w-6 h-6 text-bv-red-600 animate-spin" /></div>
-        ) : !floatData?.exists ? (
+        ) : floatError || !floatData ? (
+          <FloatUnavailable onRetry={loadFloat} />
+        ) : !floatData.exists ? (
           <div className="bg-white rounded-lg border border-gray-200 p-8 text-center">
             <div className="text-sm text-gray-600 mb-4">No petty-cash float is open for this store yet.</div>
             {canManageFloat && (

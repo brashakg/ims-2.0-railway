@@ -31,6 +31,7 @@ import {
 } from '../../services/api/cashRegister';
 import { OFF_TILL_EXPENSE_NOTICE } from './offTillExpenseCopy';
 import DenominationGrid from '../../components/cash/DenominationGrid';
+import TillDrawerList from '../../components/cash/TillDrawerList';
 import {
   blankDenoms,
   denomTotal,
@@ -38,7 +39,7 @@ import {
   hasCount,
   type DenomRow,
 } from '../../utils/denominations';
-import { getErrorMessage } from '../../utils/errorHandler';
+import { getErrorDetail, getErrorMessage, getErrorStatus } from '../../utils/errorHandler';
 
 const inr = (n?: number | null) => `₹${Math.round(Number(n) || 0).toLocaleString('en-IN')}`;
 
@@ -64,6 +65,7 @@ export default function CashRegisterPage() {
 
   const [loading, setLoading] = useState(true);
   const [data, setData] = useState<SessionsResponse | null>(null);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [busy, setBusy] = useState(false);
 
   // Open-form state
@@ -83,9 +85,12 @@ export default function CashRegisterPage() {
     try {
       const res = await cashRegisterApi.sessions({ store_id: storeId || undefined });
       setData(res);
+      setLoadFailed(false);
     } catch (e) {
+      // Unreadable is not empty. Showing "no session open" and an empty
+      // history here offered to open a till that was already open.
       toast.error(e instanceof Error ? e.message : 'Failed to load cash register');
-      setData({ sessions: [], open_session: null, expected_preview: null });
+      setLoadFailed(true);
     } finally {
       setLoading(false);
     }
@@ -130,6 +135,9 @@ export default function CashRegisterPage() {
         getErrorMessage(e, '') ||
         (e instanceof Error ? e.message : 'Could not open session');
       toast.error(msg);
+      // A session is already open (an earlier press whose reply was lost, or
+      // someone else opened it): show it instead of the open form.
+      if (getErrorStatus(e) === 409) await load();
     } finally {
       setBusy(false);
     }
@@ -147,11 +155,36 @@ export default function CashRegisterPage() {
         note: closeNote.trim() || undefined,
       });
       const v = closed.variance ?? 0;
-      if (closed.variance_status === 'NOT_COUNTED') {
+      if (closed.till_link_ok === false && closed.variance_status !== 'NOT_COUNTED') {
+        // The count never reached the till: that drawer is still open there
+        // and nothing has checked it, whatever this close's verdict says.
+        toast.warning(
+          'Closed, but this count did not reach the till, so the drawer is still open there and has not been checked. Count it on the Blind EOD Tally (Z-Read) screen.',
+        );
+      } else if (closed.variance_status === 'NOT_COUNTED') {
         // Blank is not zero. Say what was recorded, so nobody goes looking for
         // a shortfall that was never measured.
         toast.warning(
           'Closed without a count — recorded as NOT COUNTED, not as an empty drawer. No variance was calculated.',
+        );
+      } else if (closed.variance_status === 'COMPARISON_UNAVAILABLE') {
+        // The day's drawers could not be read, so nobody knows whether this
+        // count is the whole day's: no variance is claimed. D127(2): or an
+        // earlier close could not be placed on one drawer.
+        toast.warning(
+          closed.comparison_withheld_message
+            ? `Closed. ${closed.comparison_withheld_message}`
+            : 'Closed. The day\'s cash drawers could not be read, so no variance is shown. Count the drawer on the Blind EOD Tally (Z-Read) screen to compare it.',
+        );
+      } else if (closed.variance_status === 'SEVERAL_DRAWERS') {
+        // D53: no single variance is true for a day with several drawers.
+        toast.warning(
+          `Closed. This day had ${closed.till_drawers_on_day} cash drawers, so no single variance is shown; each drawer's own count and variance is recorded.`,
+        );
+      } else if (closed.variance_status === 'COUNTED_EARLIER') {
+        // D111: opened on a drawer already counted, closed with no count.
+        toast.warning(
+          `Closed without a count. This drawer was counted earlier today on the till (${inr(closed.counted)}); that count stands and no variance is shown.`,
         );
       } else if (closed.counted_from_shared_record) {
         // The drawer was already counted at POS Day-End. That count stands --
@@ -173,6 +206,28 @@ export default function CashRegisterPage() {
       setCloseNote('');
       await load();
     } catch (e: unknown) {
+      if (getErrorStatus(e) === 409) {
+        // ALREADY CLOSED: an earlier press whose reply was lost, or someone
+        // else closed it. The saved close stands and comes back with the
+        // refusal, so say what was saved and show it, instead of leaving the
+        // count form up over a register that is closed.
+        const saved = (getErrorDetail(e) as { session?: CashRegisterSession } | undefined)
+          ?.session;
+        if (saved?.till_link_ok === false && saved?.counted != null) {
+          toast.warning(
+            'This register was already closed. Its count did not reach the till, so the drawer is still open there and has not been checked. Count it on the Blind EOD Tally (Z-Read) screen.',
+          );
+        } else {
+          toast.info(
+            'This register was already closed. The saved close is in the session history below.',
+          );
+        }
+        setCloseDenoms(blankDenoms());
+        setBankDeposit('');
+        setCloseNote('');
+        await load();
+        return;
+      }
       const msg =
         getErrorMessage(e, '') ||
         (e instanceof Error ? e.message : 'Could not close session');
@@ -195,6 +250,27 @@ export default function CashRegisterPage() {
       {loading ? (
         <div className="flex items-center gap-2 text-gray-500">
           <Loader2 className="w-4 h-4 animate-spin" /> Loading...
+        </div>
+      ) : loadFailed ? (
+        <div
+          data-testid="cash-register-load-failed"
+          className="bg-amber-50 border border-amber-200 rounded-lg p-5 flex items-start gap-3"
+        >
+          <AlertTriangle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
+          <div className="text-sm text-amber-900">
+            <p className="font-semibold mb-1">The cash register could not be loaded.</p>
+            <p className="mb-3">
+              Nothing is shown because it could not be read. This does not mean no till is
+              open or that there are no past sessions.
+            </p>
+            <button
+              type="button"
+              onClick={() => void load()}
+              className="inline-flex items-center min-h-[44px] px-4 text-sm font-medium text-white bg-bv hover:bg-bv-600 rounded-lg"
+            >
+              Try again
+            </button>
+          </div>
         </div>
       ) : (
         <>
@@ -270,7 +346,29 @@ export default function CashRegisterPage() {
                       <td className="px-4 py-2 text-gray-500">{s.shift || '—'}</td>
                       <td className="px-4 py-2 text-gray-500">{fmtDateTime(s.opened_at)}</td>
                       <td className="px-4 py-2 text-gray-500">{fmtDateTime(s.closed_at)}</td>
-                      <td className="px-4 py-2 text-right">{inr(s.opening_float)}</td>
+                      <td className="px-4 py-2 text-right">
+                        {inr(s.opening_float)}
+                        {s.till_standing_count != null &&
+                          s.till_standing_count !== s.opening_float && (
+                            <span
+                              data-testid="standing-count"
+                              title="This drawer was already counted by another screen or an earlier session. Expected cash starts from the latest such count (less any bank deposit recorded after it), not from this float."
+                              className="ml-1 text-[10px] font-medium text-amber-700"
+                            >
+                              Earlier count {inr(s.till_standing_count)}
+                            </span>
+                          )}
+                        {s.till_count_variance != null && s.till_count_variance !== 0 && (
+                          <span
+                            data-testid="earlier-count-difference"
+                            title="The drawer's earlier count today (Blind EOD Tally or Day-End) was beyond the allowed band. Its note is taken when its Z-Read is locked; the manager has been told."
+                            className="block text-[10px] font-medium text-red-600"
+                          >
+                            Earlier count {inr(Math.abs(s.till_count_variance))}{' '}
+                            {s.till_count_variance < 0 ? 'short' : 'over'} - explained on the till
+                          </span>
+                        )}
+                      </td>
                       <td className="px-4 py-2 text-right">
                         {s.status !== 'CLOSED' ? (
                           '—'
@@ -279,13 +377,22 @@ export default function CashRegisterPage() {
                         ) : (
                           inr(s.counted)
                         )}
-                        {s.counted_from_shared_record && (
+                        {s.counted_from_shared_record && s.variance_status !== 'COUNTED_EARLIER' && (
                           <span
                             data-testid="counted-at-day-end"
                             title="Counted at POS Day-End. One drawer, one count."
                             className="ml-1 text-[10px] font-medium text-amber-700"
                           >
                             Day-End
+                          </span>
+                        )}
+                        {(s.till_drawers_on_day ?? 1) > 1 && (
+                          <span
+                            data-testid="several-drawers"
+                            title={`This day had ${s.till_drawers_on_day} cash drawers. This is the last drawer's count only; drawers are not added together. Each drawer's own count and variance is under the variance column.`}
+                            className="ml-1 text-[10px] font-medium text-amber-700"
+                          >
+                            Last of {s.till_drawers_on_day} drawers
                           </span>
                         )}
                       </td>
@@ -540,6 +647,59 @@ function Stat({
 
 function VarianceChip({ session }: { session: CashRegisterSession }) {
   const status = session.variance_status;
+  // The count never reached the till: whatever the verdict below says, that
+  // drawer is still open there and unchecked until counted on the Z-Read.
+  if (session.till_link_ok === false && status !== 'NOT_COUNTED') {
+    return (
+      <div className="text-left inline-block">
+        <VarianceChip session={{ ...session, till_link_ok: true }} />
+        <p data-testid="count-not-on-till" className="text-xs text-amber-700 mt-1">
+          Count not on the till. Count this drawer on the Blind EOD Tally (Z-Read) screen.
+        </p>
+      </div>
+    );
+  }
+  // D53: several drawers on the day -- no single variance or "balanced". The
+  // drawers' own counts and variances, never added together.
+  if (status === 'COMPARISON_UNAVAILABLE') {
+    return (
+      <span
+        data-testid="comparison-unavailable-verdict"
+        title={
+          session.comparison_withheld_message ||
+          "The day's cash drawers could not be read at close, so no variance is shown."
+        }
+        className="inline-block rounded px-2 py-0.5 text-xs font-medium bg-gray-100 text-gray-600"
+      >
+        Comparison not available
+      </span>
+    );
+  }
+  if (status === 'SEVERAL_DRAWERS') {
+    return (
+      <div className="text-left inline-block">
+        <span
+          data-testid="several-drawers-verdict"
+          title="This day had several cash drawers, so no single variance is true for it."
+          className="inline-block rounded px-2 py-0.5 text-xs font-medium bg-gray-100 text-gray-600"
+        >
+          {session.till_drawers_on_day} drawers
+        </span>
+        <TillDrawerList drawers={session.till_drawers} testId="cash-register-drawer-list" />
+      </div>
+    );
+  }
+  if (status === 'COUNTED_EARLIER') {
+    return (
+      <span
+        data-testid="counted-earlier-verdict"
+        title="This session opened on a drawer that was already counted and closed without a count of its own. The till's count stands; nothing is compared with it."
+        className="inline-block rounded px-2 py-0.5 text-xs font-medium bg-gray-100 text-gray-600"
+      >
+        Counted earlier today on the till
+      </span>
+    );
+  }
   // A drawer nobody counted has no variance to show. Showing "−₹2,000" here
   // was the whole day reported missing because the grid was left untouched.
   if (status === 'NOT_COUNTED' || session.variance == null) {

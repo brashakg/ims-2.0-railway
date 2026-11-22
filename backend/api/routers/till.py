@@ -79,6 +79,23 @@ def _is_cashier_only(user: Dict[str, Any]) -> bool:
     return bool(roles & _CASHIER_ONLY_ROLES)
 
 
+_READ_FAILED = (
+    "The till could not be read just now. Nothing was changed. Try again in a moment."
+)
+
+
+def _session_or_404(db, session_id: str) -> Dict[str, Any]:
+    """The session every route store-scopes on. A read that FAILED is a 503,
+    never "not found": that sent staff looking for a drawer that exists."""
+    try:
+        session = till.get_session(db, session_id, strict=True)
+    except Exception:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=_READ_FAILED)
+    if session is None:
+        raise HTTPException(status_code=404, detail="till session not found")
+    return session
+
+
 def _validate_session_date(raw: Optional[str]) -> str:
     """Validate + normalize the opening ``session_date`` to a bounded IST day.
 
@@ -106,8 +123,19 @@ def _validate_session_date(raw: Optional[str]) -> str:
 
 
 def _raise(res: Dict[str, Any]):
-    """Translate a service error envelope to an HTTPException."""
-    raise HTTPException(status_code=int(res.get("http", 400)), detail=res.get("error", "error"))
+    """Translate a service error envelope to an HTTPException.
+
+    Most envelopes carry only a code (``not_locked``) and go out as that bare
+    string, unchanged. One that also carries a ``message`` written for staff
+    goes out as ``{code, message, ...}`` so the screen can show the sentence
+    (the shared client reads ``detail.message``) instead of a generic toast."""
+    code = res.get("error", "error")
+    if res.get("message"):
+        extra = {k: v for k, v in res.items() if k not in ("ok", "error", "http")}
+        raise HTTPException(
+            status_code=int(res.get("http", 400)), detail={"code": code, **extra}
+        )
+    raise HTTPException(status_code=int(res.get("http", 400)), detail=code)
 
 
 # ---------------------------------------------------------------------------
@@ -231,9 +259,7 @@ async def submit_blind_count(
         raise HTTPException(status_code=403, detail="not permitted to submit a till count")
     db = _get_db()
     # Store-scope BEFORE the write (cross-store IDOR guard).
-    session = till.get_session(db, session_id)
-    if session is None:
-        raise HTTPException(status_code=404, detail="till session not found")
+    session = _session_or_404(db, session_id)
     validate_store_access(session.get("store_id"), current_user)
 
     res = till.blind_submit(
@@ -267,9 +293,7 @@ async def lock_till_session(
     if not (_roles(current_user) & _TILL_LOCK_ROLES):
         raise HTTPException(status_code=403, detail="not permitted to lock the Z-Read")
     db = _get_db()
-    session = till.get_session(db, session_id)
-    if session is None:
-        raise HTTPException(status_code=404, detail="till session not found")
+    session = _session_or_404(db, session_id)
     validate_store_access(session.get("store_id"), current_user)
 
     res = till.lock_session(
@@ -298,9 +322,7 @@ async def reopen_till_session(
     if not (_roles(current_user) & _TILL_LOCK_ROLES):
         raise HTTPException(status_code=403, detail="not permitted to reopen a Z-Read")
     db = _get_db()
-    session = till.get_session(db, session_id)
-    if session is None:
-        raise HTTPException(status_code=404, detail="till session not found")
+    session = _session_or_404(db, session_id)
     validate_store_access(session.get("store_id"), current_user)
 
     res = till.reopen_session(db, session_id, reason=body.reason, actor=current_user)
@@ -336,9 +358,15 @@ async def list_till_sessions(
     scoped = store_in_view(store_id, current_user)
     if not scoped:
         raise HTTPException(status_code=403, detail="not permitted for this store")
-    rows = till.list_sessions(
-        _get_db(), store_id=scoped, session_date=date, status=status, limit=limit
-    )
+    try:
+        rows = till.list_sessions(
+            _get_db(), store_id=scoped, session_date=date, status=status,
+            limit=limit, strict=True,
+        )
+    except Exception:  # noqa: BLE001
+        # Unreadable is not "no drawer today": an empty list invited staff to
+        # open a drawer that is already open.
+        raise HTTPException(status_code=503, detail=_READ_FAILED)
     if _is_cashier_only(current_user):
         rows = [till.redact_for_cashier(r) for r in rows]
     return {"sessions": rows}
@@ -354,9 +382,7 @@ async def get_till_session(
     if not (_roles(current_user) & _TILL_OPERATE_ROLES):
         raise HTTPException(status_code=403, detail="not permitted to view till sessions")
     db = _get_db()
-    session = till.get_session(db, session_id)
-    if session is None:
-        raise HTTPException(status_code=404, detail="till session not found")
+    session = _session_or_404(db, session_id)
     validate_store_access(session.get("store_id"), current_user)
     session.pop("_id", None)
     if _is_cashier_only(current_user):
@@ -375,9 +401,7 @@ async def get_zread(
     if not (_roles(current_user) & _TILL_READ_ROLES):
         raise HTTPException(status_code=403, detail="not permitted to view the Z-Read")
     db = _get_db()
-    session = till.get_session(db, session_id)
-    if session is None:
-        raise HTTPException(status_code=404, detail="till session not found")
+    session = _session_or_404(db, session_id)
     validate_store_access(session.get("store_id"), current_user)
     zread = till.build_zread(db, session_id)
     if not zread.get("ok"):

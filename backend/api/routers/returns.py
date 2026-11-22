@@ -6801,12 +6801,17 @@ def _drawer_closed_today(store_id: Optional[str]) -> bool:
     if coll is None:
         return False
     try:
-        return coll.find_one({"store_id": store_id, "session_date": ist_today().isoformat(),
-                              "status": {"$in": [eod_tally.STATUS_BLIND_SUBMITTED,
-                                                 eod_tally.STATUS_LOCKED]}}) is not None
+        drawer = coll.find_one({"store_id": store_id, "session_date": ist_today().isoformat(),
+                                "status": {"$in": [eod_tally.STATUS_BLIND_SUBMITTED,
+                                                   eod_tally.STATUS_LOCKED]}})
     except Exception as exc:  # noqa: BLE001
         logger.error("[RETURNS] Day-End state unreadable for %s: %s", store_id, exc)
         raise HTTPException(status_code=503, detail="Could not check today's Day-End - try again.")
+    if drawer is not None:
+        # D110: every reader of a till drawer pays the audit row or manager
+        # task it still owes (never raises; nothing owed, nothing written).
+        eod_tally.settle_followup(coll, {"_id": drawer.get("_id")}, drawer)
+    return drawer is not None
 
 
 @router.post("/advance-refund", status_code=201)
