@@ -296,20 +296,21 @@ def test_points_being_redeemed_right_now_are_not_expired_underneath_the_customer
     client, auth_headers, env
 ):
     """A redeem has taken the balance but its REDEEM row is not written yet.
-    The sweep must not debit again (balance -100): nothing above the valid
-    lots' share is left, so the lot finishes having shed nothing, and once the
-    row lands ledger and account agree."""
+    The sweep must not debit again (balance -100), and must not mark the lot
+    finished either: the balance does not hold the lot, so the lot waits. Once
+    the row lands, the ledger says the lot holds nothing and it finishes."""
     env.seed("c8", _earn("L8", 100, "c8"), balance=0)
 
     first = client.post(URL, headers=auth_headers)
-    assert first.status_code == 200 and first.json() == {"expired_txns": 0, "points_expired": 0}
+    assert first.status_code == 503 and first.json()["detail"]["incomplete_lots"] == ["L8"]
     assert env.balance("c8") == 0 and env.expire_rows("c8") == []
-    assert env.marked("L8") is True
+    assert env.marked("L8") is False
 
     env.txns.insert_one({"_id": "R8", "txn_id": "R8", "type": "REDEEM", "points": 100,
                          "customer_id": "c8", "created_at": datetime(2026, 1, 20)})
     assert client.post(URL, headers=auth_headers).json() == {"expired_txns": 0, "points_expired": 0}
     assert env.balance("c8") == 0 and env.expire_rows("c8") == []
+    assert env.marked("L8") is True
 
 
 def _redeem(env, cid, txn_id, points, when):
@@ -425,6 +426,162 @@ def test_two_due_lots_of_one_customer_both_finish_in_one_healthy_sweep(client, a
              _earn("B17", 50, "c17", created=T0 + timedelta(days=1)))
     assert client.post(URL, headers=auth_headers).json() == {"expired_txns": 2, "points_expired": 150}
     _assert_reconciled(env, "c17", {"A17": 100, "B17": 50})
+
+
+# ---------------------------------------------------------------------------
+# A write whose ledger row and balance move have not both landed (2026-11-22
+# review, MUST-FIX 1 and 2, builder limit 2). The lot must never finish
+# having shed less than it holds.
+# ---------------------------------------------------------------------------
+
+
+def _with_older_no_expiry_lot(env, cid):
+    """ADJUST +50 (no expiry), due L1 100, valid L2 100; balance 250."""
+    env.seed(cid,
+             {"_id": cid + "-ADJ", "txn_id": cid + "-ADJ", "type": "ADJUST", "points": 50,
+              "customer_id": cid, "created_at": T0 - timedelta(days=30)},
+             _earn(cid + "-L1", 100, cid),
+             _earn(cid + "-L2", 100, cid, created=T0 + timedelta(days=5),
+                   expires=datetime(2099, 1, 1)))
+
+
+def _assert_l1_shed_50(env, client, auth_headers, cid):
+    assert client.post(URL, headers=auth_headers).json() == {"expired_txns": 1, "points_expired": 50}
+    assert client.post(URL, headers=auth_headers).json() == {"expired_txns": 0, "points_expired": 0}
+    # FIFO: the redeem of 100 ate ADJ 50 + L1 50, so L1 shed 50 and L2 keeps 100.
+    assert env.balance(cid) == 100
+    assert [(r["source_earn_txn_id"], r["points"]) for r in env.expire_rows(cid)] == [(cid + "-L1", 50)]
+    assert env.marked(cid + "-L1") is True and env.marked(cid + "-L2") is False
+
+
+def test_redeem_after_the_ledger_read_that_leaves_nothing_above_the_floor_makes_the_lot_wait(
+    client, auth_headers, env, monkeypatch
+):
+    """MUST-FIX 2. The stale ledger prices L1 at 100 with a floor of 150; the
+    redeem leaves 150, so the take came out at 0 and the old code returned 0
+    BEFORE the version guard and marked L1 finished with no EXPIRE row: 50
+    expired points spendable for ever."""
+    _with_older_no_expiry_lot(env, "c18")
+    real = env.t_repo.ledger_for_expiry
+
+    def ledger_then_redeem(customer_id):
+        rows = real(customer_id)
+        _redeem(env, "c18", "R18", 100, T0 + timedelta(days=10))
+        return rows
+
+    monkeypatch.setattr(env.t_repo, "ledger_for_expiry", ledger_then_redeem)
+    first = client.post(URL, headers=auth_headers)
+    monkeypatch.setattr(env.t_repo, "ledger_for_expiry", real)
+
+    assert first.status_code == 503 and first.json()["detail"]["incomplete_lots"] == ["c18-L1"]
+    assert env.marked("c18-L1") is False and env.expire_rows("c18") == []
+    assert env.balance("c18") == 150
+    _assert_l1_shed_50(env, client, auth_headers, "c18")
+
+
+def test_redeem_debited_before_the_sweep_but_written_after_its_ledger_read_makes_the_lot_wait(
+    client, auth_headers, env, monkeypatch
+):
+    """MUST-FIX 2, alternate route the version guard cannot see: the redeem's
+    debit lands BEFORE the sweep reads the account stamp, its REDEEM row after
+    the sweep read the ledger."""
+    _with_older_no_expiry_lot(env, "c19")
+    real_stamp, real_ledger = env.a_repo.expiry_account_version, env.t_repo.ledger_for_expiry
+
+    def debit_then_stamp(customer_id):
+        assert env.a_repo.try_debit("c19", 100) is not None
+        return real_stamp(customer_id)
+
+    def ledger_then_row(customer_id):
+        rows = real_ledger(customer_id)
+        env.txns.insert_one({"_id": "R19", "txn_id": "R19", "type": "REDEEM", "points": 100,
+                             "customer_id": "c19", "created_at": T0 + timedelta(days=10)})
+        return rows
+
+    monkeypatch.setattr(env.a_repo, "expiry_account_version", debit_then_stamp)
+    monkeypatch.setattr(env.t_repo, "ledger_for_expiry", ledger_then_row)
+    first = client.post(URL, headers=auth_headers)
+    monkeypatch.setattr(env.a_repo, "expiry_account_version", real_stamp)
+    monkeypatch.setattr(env.t_repo, "ledger_for_expiry", real_ledger)
+
+    assert first.status_code == 503 and first.json()["detail"]["incomplete_lots"] == ["c19-L1"]
+    assert env.marked("c19-L1") is False and env.expire_rows("c19") == []
+    _assert_l1_shed_50(env, client, auth_headers, "c19")
+
+
+def test_earn_written_but_not_yet_on_the_balance_makes_the_lot_wait(
+    client, auth_headers, env, monkeypatch
+):
+    """Builder limit 2. The earn route writes the EARN row, then bumps the
+    balance. Row in the sweep's ledger, bump after the debit: the floor
+    counted the new lot and the old code shed 0 and finished the due lot, so
+    the customer kept 100 expired points once the bump landed."""
+    env.seed("c20", _earn("c20-L1", 100, "c20"))
+    real_stamp = env.a_repo.expiry_account_version
+
+    def stamp_then_earn_row(customer_id):
+        out = real_stamp(customer_id)
+        env.txns.insert_one(_earn("c20-N", 100, "c20", created=T0 + timedelta(days=20),
+                                  expires=datetime(2099, 1, 1)))
+        return out
+
+    monkeypatch.setattr(env.a_repo, "expiry_account_version", stamp_then_earn_row)
+    first = client.post(URL, headers=auth_headers)
+    monkeypatch.setattr(env.a_repo, "expiry_account_version", real_stamp)
+    env.a_repo.adjust_balance("c20", 100, delta_lifetime_earned=100)   # the bump lands
+
+    assert first.status_code == 503 and first.json()["detail"]["incomplete_lots"] == ["c20-L1"]
+    assert env.marked("c20-L1") is False and env.expire_rows("c20") == []
+    assert client.post(URL, headers=auth_headers).json() == {"expired_txns": 1, "points_expired": 100}
+    assert env.balance("c20") == 100
+    assert [(r["source_earn_txn_id"], r["points"]) for r in env.expire_rows("c20")] == [("c20-L1", 100)]
+    assert env.marked("c20-N") is False
+
+
+def test_a_pending_reversal_restore_does_not_shield_expired_points(
+    client, auth_headers, env, monkeypatch
+):
+    """MUST-FIX 1. Redeem 30 on order O, cancel O: the reversal marker ADJUST +30
+    is written first and its balance write fails (marker pending, healed by a
+    retried cancel). The sweep counted the +30 as held by the balance, shed 40
+    of L1's 70 and finished L1; the heal then left the customer 60 instead of
+    30. Expected: L1 sheds its 70 now, the heal restores the 30."""
+    env.seed("c21", _earn("c21-L1", 100, "c21"))
+    assert env.a_repo.try_debit("c21", 30) is not None       # the redeem route's two writes
+    env.txns.insert_one({"_id": "R21", "txn_id": "R21", "type": "REDEEM", "points": 30,
+                         "order_id": "O21", "customer_id": "c21", "created_at": T0 + timedelta(days=3)})
+    heal = _fail(monkeypatch, env.accounts, "find_one_and_update",
+                 lambda flt, *a, **k: "applied_reversals" in flt)
+    out = env.mod.reverse_for_cancel("O21", "c21")
+    heal()
+    assert out.get("ok") is False and env.balance("c21") == 70
+    pending = [t for t in env.txns.docs if t.get("type") == "ADJUST" and t.get("customer_id") == "c21"]
+    assert len(pending) == 1 and pending[0]["points"] == 30
+
+    assert client.post(URL, headers=auth_headers).json() == {"expired_txns": 1, "points_expired": 70}
+    assert env.balance("c21") == 0 and env.marked("c21-L1") is True
+
+    healed = env.mod.reverse_for_cancel("O21", "c21")
+    assert healed.get("ok") is True and healed.get("completed_now") is True
+    assert env.balance("c21") == 30
+    assert client.post(URL, headers=auth_headers).json() == {"expired_txns": 0, "points_expired": 0}
+    assert [(r["source_earn_txn_id"], r["points"]) for r in env.expire_rows("c21")] == [("c21-L1", 70)]
+
+
+def test_an_applied_reversal_restore_is_held_like_any_valid_lot(
+    client, auth_headers, env
+):
+    """Control for the test above: once the restore is ON the balance (its id
+    in applied_reversals), it is a valid no-expiry lot and the floor keeps it."""
+    env.seed("c22", _earn("c22-L1", 100, "c22"))
+    assert env.a_repo.try_debit("c22", 30) is not None       # the redeem route's two writes
+    env.txns.insert_one({"_id": "R22", "txn_id": "R22", "type": "REDEEM", "points": 30,
+                         "order_id": "O22", "customer_id": "c22", "created_at": T0 + timedelta(days=3)})
+    assert env.mod.reverse_for_cancel("O22", "c22").get("ok") is True
+    assert env.balance("c22") == 100
+
+    assert client.post(URL, headers=auth_headers).json() == {"expired_txns": 1, "points_expired": 70}
+    assert env.balance("c22") == 30
 
 
 # ---------------------------------------------------------------------------
