@@ -731,3 +731,76 @@ def test_an_expiry_row_without_a_source_lot_still_consumes_oldest_first():
         {"txn_id": "X", "type": "EXPIRE", "points": 30, "created_at": T0 + timedelta(days=2)},
     ]
     assert expirable_points_by_lot(ledger, datetime(2026, 2, 1)) == {"A": 70}
+
+
+# ---------------------------------------------------------------------------
+# Manual deductions (POST /loyalty/adjust with points < 0). The route stores
+# the row as points=abs(points) with the sign only in "delta"; the FIFO read
+# "points" alone, so a -50 counted as a +50 lot that never expires. The floor
+# then outweighed the balance for good: every sweep 503, expired points
+# spendable. Driven through the real adjust route, so the row is the one the
+# route writes.
+# ---------------------------------------------------------------------------
+
+ADJUST_URL = "/api/v1/loyalty/adjust"
+
+
+def test_a_manual_deduction_then_expiry_finishes_the_lot(client, auth_headers, env):
+    env.seed("c30", _earn("A30", 100, "c30"))
+    r = client.post(ADJUST_URL, headers=auth_headers,
+                    json={"customer_id": "c30", "points": -50, "reason": "manual fix"})
+    assert r.status_code == 200, r.text
+    assert env.balance("c30") == 50
+
+    first = client.post(URL, headers=auth_headers)
+    assert first.status_code == 200, first.text
+    assert first.json() == {"expired_txns": 1, "points_expired": 50}
+    _assert_reconciled(env, "c30", {"A30": 50})
+    again = client.post(URL, headers=auth_headers)
+    assert again.json() == {"expired_txns": 0, "points_expired": 0}
+    _assert_reconciled(env, "c30", {"A30": 50})
+
+
+def test_a_manual_deduction_is_charged_to_the_due_lot_and_the_valid_lot_is_kept(
+    client, auth_headers, env
+):
+    """Due A 100, valid B 50, balance 150; a manual -30. FIFO charges the 30
+    to A, so A sheds 70 and the customer keeps B's 50."""
+    later = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(days=300)
+    env.seed("c31", _earn("A31", 100, "c31"),
+             _earn("B31", 50, "c31", created=T0 + timedelta(days=10), expires=later))
+    r = client.post(ADJUST_URL, headers=auth_headers,
+                    json={"customer_id": "c31", "points": -30, "reason": "manual fix"})
+    assert r.status_code == 200, r.text
+
+    res = client.post(URL, headers=auth_headers)
+    assert res.status_code == 200, res.text
+    assert res.json() == {"expired_txns": 1, "points_expired": 70}
+    assert env.balance("c31") == 50
+    assert [(x["source_earn_txn_id"], x["points"]) for x in env.expire_rows("c31")] == [("A31", 70)]
+    assert env.marked("A31") is True and env.marked("B31") is False
+
+
+def test_the_shared_lot_arithmetic_reads_the_signed_delta_of_a_manual_adjust():
+    """The engine rule every caller routes through: a manual-adjust row's sign
+    lives in "delta" (points holds the size). Rows without delta (reversal
+    markers, edit re-gate claws) keep their signed points."""
+    from api.services.loyalty_engine import (
+        expirable_points_by_lot,
+        points_held_by_unexpired_lots,
+    )
+
+    now = datetime(2026, 7, 1)
+    ledger = [
+        {"txn_id": "A", "type": "EARN", "points": 100, "created_at": T0, "expires_at": DUE},
+        {"txn_id": "B", "type": "EARN", "points": 50, "created_at": T0 + timedelta(days=1),
+         "expires_at": datetime(2027, 1, 1)},
+        {"txn_id": "M1", "type": "ADJUST", "points": 30, "delta": -30,
+         "created_at": T0 + timedelta(days=2)},
+        {"txn_id": "M2", "type": "ADJUST", "points": 20, "delta": 20,
+         "created_at": T0 + timedelta(days=3)},
+        {"txn_id": "C", "type": "ADJUST", "points": -10, "created_at": T0 + timedelta(days=4)},
+    ]
+    # -30 and -10 come off A (oldest first); M2 is a +20 lot with no expiry.
+    assert expirable_points_by_lot(ledger, now) == {"A": 60}
+    assert points_held_by_unexpired_lots(ledger, now) == 50 + 20

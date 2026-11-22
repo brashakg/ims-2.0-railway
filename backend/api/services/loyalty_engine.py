@@ -411,6 +411,10 @@ def _fifo_lots(ledger: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     for t in rows:
         ttype = str(t.get("type") or "").upper()
         pts = int(t.get("points") or 0)
+        if ttype == "ADJUST" and t.get("delta") is not None:
+            # POST /loyalty/adjust stores the size in "points" and the sign in
+            # "delta"; reading "points" alone made a manual deduction a credit.
+            pts = int(t.get("delta") or 0)
         if ttype == "EARN":
             lots.append(
                 {
