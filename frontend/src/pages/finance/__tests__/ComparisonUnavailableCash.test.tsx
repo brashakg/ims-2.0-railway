@@ -76,6 +76,25 @@ describe('Blind EOD Tally - D86(3)', () => {
     expect(screen.getAllByText('Not available')).toHaveLength(3);
   });
 
+  it('D136(3): a count after a close IMS cannot place says so, not "older version"', async () => {
+    api.list.mockResolvedValue([drawer({
+      variance_status: 'COMPARISON_UNAVAILABLE', expected_cash_paisa: null, variance_paisa: null,
+      comparison_withheld_reason: 'EARLIER_CLOSE_DRAWER_UNKNOWN',
+    })]);
+    render(<BlindEodTallyPage />);
+    expect(await screen.findByText(/could not be placed on one drawer/)).toBeTruthy();
+    expect(screen.queryByText(/older version/)).toBeNull();
+  });
+
+  it('CONTROL: an uncompared drawer with no reason keeps the older-version sentence', async () => {
+    api.list.mockResolvedValue([drawer({
+      variance_status: 'COMPARISON_UNAVAILABLE', expected_cash_paisa: null, variance_paisa: null,
+    })]);
+    render(<BlindEodTallyPage />);
+    expect(await screen.findByText(/recorded by an older version/)).toBeTruthy();
+    expect(screen.queryByText(/could not be placed on one drawer/)).toBeNull();
+  });
+
   it('CONTROL: a compared drawer shows its own cash sales', async () => {
     api.list.mockResolvedValue([drawer({
       variance_status: 'BALANCED', expected_cash_paisa: 300000, variance_paisa: 0,

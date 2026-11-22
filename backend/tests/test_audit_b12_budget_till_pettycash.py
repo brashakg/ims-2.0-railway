@@ -8160,7 +8160,27 @@ def test_r26_d136_3_on_real_mongo(monkeypatch):
             def __exit__(self, *exc):
                 return self.ctx.__exit__(*exc)
 
-        _a, b = _failed_close_across_b_then_b_counted(ndb, _Native(), at=_at, till_db=real_db)
+        _a, b = _failed_close_across_b_then_b_counted(ndb, _Native(), at=_at, till_db=real_db,
+                                                      pieces=None)
+        # The register closes cannot be read when B is counted: refused
+        # (503), never read as "no close" (which compared B, Rs 1,000 SHORT).
+        from pymongo.collection import Collection
+
+        real_find = Collection.find
+
+        def _register_fault(self, query=None, *a, **k):
+            if (self.database.name == name and self.name == "cash_register_sessions"
+                    and isinstance(query, dict) and query.get("till_link_ok") is False):
+                raise AutoReconnect("native register-close read fault")
+            return real_find(self, query, *a, **k)
+
+        with monkeypatch.context() as m:
+            m.setattr(Collection, "find", _register_fault)
+            refused = till.blind_submit(real_db, b, blind_denominations=[
+                {"face": 500, "kind": "note", "pieces": 4}], actor=CASHIER)
+        assert (refused["ok"], refused["http"], refused["error"]) == (False, 503, "drawer_read_failed")
+        assert real_db.till_sessions.find_one({"_id": b})["status"] == till.STATUS_OPEN
+        _count_on_blind_eod(real_db, b, 4, "11:00:00")
         row = real_db.till_sessions.find_one({"_id": b})
         assert _uncompared_unplaced(row) == _UNPLACED
         assert (row["blind_count_paisa"], row["bank_deposit_paisa"]) == (200000, 0)
