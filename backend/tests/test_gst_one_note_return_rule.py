@@ -31,6 +31,24 @@ def test_ids_from_ref_reason_and_neither():
     assert _ledger_row_return_ids({}) == []
 
 
+def test_the_history_imports_row_is_the_note_of_its_ret_hist_record():
+    """Decision D117 (PR #1423, F-1423-J): the order-history import's ledger
+    row names no RET- id (its ref is its own key), yet it is the credit note
+    of the returns record RET-HIST-<refund id> stored beside it. Unlinked,
+    GSTR-3B and GSTR-1 filed the row AND the record: the tax reversed twice."""
+    row = {"ref": "SHOPIFY-HIST-REFUND-5512", "reason": "Shopify refund 5512 for order ONL-9 (historical import)"}
+    assert _ledger_row_return_ids(row) == ["RET-HIST-5512"]
+    # the whole-order note's key
+    assert _ledger_row_return_ids({"ref": "SHOPIFY-HIST-REFUND-orderfull:77"}) == ["RET-HIST-orderfull:77"]
+    # a row an older worker booked under the claim's own return id: named once
+    assert _ledger_row_return_ids({"ref": "RET-HIST-5512"}) == ["RET-HIST-5512"]
+    # only the ref is the import's key; a bare prefix names no refund
+    assert _ledger_row_return_ids({"reason": "about SHOPIFY-HIST-REFUND-5512"}) == []
+    assert _ledger_row_return_ids({"ref": "SHOPIFY-HIST-REFUND-"}) == []
+    doc = {"return_id": "RET-HIST-5512", "order_id": "ONL-9"}
+    assert _ledger_row_return_doc(_Db([doc]), row) is doc
+
+
 def test_doc_lookup_ref_reason_neither():
     db = _Db([{"return_id": "RET-9", "store_id": "S1"}])
     assert _ledger_row_return_doc(db, {"reason": "Return RET-9, x"})["store_id"] == "S1"
