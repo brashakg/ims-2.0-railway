@@ -62,6 +62,22 @@ logger = logging.getLogger(__name__)
 
 _LENS_ITEM_TYPES = {"LENS", "OPTICAL_LENS", "CONTACT_LENS_RX"}
 
+# A reservation is one (key, quantity), and every step of its life goes by that
+# key: reserve "{order}#{key}", commit "...#commit", release "...#release".
+#   A line's own reservation sits under its item_id (older orders: its position).
+#   LENS_HOLDS are the rest of what the line answers for: pieces an edit raised
+#   its quantity by, each [{"key", "qty"}] under its own key, because the line's
+#   own reservation may be cut already, or never have been made.
+#   LENS_KEY_OWN marks a line an edit added: it has no history under a position,
+#   so a commit row at its position is the line it replaced, never its own.
+LENS_HOLDS = "lens_holds"
+LENS_KEY_OWN = "lens_key_own"
+
+
+def line_base_qty(order_item: Dict[str, Any]) -> int:
+    """The pieces under the line's own reservation: its quantity less its holds."""
+    return _qty_for(order_item) - sum(int(h["qty"]) for h in order_item.get(LENS_HOLDS) or [])
+
 
 def _is_lens_item(order_item: Dict[str, Any]) -> bool:
     """True when this order line is a lens we should attempt to track.
@@ -75,6 +91,11 @@ def _is_lens_item(order_item: Dict[str, Any]) -> bool:
     if pid.startswith(("lens-", "lens-sug-")):
         return True
     return False
+
+
+def takes_lens_cell(order_item: Dict[str, Any]) -> bool:
+    """Does this line reserve a lens cell? Exactly when the hooks below act on it."""
+    return _is_lens_item(order_item) and _extract_cell_key(order_item) is not None
 
 
 def _extract_cell_key(
@@ -200,6 +221,43 @@ def _already_acted(
             exc,
         )
         return None
+
+
+_REPAIR = {  # action -> (on_hand, reserved) per piece, and who records it
+    "reserve": (0, 1, "POS"),
+    "commit": (-1, -1, "WORKSHOP"),
+    "release": (0, -1, "ORDER_CANCEL"),
+}
+
+
+def _acted(source_id: str, action: str, order_item: Dict[str, Any], cell: Dict[str, Any],
+           store_id: str, user: Dict[str, Any]) -> bool:
+    """Did this named move happen? Its record says so or, the record lost (it is a
+    separate, fail-soft write), the cell's own move memory does: the counter and
+    that memory move in one write, so the cell is the proof. A move found only on
+    the cell gets its missing record now, keyed by the move (written once, nothing
+    moves again). A read fault RAISES: never read as "nothing happened"."""
+    coll = _get_audit_collection()
+    if coll is None:
+        return False  # no database: nothing was ever moved
+    if coll.find_one({"source_id": source_id, "action": action}) is not None:
+        return True
+    from ..routers import lens_stock as stock_router
+
+    d_on_hand, d_reserved, source_type = _REPAIR[action]
+    payload = stock_router.ReserveCommitReleasePayload(
+        store_id=store_id, sph=cell["sph"], cyl=cell["cyl"], add=cell["add"],
+        qty=_qty_for(order_item), source_type=source_type, source_id=source_id,
+    )
+    doc = stock_router.cell_doc(cell["lens_line_id"], payload, user)
+    move = stock_router._move_key(action, source_id)  # noqa: SLF001 -- the fence's own name
+    if not stock_router._already_moved(doc, move):  # noqa: SLF001
+        return False
+    stock_router._moved_before(  # noqa: SLF001 -- the record, once
+        action, move, doc, cell["lens_line_id"], doc.get("store_id") or store_id, user, payload,
+        d_on_hand * payload.qty, d_reserved * payload.qty,
+    )
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -335,7 +393,8 @@ async def reserve_for_order_item(
         }
 
     return {
-        "status": "reserved",
+        # another runner of this very move landed it first: nothing moved here
+        "status": "already_reserved" if (result or {}).get("status") == "already_applied" else "reserved",
         "lens_line_id": cell["lens_line_id"],
         "sph": cell["sph"],
         "cyl": cell["cyl"],
@@ -362,20 +421,67 @@ async def commit_for_workshop_dispatch(
     """Hard-commit the reserved lens cell when the workshop mounts the
     physical lens into the frame.
 
-    Idempotent on (order_id, line_index, "commit"). Returns None when the
-    item is not a lens or has no cell key. Fail-soft: any exception is
-    logged + None is returned (the workshop has already produced the lens;
-    blocking the dispatch on a stock-side hiccup is worse than logging it).
+    `line_index` is the line's position; the commit goes under the line's own
+    item_id (the key its reservation and release use), so a line that replaced
+    a cut one at that position is not read as cut. A commit row an older build
+    wrote at the position still counts for a line that was there then. The
+    line's holds commit too, each under its own key.
+
+    Idempotent per key. Returns None when the item is not a lens or has no cell
+    key. Fail-soft: any exception is logged + None is returned (the workshop has
+    already produced the lens; blocking the dispatch on a stock-side hiccup is
+    worse than logging it).
     """
     if not _is_lens_item(order_item):
         return None
-
     cell = _extract_cell_key(order_item)
     if cell is None:
         return None
 
+    for hold in order_item.get(LENS_HOLDS) or []:
+        await _commit_one(
+            {**order_item, "quantity": hold["qty"]}, cell, order_id, hold["key"], store_id, user
+        )
+    key = order_item.get("item_id") or line_index
+    base = line_base_qty(order_item)
+    if base < 1 or (
+        not order_item.get(LENS_KEY_OWN)
+        and _already_acted("{oid}#{idx}#commit".format(oid=order_id, idx=line_index), "commit")
+    ):
+        return {"status": "already_committed", **cell, "qty": base}
+    return await _commit_one(
+        {**order_item, "quantity": base}, cell, order_id, key, store_id, user
+    )
+
+
+async def commit_edit_holds(order: Dict[str, Any], user: Dict[str, Any]) -> None:
+    """A bill handed over: lenses an edit added may have reached no workshop step
+    (the job was past it, or there was none), and a reservation nothing will ever
+    commit is not stock accounted for. Their lines only; every other line keeps
+    the workshop's one commit. Idempotent, fail-soft: delivery never waits on it."""
+    for idx, item in enumerate(order.get("items") or []):
+        if not (item.get(LENS_HOLDS) or item.get(LENS_KEY_OWN)):
+            continue
+        try:
+            await commit_for_workshop_dispatch(
+                order_item=item, order_id=order.get("order_id"), line_index=idx,
+                store_id=order.get("store_id") or "", user=user,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[LENS_HOOK] handover commit failed (order %s): %s", order.get("order_id"), exc)
+
+
+async def _commit_one(
+    order_item: Dict[str, Any],
+    cell: Dict[str, Any],
+    order_id: str,
+    key: Any,
+    store_id: str,
+    user: Dict[str, Any],
+) -> Dict[str, Any]:
+    """One reservation, under its own key, once."""
     qty = _qty_for(order_item)
-    source_id = "{oid}#{idx}#commit".format(oid=order_id, idx=line_index)
+    source_id = "{oid}#{idx}#commit".format(oid=order_id, idx=key)
 
     prior = _already_acted(source_id, "commit")
     if prior is not None:
@@ -442,7 +548,8 @@ async def commit_for_workshop_dispatch(
         }
 
     return {
-        "status": "committed",
+        # another runner of this very move landed it first: nothing moved here
+        "status": "already_committed" if (result or {}).get("status") == "already_applied" else "committed",
         "lens_line_id": cell["lens_line_id"],
         "sph": cell["sph"],
         "cyl": cell["cyl"],
@@ -464,8 +571,22 @@ async def release_for_cancel(
     line_index: int,
     store_id: str,
     user: Dict[str, Any],
+    part: Optional[str] = None,
+    void: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Release the reserved cell back to AVAILABLE on order cancel.
+
+    `part`: a one-off token for a lowered quantity. This `order_item` carries the
+    pieces going back; the line's own release key stays unused for what it holds.
+
+    `void`: the line belongs to an edit that never landed and never can (its bill
+    is shut to it). A reservation it has not made yet is voided on the cell, so a
+    press stalled past this give-back cannot reserve afterwards; one it made goes
+    back as usual. Only for such a line: a live line's key is never voided.
+
+    What happened is read from the record and, when the record was lost, from
+    the cell itself (`_acted`); a read that fails is "failed", never "nothing to
+    release".
 
     Idempotent on (order_id, line_index, "release"). Fail-soft -- a 409
     here means the cell was already committed (workshop ran ahead of
@@ -483,54 +604,38 @@ async def release_for_cancel(
     qty = _qty_for(order_item)
     reserve_source_id = "{oid}#{idx}".format(oid=order_id, idx=line_index)
     release_source_id = "{oid}#{idx}#release".format(oid=order_id, idx=line_index)
+    if part:
+        release_source_id += "-" + part
 
-    # If we already released, no-op.
-    prior_rel = _already_acted(release_source_id, "release")
-    if prior_rel is not None:
-        return {
-            "status": "already_released",
-            "lens_line_id": cell["lens_line_id"],
-            "sph": cell["sph"],
-            "cyl": cell["cyl"],
-            "add": cell["add"],
-            "qty": qty,
-        }
-
-    # If reserve never happened for this line, skip (nothing to release).
-    prior_res = _already_acted(reserve_source_id, "reserve")
-    if prior_res is None:
-        logger.info(
-            "[LENS_HOOK] release skipped for %s -- no prior reserve",
-            reserve_source_id,
-        )
-        return {
-            "status": "no_reservation",
-            "lens_line_id": cell["lens_line_id"],
-            "sph": cell["sph"],
-            "cyl": cell["cyl"],
-            "add": cell["add"],
-            "qty": qty,
-        }
-
-    # If a commit row already exists, the lens was already cut -- there
-    # are no reserved units to release. Skip.
     commit_source_id = "{oid}#{idx}#commit".format(oid=order_id, idx=line_index)
-    prior_com = _already_acted(commit_source_id, "commit")
-    if prior_com is not None:
-        return {
-            "status": "already_committed",
-            "lens_line_id": cell["lens_line_id"],
-            "sph": cell["sph"],
-            "cyl": cell["cyl"],
-            "add": cell["add"],
-            "qty": qty,
-        }
-
+    shape = {"lens_line_id": cell["lens_line_id"], "sph": cell["sph"], "cyl": cell["cyl"],
+             "add": cell["add"], "qty": qty}
     try:
         from ..routers import lens_stock as stock_router
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[LENS_HOOK] release: cannot import lens_stock router: %s", exc)
-        return None
+
+        voided = void and stock_router.void_move(
+            cell["lens_line_id"],
+            stock_router.ReserveCommitReleasePayload(
+                store_id=store_id, sph=cell["sph"], cyl=cell["cyl"], add=cell["add"], qty=qty,
+            ),
+            user,
+            stock_router._move_key("reserve", reserve_source_id),  # noqa: SLF001
+        )
+        if voided:
+            # "voided_no_cell": nothing held, but nothing fenced either (D77).
+            return {"status": "voided" if voided is True else "voided_no_cell", **shape}
+        if _acted(release_source_id, "release", order_item, cell, store_id, user):
+            return {"status": "already_released", **shape}
+        # If reserve never happened for this line, skip (nothing to release).
+        if not _acted(reserve_source_id, "reserve", order_item, cell, store_id, user):
+            logger.info("[LENS_HOOK] release skipped for %s -- no prior reserve", reserve_source_id)
+            return {"status": "no_reservation", **shape}
+        # The lens was already cut: no reserved units to release.
+        if _acted(commit_source_id, "commit", order_item, cell, store_id, user):
+            return {"status": "already_committed", **shape}
+    except Exception as exc:  # noqa: BLE001 -- unknown is not "nothing": the caller retries
+        logger.warning("[LENS_HOOK] release %s: cannot tell what moved: %s", release_source_id, exc)
+        return {"status": "failed", **shape, "error": str(getattr(exc, "detail", exc))}
 
     payload = stock_router.ReserveCommitReleasePayload(
         store_id=store_id,
@@ -578,7 +683,8 @@ async def release_for_cancel(
         }
 
     return {
-        "status": "released",
+        # another runner of this very move landed it first: nothing moved here
+        "status": "already_released" if (result or {}).get("status") == "already_applied" else "released",
         "lens_line_id": cell["lens_line_id"],
         "sph": cell["sph"],
         "cyl": cell["cyl"],

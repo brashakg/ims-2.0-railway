@@ -187,7 +187,7 @@ def test_pos_sell_of_quarantined_only_unit_returns_409(client, auth_headers):
         def find_by_product_store(self, pid, store_id):
             return []
 
-        def mark_sold(self, sid, oid):
+        def mark_sold(self, sid, oid, store_id=None, product_ids=None):
             return True
 
     import contextlib

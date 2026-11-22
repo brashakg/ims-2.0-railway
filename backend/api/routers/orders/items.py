@@ -30,12 +30,15 @@ from .pricing import (
 from ...services import discount_approval
 from .rx import _validate_order_line_rx
 from .stock import (
+    _assert_line_type_matches_master,
     _assert_serialized_stock_available,
     _canonical_pid,
     _claim_units,
     _lens_reservation_key,
+    _line_unit_id,
     _mark_units_sold,
     _release_claimed_units,
+    _assert_goods_name_a_product,
     _resolve_billable_product,
 )
 from .release import (
@@ -89,6 +92,9 @@ async def add_order_item(
         # brand caps and reason requirement ALL silently no-op'd -- and a
         # catalog-only product create_order refuses was billed outright.
         _pid = item.product_id or ""
+        _assert_goods_name_a_product(
+            item.item_type, item.category, _pid, item.product_name or ""
+        )
         _pr = get_product_repository()
         product = None
         if _pr is not None:
@@ -110,6 +116,8 @@ async def add_order_item(
             # One id rule with create (_canonical_pid): a product named by SKU
             # or _id is gated, claimed and stored under its product_id.
             _pid = _canonical_pid(_pr, _pid)
+        # L2-STOCK-F02: the master, not the request, says whether it takes stock.
+        _assert_line_type_matches_master(item.item_type, product, item.product_name or _pid)
 
         # BUG-005 / BUG-006 (patient-safety): same Rx-power validation +
         # Rx-required check the create path runs, for a line appended to a DRAFT
@@ -200,7 +208,7 @@ async def add_order_item(
             # `category` -- that feeds _compute_per_category_gst and would
             # change this path's tax resolution.
             "lens_details": item.lens_details,
-            "stock_id": getattr(item, "stock_id", None),
+            "stock_id": _line_unit_id(item),
             "lens_line_id": getattr(item, "lens_line_id", None),
             "sph": getattr(item, "sph", None),
             "cyl": getattr(item, "cyl", None),
@@ -353,7 +361,7 @@ async def add_order_item(
         # Every unit the line takes is claimed before the save, as at create
         # (a 409 here leaves the order untouched; a scanned line reserves no
         # lens cell).
-        claimed = _claim_units(order_id, [item_data], _store_id)
+        claimed = _claim_units(order_id, [item_data], _store_id, claim_op=uuid.uuid4().hex)
         try:
             # Spend the manager's approval (if one lifted the limit) last thing
             # before the save -- atomic, single use, as at create. ANY failure
