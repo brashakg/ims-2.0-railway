@@ -1001,6 +1001,7 @@ class NexusAgent(JarvisAgent):
         never reported alerted."""
         try:
             from api.services.task_triggers import (
+                _ACTIVE,
                 _person_holding,
                 active_tasks,
                 create_system_task,
@@ -1030,10 +1031,15 @@ class NexusAgent(JarvisAgent):
                         return True  # already listed (a replay after a lost answer)
                     # Past the readable length: the id and topic only, never dropped.
                     more = line if len(text) < 4000 else f"{topic}, id {webhook_id}"
-                    if repo.update_if(task.get("task_id"), {"description": task.get("description")},
+                    # Still open AND unchanged: closing a task leaves its text
+                    # alone, so a text-only check let a late line land on a
+                    # task an Admin had just closed (no open task named it).
+                    if repo.update_if(task.get("task_id"),
+                                      {"description": task.get("description"),
+                                       "status": {"$in": sorted(_ACTIVE)}},
                                       {"description": f"{text} Also not processed: {more}."}):
                         return True
-                    continue  # another drain changed the text first: read again
+                    continue  # changed or closed first: read again (none open = next episode)
                 if create_system_task(
                     repo,
                     title=f"{name} notification not processed after {attempts} tries",

@@ -895,6 +895,42 @@ def test_two_drains_raising_the_alert_at_once_open_one_task(db, an_admin, monkey
         assert "alert_pending" not in db.webhook_inbox.find_one({"webhook_id": wid})
 
 
+def test_a_task_closed_between_the_read_and_the_append_opens_the_next_episode(
+        db, an_admin, monkeypatch):
+    """Review 1412-r3 must-fix. The append's compare-and-set checked the text
+    only, and closing a task leaves the text alone. Before: an Admin closing
+    the task between the drain's read and its write got the late webhook's
+    line on the COMPLETED task, and the row was reported alerted while no open
+    task named it. Now the append also requires the task still open: it loses,
+    re-reads, finds none open and opens the next episode."""
+    import api.services.task_triggers as task_triggers
+
+    _order(db)
+    _park_dead(db, "dead-1")
+    first = _open_dead_tasks(db)[0]["task_id"]
+    real_active = task_triggers.active_tasks
+    closed = []
+
+    def admin_closes_after_the_read(repo, ref):
+        rows = real_active(repo, ref)
+        if rows and not closed:
+            closed.append(1)
+            db.tasks.update_one({"task_id": first}, {"$set": {"status": "COMPLETED"}})
+        return rows
+
+    monkeypatch.setattr(task_triggers, "active_tasks", admin_closes_after_the_read)
+    _park_dead(db, "dead-2", "refunds/create",
+               {"id": 82, "order_id": int(_SHOPIFY_ORDER_ID), "refund_line_items": []})
+
+    assert closed
+    done = db.tasks.find_one({"task_id": first})
+    assert done["status"] == "COMPLETED" and "dead-2" not in done["description"]
+    tasks = _open_dead_tasks(db)
+    assert len(tasks) == 1 and tasks[0]["task_id"] != first, tasks
+    assert "id dead-2." in tasks[0]["description"]
+    assert "alert_pending" not in db.webhook_inbox.find_one({"webhook_id": "dead-2"})
+
+
 def _seed_dead_task(db, n, status, description="An earlier episode."):
     tid = f"TSK-DEADLETTER-SHOPIFY-{n}"
     db.tasks.insert_one({"_id": tid, "task_id": tid, "task_number": tid, "status": status,
