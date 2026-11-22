@@ -2638,6 +2638,8 @@ def _post_locked(
         finalized = _finalize_landed(returns_coll, refund_id, update_fields["updated_at"])
         logger.error("[SHOPIFY_REFUND] returns doc finalize not acknowledged (landed=%s): %s",
                      finalized, exc)
+    if finalized and not restock_applied and any(getattr(ln, "restock", False) for ln in asked_lines):
+        _mark_step_started(returns_coll, refund_id)
     if finalized and credit_ok and prior_doc is not None:
         _close_unfinished_task(refund_id)
 
@@ -2843,6 +2845,24 @@ def post_from_review(db, review: Dict[str, Any]) -> Dict[str, Any]:
 
 
 _Held = List[Tuple[Dict[str, Any], float, str, str]]
+
+
+def _mark_step_started(returns_coll: Any, refund_id: str) -> None:
+    """D130(1): a confirm / AUTO post that says the goods are back STARTED
+    this record's stock step. Left open (a unit write failed, the stock or
+    the order unreadable, the slot index missing), the record carries a
+    start like any stopped step -- a token and its start, no closing stamp
+    -- so the hourly sweep finishes it (returns._stock_step_stopped) and a
+    run that still cannot place it keeps one task open (D130(2)). Only when
+    no claim is on the record: a running Update stock keeps its own.
+    Fail-soft: the record's blocked task still names the re-run."""
+    try:
+        returns_coll.update_one(
+            {"shopify_refund_id": refund_id, "restock_applied": {"$ne": True}, "restock_claim": None},
+            {"$set": {"restock_claim": f"post:{uuid.uuid4().hex}", "restock_in_progress": False,
+                      "restock_started_at": datetime.now(timezone.utc).isoformat()}})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[SHOPIFY_REFUND] refund=%s stock step start not recorded: %s", refund_id, exc)
 
 
 class ReturnSlotIndexMissing(RuntimeError):
@@ -3109,7 +3129,9 @@ def _restock_booked(
     returned_qty, which the counter return door and every cap read, and this
     refund's mark (its units put back on that line), so the refund never
     restocks a unit of the line a second time, whichever door runs first. A
-    unit that did not land is un-booked; a landed one never is. A HISTORICAL
+    booking naming its slots stays once a unit write was tried (the next run
+    reads its slots); only a booking with no slots (a stock store with no
+    collection) is un-booked by count when its unit did not land. A HISTORICAL
     order (our own Shopify order-history import, older than IMS stock) is
     booked the same way but never restocked by any door (owner 2026-10-01):
     its booking raises ONE task to add the frames through stock-in
@@ -3146,7 +3168,16 @@ def _restock_booked(
     try:
         result = restock(pieces, keys or None) if (adopted or slot_keys is not None) else restock(pieces)
     finally:
-        unbooked = _release_unlanded(order, held, result, refund_id)
+        # Once a unit write was tried, a booking that names its run and its
+        # slots is NEVER taken back: whether its piece landed is what its
+        # slots say, and whoever runs next reads them (settle_bookings: held
+        # -> landed, free -> taken over and placed on the same slots). Taking
+        # it back un-booked the wrong line when two lines of one product had
+        # one write fail (the count is per product, the slots per booking),
+        # and un-booked a piece a live worker this run took over still
+        # landed: either way a later run placed one piece twice.
+        unbooked = _release_unlanded(order, [row for row in held if not _names_its_slots(row)],
+                                     result, refund_id)
     # What this call took back off the order lines (returns._reopen_by_booking).
     result["unbooked"] = unbooked
     # Its units are in the mark: a doc row of them must never add to it.
@@ -3259,6 +3290,14 @@ def _hold_returned_qty(order: Dict[str, Any], lines: List[Any], refund_id: str,
     return held
 
 
+def _names_its_slots(row: Tuple[Dict[str, Any], float, str, str]) -> bool:
+    """A held booking whose token names its run and one slot per unit (a
+    booking_token on a stock store with slots): its slots, not a count, say
+    whether its pieces landed."""
+    got = parse_booking_token(row[3])
+    return got is not None and bool(got[4]) and len(got[4]) == int(row[1])
+
+
 def _slot_named_meanwhile(order: Dict[str, Any], refund_id: str, slots: List[str]) -> bool:
     """A booking refused: was it because another run's booking of this
     refund now names one of these slots (plan again), not because the line
@@ -3295,10 +3334,14 @@ def _stock_in_task(order: Dict[str, Any], lines: List[Any], held: _Held, refund_
                    processing_store_id: Optional[str], owner: Optional[str] = None) -> Dict[str, Any]:
     """A historical order's booked units (raise_stock_in_task): ONE task per
     booking -- the booking is taken once, so a second door books and raises
-    nothing. A task that did not land is no booking: it is released and the
-    restock stays open, so the next door books it and raises the task again
-    (kept, nothing recorded the frame and every later door answered "already
-    done")."""
+    nothing. A task whose save is not confirmed (the insert failed, or its
+    reply was lost and the read-back failed too) leaves the booking ON the
+    line and the restock open: the next run of any door finds the booking
+    and finds its task under this run's ref, or raises it under this run's
+    fixed id (settle_bookings) -- one task per frame. Taking the booking back
+    here let the next run book the same frame under its own run and raise a
+    SECOND task beside one that had landed (lost reply) or that a concurrent
+    run had just raised for this booking."""
     out = raise_stock_in_task(
         order, sum(row[1] for row in held),
         {str(ln.sku or ln.product_id) for ln in lines if ln.restock},
@@ -3306,7 +3349,8 @@ def _stock_in_task(order: Dict[str, Any], lines: List[Any], held: _Held, refund_
         processing_store_id, refund_id=refund_id,
         # A run that settles this booking raises the same task (settle_bookings).
         task_id=stock_in_task_id(refund_id, owner) if owner else None)
-    if not out["applied"]:
+    if not out["applied"] and not owner:
+        # A booking with no run: nobody can raise its task later -- taken back.
         out["unbooked"] = _release_unlanded(order, held, {}, refund_id)
     return out
 
@@ -3421,8 +3465,8 @@ def _take_over_goods_back(coll: Any, review_id: Any, user_id: Optional[str]) -> 
     stock step runs (returns._STOCK_CLAIM_STALE_SECONDS). That one is taken
     over ("taken") and run again: its booking with no unit behind it is
     settled and its piece placed on the slot it chose (restock_refund), its
-    landed pieces credited. Before (D122(3)): the row answered "already put
-    back" for ever with the unit SOLD."""
+    landed pieces credited ("taken:<its new mark>"). Before (D122(3)): the
+    row answered "already put back" for ever with the unit SOLD."""
     from ..routers.returns import _STOCK_CLAIM_STALE_SECONDS, _step_stale
 
     try:
@@ -3432,13 +3476,14 @@ def _take_over_goods_back(coll: Any, review_id: Any, user_id: Optional[str]) -> 
             return "duplicate"
         if not _step_stale(at, _STOCK_CLAIM_STALE_SECONDS):
             return "in_progress"
+        mine = datetime.now(timezone.utc).isoformat()
         took = coll.update_one(
             {"review_id": review_id, "goods_back_at": at, "goods_restock": None},
-            {"$set": {"goods_back_at": datetime.now(timezone.utc).isoformat(), "goods_back_by": user_id}})
+            {"$set": {"goods_back_at": mine, "goods_back_by": user_id}})
     except Exception:  # noqa: BLE001
         logger.warning("[SHOPIFY_REFUND] goods-back takeover failed for review=%s", review_id, exc_info=True)
         return "in_progress"
-    return "taken" if getattr(took, "modified_count", 0) else "in_progress"
+    return f"taken:{mine}" if getattr(took, "modified_count", 0) else "in_progress"
 
 
 def finish_stopped_goods_back(db) -> int:
@@ -3488,10 +3533,12 @@ def goods_back(db, review: Dict[str, Any], *, user_id: Optional[str]) -> Dict[st
     refund_id = _norm(review.get("shopify_refund_id"))
     try:
         coll = db.get_collection(_REVIEW_COLLECTION)
+        # This press's own mark: its closing stamp lands only while the row
+        # is still its own (a press taken over never stamps its taker's row).
+        my_at = datetime.now(timezone.utc).isoformat()
         claim = coll.update_one(
             {"review_id": review_id, "goods_back_at": None},
-            {"$set": {"goods_back_at": datetime.now(timezone.utc).isoformat(),
-                      "goods_back_by": user_id}},
+            {"$set": {"goods_back_at": my_at, "goods_back_by": user_id}},
         )
     except Exception:  # noqa: BLE001
         logger.warning("[SHOPIFY_REFUND] goods-back claim failed for review=%s", review_id,
@@ -3499,8 +3546,9 @@ def goods_back(db, review: Dict[str, Any], *, user_id: Optional[str]) -> Dict[st
         return {"status": "not_restocked", "review_id": review_id, "reason": "claim_failed"}
     if not getattr(claim, "modified_count", 0):
         taken = _take_over_goods_back(coll, review_id, user_id)
-        if taken != "taken":
+        if not taken.startswith("taken:"):
             return {"status": taken, "review_id": review_id}
+        my_at = taken.split(":", 1)[1]
 
     result: Dict[str, Any] = {"applied": False}
     reason = "order_unreadable"
@@ -3552,7 +3600,10 @@ def goods_back(db, review: Dict[str, Any], *, user_id: Optional[str]) -> Dict[st
     stamp = ({"goods_restock": out} if out["restock_applied"]
              else {"goods_back_at": None, "goods_back_by": None})
     try:
-        coll.update_one({"review_id": review_id}, {"$set": stamp})
+        # Matched on this press's own mark: a press that stalled and was taken
+        # over (_take_over_goods_back) never releases or overwrites its
+        # taker's row -- that let a third press run beside the taker.
+        coll.update_one({"review_id": review_id, "goods_back_at": my_at}, {"$set": stamp})
     except Exception:  # noqa: BLE001
         logger.warning("[SHOPIFY_REFUND] goods-back stamp failed for review=%s", review_id,
                        exc_info=True)

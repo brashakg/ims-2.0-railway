@@ -565,7 +565,10 @@ def test_a_sweep_run_that_places_nothing_keeps_one_open_task_under_a_fixed_id(na
             native.returns.update_one({"return_id": RID}, {"$set": {
                 "restock_in_progress": True, "restock_started_at": OLD}})
         assert R.finish_stopped_stock_steps() == 1
-        assert _units(native) == {"U1": ("SOLD", OID)} and _booked(native) == (0.0, 0.0)
+        # A Shopify refund's booking stays once its unit write was tried: the
+        # next run reads its slot (free) and places the piece on it.
+        assert _units(native) == {"U1": ("SOLD", OID)}
+        assert _booked(native) == ((1.0, 1.0) if refund else (0.0, 0.0))
         doc = native.returns.find_one({"return_id": RID})
         assert doc["restock_applied"] is False and doc["restock_in_progress"] is False
         open_tasks = list(native.tasks.find({"source_ref": BLOCKED, "status": "OPEN"}))
@@ -608,3 +611,224 @@ def test_the_confirm_books_the_money_and_no_stock_without_the_return_slot_indexe
     assert R._retry_restock(doc["return_id"], USER, STORE)["restock_applied"] is True
     assert _units(native) == {"U1": ("AVAILABLE", None)} and _booked(native) == (1.0, 1.0)
     assert native.credit_note_ledger.count_documents({}) == 1
+
+
+# --- E: no booking is taken back once a unit write was tried (review of 22f53ec0) --------------------
+
+
+def _transient_once(monkeypatch, *, at=1):
+    """`_flip_sold_unit` raises a transient error at its `at`-th call (a Mongo
+    blip), once; every other call is real."""
+    real, state = R._flip_sold_unit, {"calls": 0}
+
+    def flip(*a, **k):
+        state["calls"] += 1
+        if state["calls"] == at:
+            raise RuntimeError("socket reset")
+        return real(*a, **k)
+
+    monkeypatch.setattr(R, "_flip_sold_unit", flip)
+    return real
+
+
+def test_two_lines_of_one_product_whose_first_write_failed_put_each_piece_back_once(native, monkeypatch):
+    """Must-fix 1. One refund restocks two order lines of ONE product (li1 on
+    slot 0, li2 on slot 1); li1's unit write fails, li2's lands. Before: the
+    un-booking counted landed pieces per PRODUCT, kept li1's booking (slot 0,
+    held by nothing) and took back li2's (slot 1, held by li2's unit). The
+    next Update stock took li1's booking over AND booked li2 again on slot 2:
+    with no SOLD unit left for it, it MINTED a phantom -- three AVAILABLE rows
+    for two frames."""
+    _seed(native, units=["U1", "U2"])
+    # Each line names its own unit (the till's scan, D43): li1's piece is U1 only.
+    native.orders.update_one({"order_id": OID}, {"$set": {"items.0.stock_id": "U1"}})
+    native.orders.update_one({"order_id": OID}, {"$push": {"items": {
+        "item_id": "li2", "product_id": PID, "sku": "F1", "product_name": "Frame",
+        "quantity": 1, "unit_price": 1000.0, "stock_id": "U2"}}})
+    native.returns.update_one({"return_id": RID}, {"$set": {
+        "shopify_refund_id": RF, "items": [dict(LINE), {**LINE, "order_item_id": "li2"}]}})
+    real = _transient_once(monkeypatch)
+    first = R._retry_restock(RID, USER, STORE)
+    assert first["restock_applied"] is False
+    assert native.stock_units.count_documents({"status": "AVAILABLE"}) == 1
+    assert _line_bookings(native) == {"li1": 1.0, "li2": 1.0}  # both stay booked
+    monkeypatch.setattr(R, "_flip_sold_unit", real)
+    assert R._retry_restock(RID, USER, STORE)["restock_applied"] is True
+    assert native.stock_units.count_documents({"source_type": "RETURN"}) == 0  # nothing minted
+    assert _line_bookings(native) == {"li1": 1.0, "li2": 1.0}
+    _all_back_once(native, ["U1", "U2"], 2.0)
+
+
+def test_a_taker_whose_own_write_failed_never_unbooks_a_piece_its_live_worker_then_lands(native, monkeypatch):
+    """Must-fix 2. One line of two pieces, the refund puts ONE back (the
+    customer keeps the other). W1 (Update stock) books, passes its fence and
+    stalls before its unit write; the sweep T takes the step over (and W1's
+    booking), its own write fails. Before: T took the booking back; W1 woke
+    and landed U1; the next Update stock booked the piece again and flipped
+    U2 -- the customer's frame on sale in IMS, two units back for one."""
+    _seed(native, units=["U1", "U2"], qty=2)
+    native.returns.update_one({"return_id": RID}, {"$set": {"shopify_refund_id": RF}})
+    real, state = R._flip_sold_unit, {"calls": 0, "taker": False}
+
+    def flip(*a, **k):
+        state["calls"] += 1
+        if state["taker"]:  # every unit write of T fails (a Mongo blip): U1 and U2
+            raise RuntimeError("socket reset")
+        if state["calls"] == 1:  # W1, between its fence and its write
+            native.returns.update_one({"return_id": RID}, {"$set": {"restock_started_at": OLD}})
+            state["taker"] = True
+            assert R.finish_stopped_stock_steps() == 1  # T: its own writes fail
+            state["taker"] = False
+            assert state["calls"] >= 2  # T did try
+            assert native.returns.find_one({"return_id": RID})["restock_applied"] is False
+        return real(*a, **k)
+
+    monkeypatch.setattr(R, "_flip_sold_unit", flip)
+    w1 = _stale()  # W1 lands its unit; its stamp misses on its token (409)
+    assert isinstance(w1, HTTPException)
+    monkeypatch.setattr(R, "_flip_sold_unit", real)
+    assert sum(1 for s, _o in _units(native).values() if s == "AVAILABLE") == 1
+    assert _booked(native) == (1.0, 1.0)  # the piece that is back stays booked
+    R._retry_restock(RID, USER, STORE)  # the person presses the button the task names
+    for _ in range(2):
+        units = _units(native)
+        assert sorted(s for s, _o in units.values()) == ["AVAILABLE", "SOLD"], units
+        assert native.stock_units.count_documents({}) == 2 and _booked(native) == (1.0, 1.0)
+        assert native.stock_units.find_one({"status": "AVAILABLE"})["return_slot"] == SLOT0
+        assert native.returns.find_one({"return_id": RID})["restock_applied"] is True
+        assert R.finish_stopped_stock_steps() == 0
+        assert R._retry_restock(RID, USER, STORE)["message"] == "Already restocked"
+
+
+def test_a_historical_stock_in_task_whose_save_is_unknown_keeps_its_booking_one_task(native, monkeypatch):
+    """Must-fix 2, historical form (and D129(1)'s lost-reply residual): Goods
+    back books the frame, its task insert LANDS but the reply is lost and the
+    read-back fails. Before: it took its booking back, so Update stock booked
+    the same frame under its own run and raised a SECOND open 'add 1
+    returned frame(s) through stock-in' task."""
+    _refund_record(native, units=(), historical=True)
+    row = _review(native)
+    real, seen = SR.raise_stock_in_task, {}
+
+    def lost_reply(*a, **k):
+        out = real(*a, **k)
+        if not seen:
+            seen["landed"] = out.get("applied")
+            return {**out, "applied": False, "reason": "stock_in_task_not_saved"}
+        return out
+
+    monkeypatch.setattr(SR, "raise_stock_in_task", lost_reply)
+    assert SR.goods_back(native, row, user_id="u1")["status"] == "stock_in"
+    assert seen["landed"] is True and _booked(native) == (1.0, 1.0)  # the booking stays
+    assert R._retry_restock(RID, USER, STORE)["restock_applied"] is True
+    SR.goods_back(native, _row(native), user_id="u2")
+    for _ in range(2):
+        assert [t["status"] for t in _stock_in_tasks(native)] == ["OPEN"], _stock_in_tasks(native)
+        assert _booked(native) == (1.0, 1.0) and native.stock_units.count_documents({}) == 0
+        assert R.finish_stopped_stock_steps() == 0
+        assert R._retry_restock(RID, USER, STORE)["message"] == "Already restocked"
+
+
+def test_goods_back_that_cannot_route_never_unbooks_the_piece_a_live_update_stock_lands(native, monkeypatch):
+    """Grey area 1 (D130(5)): an online order with no fulfilment stamp. Update
+    stock W1 (the presser's shop routes it) books and stalls before its unit
+    write; Goods back (no shop to route to) takes W1's booking over and places
+    nothing. Before: Goods back took the booking back, W1 landed U1 and
+    stamped applied -- the order line reading the unit as not returned."""
+    monkeypatch.delenv("ONLINE_FULFILLMENT_STORE_ID", raising=False)
+    native.stores.insert_many([{"store_id": STORE, "store_code": "RACE", "store_type": "RETAIL"},
+                               {"store_id": "BV-ONLINE-01", "store_code": "ONL", "store_type": "ONLINE",
+                                "is_online_store": True}])
+    native.orders.insert_one({
+        "_id": OID, "order_id": OID, "store_id": "BV-ONLINE-01", "order_number": "R-1", "channel": "ONLINE",
+        "items": [{"item_id": "li1", "product_id": PID, "sku": "F1", "product_name": "Frame",
+                   "quantity": 1, "unit_price": 1000.0}]})
+    native.stock_units.insert_one({"_id": "U1", "stock_id": "U1", "product_id": PID, "store_id": STORE,
+                                   "status": "SOLD", "order_id": OID, "quantity": 1})
+    native.returns.insert_one({
+        "return_id": RID, "store_id": "BV-ONLINE-01", "order_id": OID, "status": "COMPLETED",
+        "shopify_refund_id": RF, "items": [dict(LINE)], "restock_applied": False,
+        "restock_in_progress": False, "restocked": []})
+    row = {**_review(native), "store_id": "BV-ONLINE-01"}
+    native.shopify_refund_review.update_one({"review_id": "RV-1"}, {"$set": {"store_id": "BV-ONLINE-01"}})
+    real, seen = R._flip_sold_unit, {}
+
+    def stalled(*a, **k):
+        if not seen:
+            seen["goods"] = SR.goods_back(native, row, user_id="u1")["status"]
+        return real(*a, **k)
+
+    monkeypatch.setattr(R, "_flip_sold_unit", stalled)
+    w1 = R._retry_restock(RID, USER, STORE)
+    assert seen["goods"] == "not_restocked" and w1["restock_applied"] is True, (seen, w1)
+    monkeypatch.setattr(R, "_flip_sold_unit", real)
+    assert _units(native) == {"U1": ("AVAILABLE", None)}
+    assert _booked(native) == (1.0, 1.0)
+    assert R._retry_restock(RID, USER, STORE)["message"] == "Already restocked"
+    assert native.stock_units.count_documents({}) == 1
+
+
+def test_a_goods_back_press_that_was_taken_over_never_releases_its_takers_row(native, monkeypatch):
+    """Builder limit 2: press A stalls; press B (two minutes later) takes the
+    row over and puts the goods back; A wakes, its own write fails. Before:
+    A's stamp cleared goods_back_at on the row B had finished, and the next
+    press claimed the row again instead of answering 'already put back'."""
+    _refund_record(native)
+    row = _review(native)
+    real, state = R._flip_sold_unit, {"calls": 0}
+
+    def flip(*a, **k):
+        state["calls"] += 1
+        if state["calls"] == 1:  # A
+            native.shopify_refund_review.update_one({"review_id": "RV-1"}, {"$set": {"goods_back_at": OLD}})
+            state["b"] = SR.goods_back(native, _row(native), user_id="u2")["status"]
+            raise RuntimeError("socket reset")
+        return real(*a, **k)
+
+    monkeypatch.setattr(R, "_flip_sold_unit", flip)
+    assert SR.goods_back(native, row, user_id="u1")["status"] == "not_restocked"
+    assert state["b"] == "restocked"
+    monkeypatch.setattr(R, "_flip_sold_unit", real)
+    after = _row(native)
+    assert after["goods_back_at"] and after["goods_restock"]["restock_applied"] is True
+    assert SR.goods_back(native, _row(native), user_id="u3")["status"] == "duplicate"
+    assert _units(native) == {"U1": ("AVAILABLE", None)} and _booked(native) == (1.0, 1.0)
+
+
+def test_a_shopify_refund_records_blocked_task_is_refused_once_when_closed_by_hand(native):
+    """Builder limit 1 vs D130(2): a Shopify-refund record has no History
+    label or button, so its blocked-restock task is the only thing telling a
+    person. Before: a manager could close it at once with the unit SOLD."""
+    _refund_record(native)
+    task = native.tasks.find_one({"task_id": "TSK-BLOCKED"})
+    with pytest.raises(HTTPException) as refused:
+        asyncio.run(R.note_stock_task_closed(RID, USER, task))
+    assert refused.value.status_code == 409 and "task says" in refused.value.detail
+    after = native.tasks.find_one({"task_id": "TSK-BLOCKED"})
+    assert after["status"] == "OPEN" and after["payload"]["close_refused"] is True
+    assert after["description"] == task["description"]  # its own cause and action (D129(3))
+    asyncio.run(R.note_stock_task_closed(RID, USER, after))  # the second close is the person's call
+    assert native.tasks.count_documents({"source_ref": BLOCKED}) == 1
+
+
+def test_a_confirm_whose_restock_was_left_open_is_finished_by_the_sweep(native, monkeypatch):
+    """Builder limit 1 vs D130(1): a confirm that says the goods are back
+    STARTS the stock step. Before: it left no token, so the sweep never ran
+    it -- with its task closed by hand the unit stayed SOLD, nobody told."""
+    _post_fixture(native)
+    real = _transient_once(monkeypatch)
+    out = SR.post_from_review(native, _row(native))
+    assert out["status"] == "credited" and out["restock_applied"] is False, out
+    monkeypatch.setattr(R, "_flip_sold_unit", real)
+    doc = native.returns.find_one({"shopify_refund_id": RF})
+    assert doc.get("restock_claim") and doc["restock_in_progress"] is False, doc
+    assert _units(native) == {"U1": ("SOLD", OID)} and _booked(native) == (1.0, 1.0)
+    assert R.finish_stopped_stock_steps() == 0  # not while the post may still be running
+    native.returns.update_one({"shopify_refund_id": RF}, {"$set": {"restock_started_at": OLD}})
+    assert R.finish_stopped_stock_steps() == 1
+    for _ in range(2):
+        assert _units(native) == {"U1": ("AVAILABLE", None)} and _booked(native) == (1.0, 1.0)
+        doc = native.returns.find_one({"shopify_refund_id": RF})
+        assert doc["restock_applied"] is True and doc["restock_stock_ids"] == ["U1"]
+        assert native.credit_note_ledger.count_documents({}) == 1
+        assert R.finish_stopped_stock_steps() == 0

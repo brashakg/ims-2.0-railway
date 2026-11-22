@@ -5572,6 +5572,17 @@ async def note_stock_task_closed(return_id: str, current_user: dict, task: Optio
             raise HTTPException(status_code=503, detail=CLOSE_NOT_RECORDED_MESSAGE)
         raise HTTPException(status_code=409, detail=(
             TASK_BLOCKED_STILL_OUT_MESSAGE if _standing_block(doc) else TASK_UNITS_STILL_OUT_MESSAGE))
+    if (doc.get("shopify_refund_id") and not doc.get("restock_applied") and _stock_lines(doc.get("items"))
+            and not ((task or {}).get("payload") or {}).get("close_refused")):
+        # D122(5) on a Shopify-refund record too (D130(2): never a step left
+        # with nobody told -- it has no History label or button): refused
+        # once, the task keeps its own cause and action (D129(3)).
+        if not _raise_restock_blocked_task(
+                return_id, doc.get("order_id"), doc.get("store_id"), _stock_lines(doc.get("items")),
+                doc.get("store_id"), refund_id=doc.get("shopify_refund_id"), close_refused=True,
+                order_number=doc.get("order_number")):
+            raise HTTPException(status_code=503, detail=CLOSE_NOT_RECORDED_MESSAGE)
+        raise HTTPException(status_code=409, detail=TASK_BLOCKED_STILL_OUT_MESSAGE)
     try:
         coll.update_one({"return_id": return_id}, {"$set": {
             "stock_task_closed_by": current_user.get("user_id"), "stock_task_closed_at": utc_now_iso()}})
@@ -8322,6 +8333,9 @@ def _return_slot_index_ok() -> bool:
 #                                           the record (D130(1)). A Shopify-refund record's step
 #                                           nobody started is never started by the sweep (D130(1):
 #                                           its goods come back by post); its task names the re-run.
+#                                           A confirm / AUTO post that says the goods are back
+#                                           STARTED it: left open, it carries a token and its start
+#                                           (shopify_refund._mark_step_started), so it is STOPPED.
 #                                           finisher, step STOPPED (T, and no C since it started:
 #                                           the stamp never landed and the claim was given back,
 #                                           or the record was reopened): the next press, or the
@@ -8356,7 +8370,10 @@ def _return_slot_index_ok() -> bool:
 #                                           unit no longer SOLD on this bill (credited, nothing
 #                                           changes), its stock-in task insert is refused by the
 #                                           fixed id, its renew and its stamp miss on T, its
-#                                           un-booking finds its token gone.
+#                                           un-booking finds its token gone. No run takes back a
+#                                           booking that names its slots once a unit write was
+#                                           tried (nor a historical booking whose task is not
+#                                           confirmed): the next run reads its slots or its task.
 #                                           An 'in progress' with no T is an older version's: the
 #                                           sweep leaves it; a person's press takes it over.
 #  S4 done               A yes P no         'Already restocked'. Final: no claim is ever taken on
@@ -8370,7 +8387,8 @@ def _return_slot_index_ok() -> bool:
 #                                           money posts and the stock waits, D130(3)). The task
 #                                           names the cause and the re-run; never a hand entry.
 #                                           Closing that task by hand -- Complete or Cancel -- is
-#                                           refused once while the units are out (D122(5)); the
+#                                           refused once while the units are out (D122(5)), on a
+#                                           Shopify-refund record too (D130(2)); the
 #                                           refusal rewrites only an open step's task to name its
 #                                           button, a standing block's keeps its own cause (D129(3)).
 #  historical order      no stock rows      IMS adds none: the step books and raises ONE stock-in
