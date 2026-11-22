@@ -308,10 +308,15 @@ def _unfinished_note(db, row: Dict[str, Any], posted: bool, post_status: str,
         return None
     if result.get("reason") == NOT_CLAIMED and result.get("claim_unknown"):
         return CLAIM_UNKNOWN_NOTE
-    if result.get("reason") == NOT_FINALIZED or (
-            post_status == "duplicate"
-            and _unfinished_claim(db, str(row.get("shopify_refund_id") or "")) is not None):
+    if result.get("reason") == NOT_FINALIZED:
         return NOT_FINISHED_NOTE
+    if post_status == "duplicate":
+        try:
+            open_claim = _unfinished_claim(db, str(row.get("shopify_refund_id") or ""))
+        except Exception:  # noqa: BLE001 -- D118: no answer is never "nothing open"
+            return CLAIM_UNKNOWN_NOTE
+        if open_claim is not None:
+            return NOT_FINISHED_NOTE
     return None
 
 
@@ -408,9 +413,16 @@ def finish_unfinished_refunds() -> Dict[str, int]:
             logger.error("[REFUND_REVIEWS] refund %s not finished: %s", refund_id, exc)
         if posted:
             counts["finished"] += 1
-        elif not busy and _unfinished_claim(db, refund_id) is not None:
+            continue
+        try:
             # Still unfinished after the tick's own look (asked again: another
             # door may have finished it meanwhile).
+            still_open = not busy and _unfinished_claim(db, refund_id) is not None
+        except Exception as exc:  # noqa: BLE001 -- D118: unread is not "finished"
+            logger.error("[REFUND_REVIEWS] refund %s: its claim could not be read (%s); "
+                         "the next tick looks again", refund_id, exc)
+            continue
+        if still_open:
             counts["unresolved"] += 1
             raise_unfinished_task(claim)
     if counts["finished"] or counts["unresolved"]:
@@ -475,9 +487,24 @@ async def confirm_refund_review(
     if not posted:
         # The post could not issue the credit note (e.g. no customer / ledger
         # error). Surface it so the accountant retries after fixing the cause.
+        from ..services.shopify_refund import CLAIM_UNREADABLE, HELD_BY_IMPORT, NOT_CLAIMED
+
         raise HTTPException(
             status_code=422,
             detail=(
+                # Decision D103(1): the order-history import holds this refund
+                # and has not finished it -- say so, never a bare "duplicate".
+                f"{result.get('store_credit_reason')} The row stays open: confirm it again after that."
+                if result.get("reason") == HELD_BY_IMPORT else
+                # Decisions D118 / D125: the refund's claim could not be read,
+                # or could not be saved -- say so (nothing was booked), never
+                # "duplicate".
+                # The 'could not tell' text already says when to confirm again
+                # (after 15 minutes); no second, contradicting instruction.
+                f"{result.get('store_credit_reason')}"
+                if result.get("reason") == NOT_CLAIMED and result.get("claim_unknown") else
+                f"{result.get('store_credit_reason')} The row stays open: confirm it again."
+                if result.get("reason") in (CLAIM_UNREADABLE, NOT_CLAIMED) else
                 "Credit note could not be issued for this refund "
                 f"({post_status or 'error'}). The row stays open for retry."
             ),

@@ -54,6 +54,7 @@ from ..services.salary_visibility import (
 # Reuse the proven order-revenue aggregation from reports.py verbatim so the
 # budget variance can never drift from what the Reports module shows.
 from ..utils.ist import ist_month_window_utc
+from ..utils.expense_status import COMMITTED_EXPENSE_STATUSES, COMMITTED_EXPENSE_STATUS_MATCH
 from . import reports as _reports
 
 logger = logging.getLogger(__name__)
@@ -72,9 +73,10 @@ REVENUE_HEAD = "REVENUE"
 # YYYY-MM (e.g. 2026-05). Strict: 4-digit year, 01-12 month.
 _PERIOD_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 
-# Expense statuses that count as a real, committed outflow for ACTUALS.
-# The task asks for APPROVED expenses specifically.
-_ACTUAL_EXPENSE_STATUSES = ("APPROVED",)
+# Expense statuses that count as a real, committed outflow for ACTUALS: THE
+# committed-expense rule (utils/expense_status, audit L3-03) -- an approved
+# claim stays an actual after it is sent to and entered by the accountant.
+_ACTUAL_EXPENSE_STATUSES = COMMITTED_EXPENSE_STATUSES
 
 
 # ============================================================================
@@ -172,10 +174,10 @@ def _revenue_actual(store_id: Optional[str], period: str) -> float:
 def _expense_actuals_by_category(
     store_id: Optional[str], period: str
 ) -> Dict[str, float]:
-    """{category: total} of APPROVED expenses for the store in the month.
+    """{category: total} of committed expenses for the store in the month.
 
     Mirrors expenses.py conventions: `expense_date` is an ISO string filtered
-    by the ^YYYY-MM prefix, `status` is APPROVED, grouped by `category`,
+    by the ^YYYY-MM prefix, `status` is committed (utils/expense_status), grouped by `category`,
     summing `amount`. Fail-soft -> {}.
     """
     repo = get_expense_repository()
@@ -184,7 +186,7 @@ def _expense_actuals_by_category(
     flt: Dict[str, Any] = {
         # expense_date is stored as an ISO string -> month prefix match.
         "expense_date": {"$regex": f"^{re.escape(period)}"},
-        "status": {"$in": list(_ACTUAL_EXPENSE_STATUSES)},
+        "status": {"$in": COMMITTED_EXPENSE_STATUS_MATCH},
     }
     if store_id:
         flt["store_id"] = store_id
