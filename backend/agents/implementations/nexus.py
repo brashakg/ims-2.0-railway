@@ -28,6 +28,7 @@ Scope of MVP implementation:
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone, timedelta
 import logging
+import re
 
 from ..base import JarvisAgent, AgentType, AgentResponse, AgentContext
 from api.utils.ist import ist_day_start_utc, ist_today, now_ist
@@ -986,10 +987,18 @@ class NexusAgent(JarvisAgent):
         True once an open task names this webhook (created, joined, or already
         listed: a replay after a lost acknowledgement adds nothing). False when
         that could not be written or checked -- the caller keeps the alert owed.
-        One task per episode (D55): its id is the ref's episode number (how
-        many tasks the ref has had, counted BEFORE the open-task read), so two
-        drains raising at once insert the SAME id, the database refuses the
-        second and it joins the first; a closed task makes the next episode."""
+        One task per episode (D55): its id is the next episode number -- one
+        past the HIGHEST episode id still stored for the provider, read BEFORE
+        the open-task read -- so two drains raising at once insert the SAME id,
+        the database refuses the second and it joins the first; a closed task
+        makes the next episode. (A count of the ref's tasks stalled for good
+        once an earlier episode was deleted: the count landed on ids still
+        stored, every insert collided, Codex 1412-round2 R2-B.)
+
+        Every webhook is NAMED on the task, however many there are (Codex
+        1412-round2 R2-A): past the readable length its line is cut to the
+        topic and id, never dropped -- a webhook the task does not name is
+        never reported alerted."""
         try:
             from api.services.task_triggers import (
                 _person_holding,
@@ -1010,15 +1019,19 @@ class NexusAgent(JarvisAgent):
                 or "unknown type"
             )
             line = f"{topic}, id {webhook_id}. Last error: {handler_error[:200]}"
-            for attempt in range(3):
-                episode = tasks.count_documents({"source_ref": ref}) + 1 + attempt
+            prefix = f"TSK-DEADLETTER-{str(vendor).upper()}-"
+            for _ in range(3):
+                stored = tasks.find({"_id": {"$regex": f"^{re.escape(prefix)}[0-9]+$"}}, {"_id": 1})
+                episode = max((int(str(t["_id"])[len(prefix):]) for t in stored), default=0) + 1
                 task = next(iter(active_tasks(repo, ref)), None)
                 if task is not None:
                     text = str(task.get("description") or "")
-                    if f"id {webhook_id}." in text or len(text) >= 4000:
-                        return True  # already listed / the board item stays readable
+                    if f"id {webhook_id}." in text:
+                        return True  # already listed (a replay after a lost answer)
+                    # Past the readable length: the id and topic only, never dropped.
+                    more = line if len(text) < 4000 else f"{topic}, id {webhook_id}"
                     if repo.update_if(task.get("task_id"), {"description": task.get("description")},
-                                      {"description": f"{text} Also not processed: {line}."}):
+                                      {"description": f"{text} Also not processed: {more}."}):
                         return True
                     continue  # another drain changed the text first: read again
                 if create_system_task(
@@ -1043,7 +1056,7 @@ class NexusAgent(JarvisAgent):
                     },
                     # Deterministic: a second drain raising the same episode is
                     # refused by the database, then joins the task (D55).
-                    task_id=f"TSK-DEADLETTER-{str(vendor).upper()}-{episode}",
+                    task_id=f"{prefix}{episode}",
                 ):
                     return True
                 # Not written (lost a race, failed, or written with its answer

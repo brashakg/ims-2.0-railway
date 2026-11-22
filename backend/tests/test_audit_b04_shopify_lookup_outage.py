@@ -894,3 +894,53 @@ def test_two_drains_raising_the_alert_at_once_open_one_task(db, an_admin, monkey
         assert f"id {wid}." in tasks[0]["description"]
         assert "alert_pending" not in db.webhook_inbox.find_one({"webhook_id": wid})
 
+
+def _seed_dead_task(db, n, status, description="An earlier episode."):
+    tid = f"TSK-DEADLETTER-SHOPIFY-{n}"
+    db.tasks.insert_one({"_id": tid, "task_id": tid, "task_number": tid, "status": status,
+                         "source": "SYSTEM", "source_ref": _DEAD_REF, "description": description})
+
+
+def _owed_dead_row(db, webhook_id):
+    db.webhook_inbox.insert_one({
+        "webhook_id": webhook_id, "vendor": "shopify", "processed": False, "status": "dead",
+        "attempts": NexusAgent.WEBHOOK_MAX_ATTEMPTS, "alert_pending": True,
+        "handler_error": "AutoReconnect: synthetic", "payload": {},
+        "headers": {"x-shopify-topic": "orders/delete"},
+    })
+
+
+def test_a_full_alert_task_still_names_every_later_webhook(db, an_admin):
+    """Codex 1412-round2 R2-A. Before: once the open task's text reached 4,000
+    characters a later dead webhook was reported alerted (alert_pending
+    cleared, alert_raised_at written) while no task named it."""
+    _seed_dead_task(db, 1, "OPEN", "x" * 4100)
+    _owed_dead_row(db, "dead-25")
+    NexusAgent(db=db)._settle_dead_alerts(db.webhook_inbox, {})
+    task = db.tasks.find_one({"_id": "TSK-DEADLETTER-SHOPIFY-1"})
+    assert task["description"].endswith("Also not processed: orders/delete, id dead-25."), \
+        task["description"][-120:]
+    assert "Last error" not in task["description"][4100:]  # cut to the id, the item stays readable
+    row = db.webhook_inbox.find_one({"webhook_id": "dead-25"})
+    assert "alert_pending" not in row and row.get("alert_raised_at")
+    assert db.tasks.count_documents({}) == 1
+    # Named once: a replay adds nothing.
+    db.webhook_inbox.update_one({"webhook_id": "dead-25"}, {"$set": {"alert_pending": True}})
+    NexusAgent(db=db)._settle_dead_alerts(db.webhook_inbox, {})
+    assert db.tasks.find_one({"_id": "TSK-DEADLETTER-SHOPIFY-1"})["description"].count(
+        "id dead-25.") == 1
+
+
+def test_deleted_alert_episodes_never_strand_an_owed_alert(db, an_admin):
+    """Codex 1412-round2 R2-B. Episodes 1-3 deleted, 4-6 kept (closed). Before:
+    every sweep computed count 3 + 1..3 = ids 4, 5, 6, every insert collided
+    and the alert stayed owed for good."""
+    for n in (4, 5, 6):
+        _seed_dead_task(db, n, "COMPLETED")
+    _owed_dead_row(db, "dead-hole")
+    NexusAgent(db=db)._settle_dead_alerts(db.webhook_inbox, {})
+    tasks = _open_dead_tasks(db)
+    assert [t["task_id"] for t in tasks] == ["TSK-DEADLETTER-SHOPIFY-7"], tasks
+    assert "id dead-hole." in tasks[0]["description"]
+    assert "alert_pending" not in db.webhook_inbox.find_one({"webhook_id": "dead-hole"})
+    assert db.tasks.count_documents({"status": "COMPLETED"}) == 3
