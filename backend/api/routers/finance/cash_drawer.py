@@ -575,7 +575,7 @@ async def close_cash_register(
     # insert-once), so a shortage nobody locked still reaches the manager
     # and a later lock raises nothing more. Its own figures stay as D120
     # computes them. Not when the drawer is LOCKED, not when the count was
-    # made by another register's close (noted there), not when an earlier
+    # made by another register's close that explained it there, not when an earlier
     # close on this drawer already met it (``count_noted``). This session's
     # OWN refused count, when a new sheet is sent (above), is its own door's
     # count: that one still needs the note here, so a sheet retyped to
@@ -583,7 +583,7 @@ async def close_cash_register(
     count_owed = None
     if (standing is not None and not count_noted) or resheeted or counted_by_another_door:
         count_owed = till_service.count_awaiting_its_note(
-            till_link.get("session"), body.session_id, judged_band_paisa
+            db, till_link.get("session"), body.session_id, judged_band_paisa
         )
     count_needs_note = count_owed is not None and resheeted
 
@@ -737,7 +737,16 @@ async def close_cash_register(
     # a new sheet over its own first count is a count of its own: its own key
     # and id, so an alert for the earlier count does not swallow it.
     drawer_id = till_link.get("session_id")
-    judged_the_drawers_count = standing is None and not resheeted and bool(drawer_id)
+    # The figure judged here IS the count's only when it equals the drawer's
+    # stored difference: a register opened after the drawer judges its own
+    # window, another figure, which is its own alert (D135(2): the count's
+    # one task never shows a figure that is not the count's).
+    judged_the_drawers_count = (
+        standing is None
+        and not resheeted
+        and bool(drawer_id)
+        and judged_variance_paisa == (till_link.get("session") or {}).get("variance_paisa")
+    )
     # D135(1): the note this close took explains the drawer's count -- and
     # the Z-Read lock may take it -- ONLY when the figure judged here was that
     # count and was beyond the band. Stored with the figure, so the lock can
@@ -749,7 +758,7 @@ async def close_cash_register(
         else None
     )
     own_alert_key = drawer_id if judged_the_drawers_count else (
-        body.session_id if standing is not None or resheeted else drawer_id
+        body.session_id if standing is not None or resheeted or drawer_id else drawer_id
     )
     own_task_id = (
         till_service.count_task_id(drawer_id)

@@ -7652,33 +7652,44 @@ class TestR24D135OneTaskPerCountShowsTheLockedFigure:
                   note="Rs 500 short", insert=False)
         return sid
 
-    def test_d135_2_the_lock_restates_the_counts_task(self, db, monkeypatch):
-        """The register close raised the count's task on ITS figure (Rs 500
-        short); the lock locks Rs 1,000 short under the same id. The task
-        kept showing Rs 500."""
+    def test_d135_2_the_counts_task_shows_the_locked_figure(self, db, monkeypatch):
+        """The register close's own figure (Rs 500 short on its window) is
+        not the count's: it is the close's own task. The count's one task,
+        raised by the lock, shows the locked Rs 1,000 (round 25: the close
+        raised the count's task on its own figure, which an in-band lock
+        then never corrected)."""
         repo = self._repo(monkeypatch)
         sid = self._noted_register_close(db, monkeypatch)
+        own = till.followup_task_id("variance", "CR-R24-T")
         assert [(t["_id"], t["payload"]["variance_paisa"]) for t in repo.collection.docs] == [
-            (till.count_task_id(sid), -50000)]
+            (own, -50000)]
         assert till.lock_session(db, sid, actor=MANAGER, variance_note="Rs 1,000 short in all")["ok"]
-        (task,) = repo.collection.docs
-        assert (task["_id"], task["payload"]["variance_paisa"]) == (till.count_task_id(sid), -100000)
+        assert sorted((t["_id"], t["payload"]["variance_paisa"]) for t in repo.collection.docs) == sorted(
+            [(own, -50000), (till.count_task_id(sid), -100000)])
+        task = next(t for t in repo.collection.docs if t["_id"] == till.count_task_id(sid))
         assert "SHORT by Rs 1000.00" in task["title"] and "Rs 1,000 short in all" in task["description"]
-        # The same follow-up raised again (a retry) rewrites nothing, adds nothing.
-        before = dict(task)
+
+    def test_d135_2_a_count_task_on_another_figure_is_restated_not_doubled(self, db, monkeypatch):
+        """D135(2)'s guard: a task already under the count's id showing
+        ANOTHER figure (here put there by hand, as an earlier version did) is
+        rewritten to the locked figure in one write, keeps its COMPLETED
+        status, and a retry rewrites nothing and adds nothing."""
+        repo = self._repo(monkeypatch)
+        sid = self._noted_register_close(db, monkeypatch)
+        assert till.raise_variance_task(
+            store_id=STORE, session_date=DATE, variance_paisa=-50000, tolerance_paisa=10000,
+            source="an earlier version", session_id=sid, task_id=till.count_task_id(sid))
+        next(t for t in repo.collection.docs if t["_id"] == till.count_task_id(sid))["status"] = "COMPLETED"
+        assert till.lock_session(db, sid, actor=MANAGER, variance_note="Rs 1,000 short in all")["ok"]
+        (task,) = [t for t in repo.collection.docs if t["_id"] == till.count_task_id(sid)]
+        assert (task["status"], task["payload"]["variance_paisa"]) == ("COMPLETED", -100000)
+        assert "SHORT by Rs 1000.00" in task["title"] and "Rs 1,000 short in all" in task["description"]
+        before = [dict(t) for t in repo.collection.docs]
         assert till.raise_variance_task(
             store_id=STORE, session_date=DATE, variance_paisa=-100000, tolerance_paisa=10000,
             source="blind EOD Z-Read lock", session_id=sid, task_id=till.count_task_id(sid),
             restate=True)
-        assert repo.collection.docs == [before]
-
-    def test_d135_2_a_completed_task_is_restated_not_doubled(self, db, monkeypatch):
-        repo = self._repo(monkeypatch)
-        sid = self._noted_register_close(db, monkeypatch)
-        repo.collection.docs[0]["status"] = "COMPLETED"
-        assert till.lock_session(db, sid, actor=MANAGER, variance_note="Rs 1,000 short in all")["ok"]
-        (task,) = repo.collection.docs
-        assert (task["status"], task["payload"]["variance_paisa"]) == ("COMPLETED", -100000)
+        assert repo.collection.docs == before
 
     def test_control_the_same_figure_is_not_rewritten(self, db, monkeypatch):
         repo = self._repo(monkeypatch)
@@ -7790,7 +7801,9 @@ def test_r24_d135_on_real_mongo(monkeypatch):
         assert till.lock_session(real_db, sid, actor=MANAGER, variance_note="morning Rs 500")["ok"]
         assert _variance_tasks() == [(till.count_task_id(sid), -50000, "OPEN")]
 
-        # (1)+(2) a note for another figure; the lock restates the one task,
+        # (1)+(2) a note for another figure: the close's own figure is its
+        # own task (round 25); a task under the count's id on another figure
+        # (put there as an earlier version did) is restated by the lock,
         # also after the manager completed it.
         _reset()
         sid = _morning_sale_then_a_late_register(real_db, at=_at)
@@ -7798,16 +7811,21 @@ def test_r24_d135_on_real_mongo(monkeypatch):
             _register(ndb, monkeypatch, "CR-R24-T", opened="04:00:00", closed="12:00:00", pieces=5)
         _register(ndb, monkeypatch, "CR-R24-T", opened="04:00:00", closed="12:00:00", pieces=5,
                   note="Rs 500 short", insert=False)
-        assert _variance_tasks() == [(till.count_task_id(sid), -50000, "OPEN")]
+        own = till.followup_task_id("variance", "CR-R24-T")
+        assert _variance_tasks() == [(own, -50000, "OPEN")]
+        assert till.raise_variance_task(
+            store_id=STORE, session_date=DATE, variance_paisa=-50000, tolerance_paisa=10000,
+            source="an earlier version", session_id=sid, task_id=till.count_task_id(sid))
         real_db.tasks.update_one({"_id": till.count_task_id(sid)}, {"$set": {"status": "COMPLETED"}})
         assert till.lock_session(real_db, sid, actor=MANAGER)["error"] == "variance_note_required"
         assert till.lock_session(real_db, sid, actor=MANAGER, variance_note="Rs 1,000 in all")["ok"]
-        assert _variance_tasks() == [(till.count_task_id(sid), -100000, "COMPLETED")]
+        assert _variance_tasks() == sorted(
+            [(own, -50000, "OPEN"), (till.count_task_id(sid), -100000, "COMPLETED")])
         task = real_db.tasks.find_one({"_id": till.count_task_id(sid)})
         assert "SHORT by Rs 1000.00" in task["title"] and "Rs 1,000 in all" in task["description"]
         assert real_db.till_sessions.find_one({"_id": sid})["manager_followup"]["pending"] is False
         till.settle_drawers(ndb, [sid])
-        assert real_db.tasks.count_documents({}) == 1
+        assert real_db.tasks.count_documents({}) == 2
 
         # (3) a failed close open across B's opening: the next close on B is
         # not compared; no note, no alert.
@@ -7854,3 +7872,146 @@ def test_d135_3_the_day_drawers_unreadable_is_refused_never_read_as_none(db, mon
             till.drawer_counts(db, drawer)
     finally:
         restore()
+
+
+# ===========================================================================
+# Round 25 -- review must-fix on head 3cbbe337 (D135(2), D128(1)).
+# A Cash Register close that makes the drawer's count raises the COUNT's task
+# (its fixed id) only when the figure it judged IS the count's figure. Its own
+# window's figure, when that differs, is its own task: the count's one task
+# never shows a figure that is not the count's, also after an in-band lock.
+# And a count made by a register close that did not explain it (its own figure
+# was another) is still awaiting its note: a later close owes its alert.
+# ===========================================================================
+
+
+def _over_on_the_window_balanced_on_the_day(db, monkeypatch, *, at=None):
+    """Rs 500 taken at 03:00 before the register opens at 04:00, Rs 3,000 at
+    05:00; the register counts Rs 3,500 at 12:00. Its window reads Rs 500
+    OVER (noted); the drawer's count, on its day, balances."""
+    sid = _morning_sale_then_a_late_register(db, at=at)
+    with pytest.raises(HTTPException) as exc:
+        _register(db, monkeypatch, "CR-R25-O", opened="04:00:00", closed="12:00:00", pieces=7)
+    assert _refused_for_the_note(exc)
+    out = _register(db, monkeypatch, "CR-R25-O", opened="04:00:00", closed="12:00:00", pieces=7,
+                    note="Rs 500 from the morning", insert=False)
+    assert (out["variance"], out["variance_status"]) == (500.0, "OVER")
+    assert _till(db, sid)["variance_paisa"] == 0
+    return sid, out
+
+
+def _balanced_on_the_window_short_on_the_day_then_r2(db, monkeypatch, *, at=None):
+    """R1 balances on its window (Rs 3,000) and makes the drawer's count,
+    which is Rs 500 short on its day; nobody locks it. R2 opens on the drawer
+    (D120), takes Rs 500 and counts Rs 3,500: it balances."""
+    at = at or (lambda clock: f"{DATE}T{clock}")
+    sid = _morning_sale_then_a_late_register(db, at=at)
+    r1 = _register(db, monkeypatch, "CR-R25-1", opened="04:00:00", closed="12:00:00", pieces=6)
+    assert _judged(r1) == _balanced(3000.0) and r1["count_note_for"] is None
+    assert _till(db, sid)["variance_paisa"] == -50000
+    _counted_at(db, sid, "12:00:00")
+    _opened_on(db, "CR-R25-2", sid, opened="12:10:00", opening=3000.0)
+    _cash_sale(db, 500, at("12:30:00"))
+    r2 = _register(db, monkeypatch, "CR-R25-2", opened="12:10:00", closed="13:00:00", pieces=7,
+                   insert=False)
+    assert _judged(r2) == _balanced(3500.0)
+    return sid, r2
+
+
+class TestR25TheCountsTaskOnlyOnTheCountsFigure:
+    def _repo(self, monkeypatch):
+        return TestR24D135OneTaskPerCountShowsTheLockedFigure()._repo(monkeypatch)
+
+    def test_an_in_band_lock_after_an_out_of_band_window_leaves_no_false_count_task(
+        self, db, monkeypatch
+    ):
+        """The reviewers' steps: the close's Rs 500 OVER was raised under the
+        COUNT's id; the count locked BALANCED and its one task kept saying
+        OVER by Rs 500."""
+        repo = self._repo(monkeypatch)
+        sid, out = _over_on_the_window_balanced_on_the_day(db, monkeypatch)
+        assert out["count_note_for"] is None
+        own = till.followup_task_id("variance", "CR-R25-O")
+        assert [(t["_id"], t["payload"]["variance_paisa"]) for t in repo.collection.docs] == [
+            (own, 50000)]
+        locked = till.lock_session(db, sid, actor=MANAGER)
+        assert locked["ok"] and locked["session"]["variance_note"] is None
+        assert [t["_id"] for t in repo.collection.docs] == [own]
+
+    def test_a_count_its_register_close_did_not_explain_is_alerted_by_the_next_close(
+        self, db, monkeypatch
+    ):
+        """R1's own figure balanced, so it explained nothing and raised
+        nothing; the count is Rs 500 short. R2 read it as 'judged, noted and
+        alerted at that close' and owed no alert: never locked, it never
+        reached the manager."""
+        repo = self._repo(monkeypatch)
+        sid, r2 = _balanced_on_the_window_short_on_the_day_then_r2(db, monkeypatch)
+        assert r2["till_count_variance"] == -500.0
+        assert [(t["_id"], t["payload"]["variance_paisa"]) for t in repo.collection.docs] == [
+            (till.count_task_id(sid), -50000)]
+        # The lock asks its own note and raises nothing more (insert-once).
+        assert till.lock_session(db, sid, actor=MANAGER)["error"] == "variance_note_required"
+        assert till.lock_session(db, sid, actor=MANAGER, variance_note="Rs 500 of the morning")["ok"]
+        assert [t["_id"] for t in repo.collection.docs] == [till.count_task_id(sid)]
+
+    def test_control_a_count_its_close_explained_is_not_alerted_again(self, db, monkeypatch):
+        """One window, one figure: R1 noted the count's own -Rs 500 and raised
+        the count's task; R2 owes nothing more for it."""
+        repo = self._repo(monkeypatch)
+        sid = _open(db)
+        _cash_sale(db, 3000)
+        with pytest.raises(HTTPException):
+            _register(db, monkeypatch, "CR-R25-E", opened="04:00:00", closed="12:00:00", pieces=5)
+        r1 = _register(db, monkeypatch, "CR-R25-E", opened="04:00:00", closed="12:00:00", pieces=5,
+                       note="Rs 500 given as change", insert=False)
+        assert r1["count_note_for"] == {"till_session_id": sid, "variance_paisa": -50000}
+        _counted_at(db, sid, "12:00:00")
+        _opened_on(db, "CR-R25-E2", sid, opened="12:10:00", opening=2500.0)
+        _cash_sale(db, 500, f"{DATE}T12:30:00")
+        r2 = _register(db, monkeypatch, "CR-R25-E2", opened="12:10:00", closed="13:00:00", pieces=6,
+                       insert=False)
+        assert _judged(r2) == _balanced(3000.0) and r2["till_count_variance"] is None
+        assert [(t["_id"], t["payload"]["variance_paisa"]) for t in repo.collection.docs] == [
+            (till.count_task_id(sid), -50000)]
+
+
+def test_r25_the_counts_task_on_real_mongo(monkeypatch):
+    """Native PyMongo, the real till indexes, the real close handler, the real
+    lock and the real TaskRepository: both round-25 cases above."""
+    client, real_db, name = _real_till_db()
+    try:
+        till.ensure_till_indexes(real_db)
+        tasks = _real_task_repo(monkeypatch, real_db)
+        ndb = _NativeDB(real_db)
+
+        def _at(clock):
+            return datetime.fromisoformat(f"{DATE}T{clock}")
+
+        def _reset():
+            for coll in ("till_sessions", "cash_register_sessions", "orders", "tasks"):
+                real_db[coll].delete_many({})
+
+        def _variance_tasks():
+            return sorted((t["_id"], t["payload"]["variance_paisa"]) for t in tasks.find({})
+                          if t["source_ref"].startswith("till_variance:"))
+
+        # The in-band lock after an out-of-band window.
+        _reset()
+        sid, _out = _over_on_the_window_balanced_on_the_day(ndb, monkeypatch, at=_at)
+        own = till.followup_task_id("variance", "CR-R25-O")
+        assert _variance_tasks() == [(own, 50000)]
+        assert till.lock_session(real_db, sid, actor=MANAGER)["ok"]
+        assert _variance_tasks() == [(own, 50000)]
+        assert "OVER by Rs 500.00" in real_db.tasks.find_one({"_id": own})["title"]
+
+        # A count its register close did not explain, alerted by the next close.
+        _reset()
+        sid, r2 = _balanced_on_the_window_short_on_the_day_then_r2(ndb, monkeypatch, at=_at)
+        assert r2["till_count_variance"] == -500.0
+        assert _variance_tasks() == [(till.count_task_id(sid), -50000)]
+        assert till.lock_session(real_db, sid, actor=MANAGER, variance_note="morning Rs 500")["ok"]
+        assert _variance_tasks() == [(till.count_task_id(sid), -50000)]
+    finally:
+        client.drop_database(name)
+        client.close()

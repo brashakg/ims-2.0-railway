@@ -2186,7 +2186,7 @@ def unlocked_count_variance(drawer: Optional[Dict[str, Any]]) -> tuple:
 
 
 def count_awaiting_its_note(
-    drawer: Optional[Dict[str, Any]], own: Optional[str] = None, default_band: Any = 0
+    db, drawer: Optional[Dict[str, Any]], own: Optional[str] = None, default_band: Any = 0
 ) -> Optional[Dict[str, int]]:
     """The drawer's own count when it is beyond the band and NOBODY has taken
     its note yet, as ``{"variance_paisa", "tolerance_paisa"}``; else None.
@@ -2203,12 +2203,17 @@ def count_awaiting_its_note(
     note there.
 
     Not awaiting: a LOCKED drawer (its lock took both); a count made by
-    ANOTHER register session's close (judged, noted and alerted at that
-    close). ``own``: the register session asking -- its own count, refused
+    ANOTHER register session's close that explained it (its own judged
+    figure WAS this count, noted and alerted at that close: the same test
+    the lock uses, ``_register_close_note``). A count that close did not
+    explain (it judged its own window, another figure) is awaiting like a
+    Blind EOD count: else a count beyond the band never locked reached
+    nobody. ``own``: the register session asking -- its own count, refused
     for the note, is still awaiting it. A count with no recorded door
     (stored by the previous version) is read as awaiting."""
     d = drawer or {}
-    if d.get("blind_count_origin") not in (None, COUNT_ORIGIN_TILL, COUNT_ORIGIN_DAY_END, own):
+    origin = d.get("blind_count_origin")
+    if origin not in (None, COUNT_ORIGIN_TILL, COUNT_ORIGIN_DAY_END, own) and _register_close_note(db, d):
         return None
     variance, band = unlocked_count_variance(d)
     band = default_band if band is None else band
