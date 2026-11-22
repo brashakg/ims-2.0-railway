@@ -22,6 +22,7 @@ import type {
   VendorPaymentData,
 } from './financeTypes';
 import { financeApi } from '../../services/api/finance';
+import { ApiError } from '../../services/api/client';
 import { istDayString } from '../../utils/datetime';
 import { NoShopNotice, hasNoShop } from '../../components/common/NoShopNotice';
 import { PurchaseShopLabel, PurchaseShopPicker, usePurchaseShop } from '../purchase/purchaseShop';
@@ -108,6 +109,15 @@ function mapBudget(d: any): BudgetData[] {
   });
 }
 
+function mapBudgetMeta(d: any): BudgetMeta {
+  return {
+    period: typeof d?.period === 'string' ? d.period : undefined,
+    revenue: d?.revenue
+      ? { target: Number(d.revenue.budget || 0), actual: Number(d.revenue.actual || 0) }
+      : undefined,
+  };
+}
+
 function mapVendorPayments(d: any): VendorPaymentData[] {
   const list = Array.isArray(d) ? d : [];
   return list.map((v: any) => {
@@ -135,7 +145,7 @@ import GSTPanel from './GSTPanel';
 import OutstandingPanel from './OutstandingPanel';
 import CashFlowPanel from './CashFlowPanel';
 import PeriodManagement from './PeriodManagement';
-import BudgetPanel from './BudgetPanel';
+import BudgetPanel, { type BudgetMeta } from './BudgetPanel';
 import RestrictedTotalsNotice from './RestrictedTotalsNotice';
 import VendorPayments from './VendorPayments';
 import JournalEntriesPanel from './JournalEntriesPanel';
@@ -181,6 +191,10 @@ export default function FinanceDashboard() {
   const [outstanding, setOutstanding] = useState<OutstandingReceivable[]>([]);
   const [cashFlow, setCashFlow] = useState<CashFlowData[]>([]);
   const [budgets, setBudgets] = useState<BudgetData[]>([]);
+  // Which month the plan is for, and its income target (not an allocation).
+  const [budgetMeta, setBudgetMeta] = useState<BudgetMeta>({});
+  // The budget read FAILED: not the same as "no budget" (a total of Rs 0).
+  const [budgetError, setBudgetError] = useState(false);
   const [vendorPayments, setVendorPayments] = useState<VendorPaymentData[]>([]);
   const [pnlByStore, setPnlByStore] = useState<Array<{ store_id?: string; store_name?: string; entity_id?: string; revenue?: number; cogs?: number; expenses?: number; payroll?: number; net_profit?: number; net_margin?: number }>>([]);
   // Sortable per-store P&L. Default highest-revenue-first (mirrors the backend's
@@ -194,6 +208,11 @@ export default function FinanceDashboard() {
   // The table's own refusal (503 unreadable, 409 a registration to correct),
   // shown in its place -- never an empty table that reads as "no GST".
   const [gstReconError, setGstReconError] = useState<string | null>(null);
+  // The same for the P&L and the P&L-by-store table (the server answers 503
+  // when the salary cost cannot be read): the refusal is shown in their
+  // place, never dashes or a missing table that read as "nothing to report".
+  const [pnlError, setPnlError] = useState<string | null>(null);
+  const [pnlByStoreError, setPnlByStoreError] = useState<string | null>(null);
   // Bills the return cannot count that need fixing (undated, or a supplier
   // with no valid GSTIN and credit left on) -- a warning, never a refusal.
   const [gstReconWarnings, setGstReconWarnings] = useState<string[]>([]);
@@ -222,7 +241,7 @@ export default function FinanceDashboard() {
 
   useEffect(() => {
     // R4: a login with no shop is shown NoShopNotice below and reads nothing
-    // -- budgets and the period lock are not shop-scoped, so even they would
+    // -- the period lock is not shop-scoped, so even that would
     // hand it organisation data.
     if (hasNoShop(user)) return;
     loadFinanceData();
@@ -243,12 +262,17 @@ export default function FinanceDashboard() {
         canSeeWhatWePay ? financeApi.getGstSummary() : Promise.resolve(null),
         financeApi.getOutstanding({ store_id: storeId }),
         financeApi.getCashFlow({ period: 'month', store_id: storeId }),
-        financeApi.getBudget(),
+        // The SAME shop the rest of this dashboard reads, so the Budgets tab
+        // shows the plan Budgeting saved for it (audit L3-15).
+        financeApi.getBudget({ store_id: storeId }),
         canSeeWhatWePay ? financeApi.getVendorPayments(storeId) : Promise.resolve([]),
       ]);
 
       setRevenueData(rev.status === 'fulfilled' ? mapRevenue(rev.value) : []);
       setPLStatement(pnl.status === 'fulfilled' ? mapPnl(pnl.value, dateFrom, dateTo) : null);
+      setPnlError(pnl.status === 'rejected'
+        ? (pnl.reason instanceof Error ? pnl.reason.message : 'The profit and loss could not be loaded. Please retry.')
+        : null);
       setGSTSummary(gst.status === 'fulfilled' ? mapGst(gst.value) : null);
       setGSTSummaryError(gst.status === 'rejected'
         ? (gst.reason instanceof Error ? gst.reason.message : 'GST summary could not be calculated. Please retry.')
@@ -256,6 +280,8 @@ export default function FinanceDashboard() {
       setOutstanding(out.status === 'fulfilled' ? mapOutstanding(out.value) : []);
       setCashFlow(cf.status === 'fulfilled' ? mapCashFlow(cf.value) : []);
       setBudgets(bud.status === 'fulfilled' ? mapBudget(bud.value) : []);
+      setBudgetMeta(bud.status === 'fulfilled' ? mapBudgetMeta(bud.value) : {});
+      setBudgetError(bud.status !== 'fulfilled');
       setVendorPayments(vend.status === 'fulfilled' ? mapVendorPayments(vend.value) : []);
       // A failed/absent call must NOT leave a stale "incomplete" banner up, and
       // must not invent one either — default false on anything but an explicit
@@ -300,6 +326,9 @@ export default function FinanceDashboard() {
             : Promise.resolve({ registrations: [] }),
         ]);
         setPnlByStore(ps2.status === 'fulfilled' ? (ps2.value?.stores || []) : []);
+        setPnlByStoreError(ps2.status === 'rejected'
+          ? (ps2.reason instanceof Error ? ps2.reason.message : 'The P&L by store could not be loaded. Please retry.')
+          : null);
         setPnlByCategory(pc2.status === 'fulfilled' ? (pc2.value?.categories || []) : []);
         setGstRecon(gr2.status === 'fulfilled' ? (gr2.value?.registrations || []) : []);
         setGstReconWarnings(gr2.status === 'fulfilled' ? (gr2.value?.warnings || []) : []);
@@ -371,13 +400,28 @@ export default function FinanceDashboard() {
       return;
     }
     const [y, m] = dateTo.split('-').map(Number);
-    try {
-      await financeApi.lockPeriod(m, y);
-      setPeriodLocked(true);
-      toast.success(`Period ${m}/${y} locked`);
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Failed to lock period');
-    }
+    const lock = async (withoutPayroll: boolean): Promise<void> => {
+      try {
+        await financeApi.lockPeriod(m, y, withoutPayroll);
+        setPeriodLocked(true);
+        toast.success(`Period ${m}/${y} locked`);
+      } catch (e) {
+        // Payroll not run for someone: a locked month can never get it, so the
+        // server asks first. A draft (plain 409) has no "lock anyway".
+        if (
+          !withoutPayroll &&
+          e instanceof ApiError &&
+          e.code === 'PAYROLL_NOT_RUN' &&
+          window.confirm(`${e.message}
+
+Lock ${m}/${y} anyway? This cannot be undone.`)
+        ) {
+          return lock(true);
+        }
+        toast.error(e instanceof Error ? e.message : 'Failed to lock period');
+      }
+    };
+    await lock(false);
   };
 
   const handleUnlockPeriod = () => {
@@ -479,7 +523,17 @@ export default function FinanceDashboard() {
                 scope="profit and expense figures"
                 className="mb-4"
               />
+              {pnlError && (
+                <div role="alert" className="mb-4 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800" data-testid="pnl-error">
+                  Profit and loss: {pnlError}
+                </div>
+              )}
               <FinanceSummary revenueData={revenueData} plStatement={plStatement} />
+              {canSeeStorePayroll && pnlByStoreError && (
+                <div role="alert" className="card mt-4 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800" data-testid="pnl-by-store-error">
+                  P&amp;L by store: {pnlByStoreError}
+                </div>
+              )}
               {!canSeeStorePayroll && (
                 <div className="card mt-4 p-4">
                   <div className="text-sm font-medium text-gray-700">P&amp;L by store</div>
@@ -671,7 +725,15 @@ export default function FinanceDashboard() {
                 scope="budget rows and totals"
                 className="mb-4"
               />
-              <BudgetPanel budgets={budgets} selectedYear={selectedYear} />
+              {budgetError ? (
+                // Unreadable is not "Total Budget Rs 0" beside a saved plan.
+                <div role="alert" className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900" data-testid="budget-unreadable">
+                  Could not load the budget. Nothing has changed. Please try again.
+                  <button type="button" className="btn sm ml-3" onClick={() => loadFinanceData()}>Try again</button>
+                </div>
+              ) : (
+                <BudgetPanel budgets={budgets} selectedYear={selectedYear} {...budgetMeta} />
+              )}
             </>
           )}
           {activeTab === 'vendor-payments' && canSeeWhatWePay && (

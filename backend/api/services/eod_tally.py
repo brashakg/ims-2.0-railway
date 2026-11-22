@@ -31,13 +31,17 @@ No emoji (Windows cp1252).
 """
 from __future__ import annotations
 
+import hashlib
+import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from pymongo.errors import DuplicateKeyError
 
 from . import cash_denominations as _denom
+
+logger = logging.getLogger(__name__)
 
 _SESSIONS_COLLECTION = "till_sessions"
 
@@ -63,6 +67,17 @@ NEGATIVE_EXPECTED_MESSAGE = (
     "More cash was refunded than this drawer took in - a cash-in is missing "
     "(e.g. a refund funded from the safe). Record the cash-in before trusting "
     "this variance."
+)
+
+# No comparison can be trusted, so none is made (no variance, no verdict, no
+# note demand, no variance alert); the count itself is kept and the manager
+# gets a check-by-hand task instead (raise_count_not_compared_task). Two causes: an
+# earlier drawer of the day was recorded by older code that stored WHOLE-DAY
+# cash (D76), or a close could not read the day's drawers.
+COMPARISON_UNAVAILABLE = "COMPARISON_UNAVAILABLE"
+COMPARISON_UNAVAILABLE_MESSAGE = (
+    "Comparison not available: an earlier drawer was recorded by an older "
+    "version"
 )
 
 # Indian denomination ladder (paisa-exact) -- defined ONCE in
@@ -211,21 +226,39 @@ def raise_variance_task(
     tolerance_paisa: Any,
     note: Optional[str] = None,
     source: str = "day-end close",
-) -> None:
+    session_id: Optional[str] = None,
+    task_id: Optional[str] = None,
+    restate: bool = False,
+) -> bool:
     """A SYSTEM task on the store manager's worklist for an out-of-band
     day-end cash variance (owner ruling 2026-08-25: manager alert above the
     band). REUSES ``task_triggers.create_system_task`` -- the in-app bell
     already feeds from the tasks stream, so no new notification mechanism.
-    Deduped per (store, day): the blind lock and the Finance close raise ONE
-    task for one drawer-day. Fail-soft: an alert failure never undoes the
-    lock/close that triggered it."""
+    Deduped per DRAWER (D63): the blind lock and the Finance close of the same
+    till session raise ONE task, while each other drawer of the day that is out
+    of band raises its own (it used to be per (store, day), so a second
+    drawer's shortage was swallowed while the first drawer's task was open).
+    No session id (a Finance close whose till link failed) keeps the old
+    (store, day) key. Fail-soft: an alert failure never undoes the lock/close
+    that triggered it.
+
+    Returns True when the task is KNOWN to be on the worklist (or there is
+    nothing to raise); False when it could not be stored, so a caller that
+    owes it (``settle_followup``) keeps owing it. ``task_id`` is the fixed id
+    of that one owed task, so raising it twice stores it once.
+
+    ``restate`` (the Z-Read lock, D135(2)): the count's task keeps its one
+    id, and when it already exists showing ANOTHER figure (raised earlier by
+    a Cash Register close on its own window's figure), its figure and text
+    are rewritten to the locked figure in ONE write -- never a second task,
+    never a stale figure. Its status is left as the manager set it."""
     try:
         v = int(variance_paisa or 0)
     except (TypeError, ValueError):
-        return
+        return True
     try:
         from ..dependencies import get_task_repository
-        from .task_triggers import create_system_task
+        from .task_triggers import create_system_task, task_on_worklist
 
         rupees = abs(v) / 100.0
         try:
@@ -234,39 +267,327 @@ def raise_variance_task(
             band_rupees = 0.0
         direction = "OVER" if v > 0 else "SHORT"
         day = str(session_date or "")
-        create_system_task(
-            get_task_repository(),
-            title=(
-                f"Cash drawer {direction} by Rs {rupees:.2f} at "
-                f"{store_id} ({day})"
-            ),
-            description=(
-                f"The {day} day-end cash count at store {store_id} is "
-                f"{direction} by Rs {rupees:.2f} - beyond the allowed band of "
-                f"Rs {band_rupees:.2f}. Recorded at the {source}. "
-                + (
-                    f"Explanation given: {str(note).strip()}"
-                    if str(note or "").strip()
-                    else "No explanation was recorded."
-                )
-            ),
+        repo = get_task_repository()
+        dedupe_ref = (
+            f"till_variance:{store_id}:{day}:{session_id}"
+            if session_id
+            else f"till_variance:{store_id}:{day}"
+        )
+        title = f"Cash drawer {direction} by Rs {rupees:.2f} at {store_id} ({day})"
+        description = (
+            f"The {day} day-end cash count at store {store_id} is "
+            f"{direction} by Rs {rupees:.2f} - beyond the allowed band of "
+            f"Rs {band_rupees:.2f}. Recorded at the {source}. "
+            + (f"Drawer {session_id}. " if session_id else "")
+            + (
+                f"Explanation given: {str(note).strip()}"
+                if str(note or "").strip()
+                else "No explanation was recorded."
+            )
+        )
+        payload = {
+            "store_id": store_id,
+            "session_date": day,
+            "session_id": session_id,
+            "variance_paisa": v,
+            "tolerance_paisa": int(tolerance_paisa or 0),
+        }
+        created = create_system_task(
+            repo,
+            task_id=task_id,
+            title=title,
+            description=description,
             priority="P2",
             category="Finance",
             store_id=store_id,
             assigned_to="STORE_MANAGER",
-            dedupe_ref=f"till_variance:{store_id}:{day}",
-            extra={
-                "link": "/finance/cash-register",
-                "payload": {
-                    "store_id": store_id,
-                    "session_date": day,
-                    "variance_paisa": v,
-                    "tolerance_paisa": int(tolerance_paisa or 0),
-                },
-            },
+            dedupe_ref=dedupe_ref,
+            extra={"link": "/finance/cash-register", "payload": payload},
         )
+        on_list = task_on_worklist(repo, created, dedupe_ref, task_id)
+        if on_list and restate and task_id and not created:
+            # D135(2): the one task of this count shows the locked figure.
+            # Guarded on the figure, so a retry rewrites nothing. A failed
+            # write answers False below: the lock keeps owing it.
+            coll = getattr(repo, "collection", None)
+            if coll is not None:
+                now = datetime.now()
+                coll.update_one(
+                    {"task_id": task_id, "payload.variance_paisa": {"$ne": v}},
+                    {
+                        "$set": {
+                            "title": title,
+                            "description": description,
+                            "payload": payload,
+                            "updated_at": now,
+                        },
+                        "$push": {
+                            "history": {
+                                "action": "figure_restated",
+                                "to": v,
+                                "by": "system",
+                                "at": now,
+                                "notes": f"Figure restated at the {source}",
+                            }
+                        },
+                    },
+                )
+        return on_list
     except Exception:  # noqa: BLE001
+        return False
+
+
+# Where a till drawer is counted and locked, named as the menu names it
+# (navConfig 'Blind EOD Tally', route finance/blind-eod). A drawer follow-up
+# task links here, never to Cash Register, which cannot count a till drawer.
+ZREAD_SCREEN_LINK = "/finance/blind-eod"
+ZREAD_SCREEN_NAME = "Blind EOD Tally (Z-Read)"
+
+
+def _drawer_check_task(
+    *, store_id: Optional[str], title: str, description: str,
+    dedupe_ref: str, payload: Dict[str, Any], task_id: Optional[str] = None,
+) -> bool:
+    """One SYSTEM task for the store manager about a drawer nothing has
+    judged. Fail-soft, and the same True / False answer as
+    raise_variance_task."""
+    try:
+        from ..dependencies import get_task_repository
+        from .task_triggers import create_system_task, task_on_worklist
+
+        repo = get_task_repository()
+        created = create_system_task(
+            repo,
+            task_id=task_id,
+            title=title,
+            description=description,
+            priority="P2",
+            category="Finance",
+            store_id=store_id,
+            assigned_to="STORE_MANAGER",
+            dedupe_ref=dedupe_ref,
+            extra={"link": ZREAD_SCREEN_LINK, "payload": payload},
+        )
+        return task_on_worklist(repo, created, dedupe_ref, task_id)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def raise_count_not_on_till_task(
+    *, store_id: Optional[str], session_date: Optional[str], source: str,
+    task_id: Optional[str] = None,
+) -> bool:
+    """A close's count did NOT reach the till (the link failed). That drawer
+    is still OPEN on the till, so no blind count has judged it: without this,
+    a real shortage on it could go unchecked and unalerted (owner ruling
+    2026-08-25). One task per shop-day."""
+    day = str(session_date or "")
+    return _drawer_check_task(
+        store_id=store_id,
+        task_id=task_id,
+        title=f"Count the cash drawer on the Blind EOD Tally at {store_id} ({day})",
+        description=(
+            f"The {day} close at store {store_id} ({source}) could not record "
+            "its count on the till, so the drawer is still open there and has "
+            "not been checked against expected cash. Count it on the "
+            f"{ZREAD_SCREEN_NAME} screen (Finance menu) and lock it."
+        ),
+        dedupe_ref=f"till_uncounted:{store_id}:{day}",
+        payload={"store_id": store_id, "session_date": day},
+    )
+
+
+def raise_count_not_compared_task(
+    *, store_id: Optional[str], session_date: Optional[str], session_id: Optional[str],
+    task_id: Optional[str] = None,
+) -> bool:
+    """A drawer was counted but NOT compared (COMPARISON_UNAVAILABLE, D76):
+    with no variance there is no automatic alert, so a drawer that may be
+    short would go unchecked (owner ruling 2026-08-25). The manager checks it
+    by hand. One task per drawer."""
+    day = str(session_date or "")
+    return _drawer_check_task(
+        store_id=store_id,
+        task_id=task_id,
+        title=f"Check a cash drawer count by hand at {store_id} ({day})",
+        description=(
+            f"A {day} cash drawer at store {store_id} was counted, but its "
+            "count could not be compared with expected cash because an earlier "
+            "drawer that day was recorded by an older version. Check the count "
+            f"against the drawer's own sales on the {ZREAD_SCREEN_NAME} screen "
+            "(Finance menu)."
+        ),
+        dedupe_ref=f"till_uncompared:{store_id}:{day}:{session_id}",
+        payload={"store_id": store_id, "session_date": day, "session_id": session_id},
+    )
+
+
+# ---------------------------------------------------------------------------
+# The manager follow-up a committed close / count / lock still owes
+# ---------------------------------------------------------------------------
+# A manager task is raised AFTER the write that commits the close. When the
+# reply to that write was lost, or the process stopped in between, the task was
+# lost for good: the retry found the record already closed and stopped there
+# (Codex F-1421-R3-A). So the committing write itself now records what it owes
+# (``manager_followup``), and whatever next meets the record -- the same
+# request, its retry, or a read -- raises it and marks it paid. Every owed task
+# has a fixed id, so raising it twice stores it once.
+#
+# The AUDIT ROW of a till write (open, blind count, lock, reopen) is owed the
+# same way (lead decision D84): it rides on the same record as an ``audit``
+# entry with a fixed ``log_id``, so a write whose request did not carry on (a
+# lost acknowledgement whose read-back failed too, a stopped process) still
+# gets its one row from the identical retry or the next read.
+
+_SESSION_READ_FAILED = (
+    "The till could not be read just now. Nothing was changed. Try again in a moment."
+)
+
+FOLLOWUP_FIELD = "manager_followup"
+
+
+def followup_task_id(kind: str, *key: Any) -> str:
+    """The fixed id of ONE owed task (same shape as a generated task id)."""
+    raw = ":".join([kind, *(str(k) for k in key)])
+    return "TSK-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:10].upper()
+
+
+def owed_followup(*tasks: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """What a committing write stores under ``manager_followup``. Each task is
+    ``{"kind": variance | uncounted | uncompared, **the raiser's arguments}``;
+    a None is skipped."""
+    owed = [t for t in tasks if t]
+    # ``id`` names THIS write of the field: marking it paid never clears a
+    # later write (a lock restating what the count owed).
+    return {"id": uuid.uuid4().hex, "pending": bool(owed), "tasks": owed}
+
+
+def owed_audit(
+    action: str,
+    *,
+    session_id: str,
+    at: datetime,
+    actor: Optional[Dict[str, Any]],
+    store_id: Optional[str],
+    before: Any = None,
+    after: Any = None,
+    detail: Optional[Dict[str, Any]] = None,
+    severity: str = "INFO",
+) -> Dict[str, Any]:
+    """The audit row a till write owes, as an entry for ``owed_followup``: the
+    whole row, decided BEFORE the write and stored WITH it. ``log_id`` is
+    fixed by (action, session, instant of the write), so writing the row twice
+    stores it once, and a reopen and relock (a later instant) is a new row."""
+    stamp = _stored_instant(at)
+    raw = f"{action}:{session_id}:{stamp.isoformat()}"
+    return {
+        "kind": "audit",
+        "row": {
+            "log_id": "AUD-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12].upper(),
+            "action": action,
+            "entity_type": "till_session",
+            "entity_id": session_id,
+            "store_id": store_id or (actor or {}).get("active_store_id"),
+            "user_id": (actor or {}).get("user_id"),
+            "user_name": (actor or {}).get("full_name") or (actor or {}).get("username"),
+            "severity": severity,
+            "source": "eod_tally",
+            "before_state": before,
+            "after_state": after,
+            "detail": detail or {},
+            # When the write happened: the row itself may be written later,
+            # by the retry or read that repairs it.
+            "occurred_at": stamp,
+        },
+    }
+
+
+def unpaid_followup_tasks(doc: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The tasks a record still owes, for a later write that restates the
+    field (a lock after a count) to carry forward."""
+    owed = (doc or {}).get(FOLLOWUP_FIELD) or {}
+    return list(owed.get("tasks") or []) if owed.get("pending") else []
+
+
+def settle_followup(coll, key: Dict[str, Any], doc: Optional[Dict[str, Any]]) -> None:
+    """Raise the manager task(s) and write the audit row the stored record
+    ``doc`` still owes, and mark them paid. Nothing owed -> nothing read or
+    written. One that cannot be stored leaves the record owing, for the next
+    retry or read. Never raises: the close that owes it is already committed."""
+    owed = (doc or {}).get(FOLLOWUP_FIELD) or {}
+    if not owed.get("pending"):
         return
+    raisers = {
+        "variance": raise_variance_task,
+        "uncounted": raise_count_not_on_till_task,
+        "uncompared": raise_count_not_compared_task,
+        "audit": _audit,
+    }
+    try:
+        paid = [
+            bool(raisers[t["kind"]](**{k: v for k, v in t.items() if k != "kind"}))
+            for t in owed.get("tasks") or []
+        ]
+        if all(paid):
+            coll.update_one(
+                {**key, f"{FOLLOWUP_FIELD}.id": owed.get("id")},
+                {"$set": {f"{FOLLOWUP_FIELD}.pending": False}},
+            )
+            owed["pending"] = False
+    except Exception:  # noqa: BLE001
+        logger.exception("Manager follow-up could not be settled for %s", key)
+
+
+def _settle_each(coll, docs) -> None:
+    """D110: every read of till drawers pays what each still owes."""
+    for doc in docs:
+        settle_followup(coll, {"_id": doc.get("_id") or doc.get("session_id")}, doc)
+
+
+def settle_drawers(db, session_ids) -> None:
+    """D110: whoever reads or retries a record that NAMES a till drawer (a
+    Cash Register or Day-End close, the Cash Reconciliation) pays what that
+    drawer still owes -- the audit row of its open, count, lock or reopen and
+    any manager task -- not only the Blind EOD screens. One read for the lot;
+    a drawer that owes nothing is left alone. Never raises: a failed read
+    here leaves the rows owed, for the next retry or read."""
+    ids = sorted({str(i) for i in session_ids or [] if i})
+    coll = _sessions_coll(db)
+    if coll is None or not ids:
+        return
+    try:
+        _settle_each(coll, list(coll.find({"_id": {"$in": ids}})))
+    except Exception:  # noqa: BLE001
+        logger.exception("Owed till rows could not be settled for %s", ids)
+
+
+def _stored_instant(value: Any) -> Any:
+    """A datetime as Mongo hands it back (millisecond precision)."""
+    if isinstance(value, datetime):
+        return value.replace(microsecond=value.microsecond // 1000 * 1000, tzinfo=None)
+    return value
+
+
+def _own_write_landed(
+    coll, session_id: str, status: str, at_field: str, by_field: str,
+    now: datetime, actor: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """After a guarded write RAISED: read the session back and return it when
+    it shows THIS request's write (same status, same instant, same person) --
+    the write committed and only its acknowledgement was lost. None when it
+    did not land, landed from someone else, or cannot be read."""
+    try:
+        present = coll.find_one({"_id": session_id})
+    except Exception:  # noqa: BLE001
+        return None
+    if (
+        present is not None
+        and str(present.get("status")) == status
+        and _stored_instant(present.get(at_field)) == _stored_instant(now)
+        and present.get(by_field) == (actor or {}).get("user_id")
+    ):
+        return present
+    return None
 
 
 def variance_status(variance_paisa: int, tolerance_paisa: int = 0) -> str:
@@ -326,11 +647,13 @@ def compute_expected(
 
     The per-tender ``by_mode`` from E5 rides along so the Z-Read can show sales by
     tender (UPI/CARD/etc.) -- only CASH feeds the drawer-expected figure. DB
-    absent -> a zero-sales envelope (never raises)."""
+    absent -> a zero-sales envelope. A FAILED orders or returns read RAISES
+    (strict): a zero from a read that failed would be stored as this drawer's
+    sales and, under D60, pushed onto the next drawer as a false shortage."""
     from . import tender_reconciliation as tr
 
     recon = tr.reconcile_window(
-        db, store_id, window_start, window_end, include_returns=True
+        db, store_id, window_start, window_end, include_returns=True, strict=True
     )
     by_mode = recon.get("by_mode") or {}
     cash_row = by_mode.get("CASH") or {}
@@ -380,7 +703,7 @@ def auto_cash_payouts_paisa(db, store_id: str, window_start: Any, window_end: An
     Z-Read identity is no longer a figure a cashier types into a box -- it is
     what the Expenses screen already recorded. ONE implementation on purpose:
     this delegates to finance's ``_cash_expenses_for_window`` (CASH-mode,
-    APPROVED/PAID/SENT_TO_ACCOUNTANT/REIMBURSED, payroll-shaped heads
+    committed per utils/expense_status (ENTERED included), payroll-shaped heads
     excluded), the SAME function the Finance close charges the drawer with --
     so the two doors can never disagree about the day's payouts.
 
@@ -388,23 +711,435 @@ def auto_cash_payouts_paisa(db, store_id: str, window_start: Any, window_end: An
     so the upper bound handed to the IST-day filter is the last instant INSIDE
     the window -- passing the exclusive end verbatim would pull in a whole
     extra day of expenses. Lazy import (the router imports this module).
-    Fail-soft to (0, 0), same as the finance close's own read.
+    A FAILED expenses read RAISES (strict), never (0, 0): a payout leg of zero
+    from a read that failed made this drawer short and, under D60, the next
+    drawer over by the same amount. blind_submit refuses the count (503).
 
     Returns ``(payouts_paisa, off_till_excluded_count)`` -- the second figure
     is a COUNT of payroll-shaped expenses deliberately left out (never their
     amount), so the session can say its payouts leg omits something."""
     from datetime import timedelta
 
-    try:
-        from ..routers.finance import _cash_expenses_for_window
+    from ..routers.finance import _cash_expenses_for_window
 
-        start_iso = window_start.isoformat() if hasattr(window_start, "isoformat") else str(window_start)
-        end_inside = window_end - timedelta(seconds=1) if hasattr(window_end, "isoformat") else window_end
-        end_iso = end_inside.isoformat() if hasattr(end_inside, "isoformat") else str(end_inside)
-        win = _cash_expenses_for_window(db, store_id, start_iso, end_iso)
-        return _to_int_paisa_from_rupees(win.total), int(win.excluded_count or 0)
-    except Exception:  # noqa: BLE001
-        return 0, 0
+    start_iso = window_start.isoformat() if hasattr(window_start, "isoformat") else str(window_start)
+    end_inside = window_end - timedelta(seconds=1) if hasattr(window_end, "isoformat") else window_end
+    end_iso = end_inside.isoformat() if hasattr(end_inside, "isoformat") else str(end_inside)
+    win = _cash_expenses_for_window(db, store_id, start_iso, end_iso, strict=True)
+    return _to_int_paisa_from_rupees(win.total), int(win.excluded_count or 0)
+
+
+# Who made a drawer's count (``blind_count_origin``): one of these, or the id
+# of the Cash Register session whose close counted it.
+COUNT_ORIGIN_TILL = "TILL"
+COUNT_ORIGIN_DAY_END = "DAY_END"
+
+
+def _counted_drawers(db, session: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The OTHER drawers of this session's shop-day that already carry a
+    count (BLIND_SUBMITTED or LOCKED). Raises when the read fails."""
+    coll = _sessions_coll(db)
+    if coll is None:
+        raise RuntimeError("till sessions unavailable")
+    own = session.get("_id") or session.get("session_id")
+    others = [
+        s
+        for s in coll.find(
+            {
+                "store_id": session.get("store_id"),
+                "session_date": session.get("session_date"),
+                "status": {"$in": [STATUS_BLIND_SUBMITTED, STATUS_LOCKED]},
+            }
+        )
+        if (s.get("_id") or s.get("session_id")) != own
+    ]
+    _settle_each(coll, others)
+    return others
+
+
+def _own_share(exp: Dict[str, Any], earlier: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """D60: a drawer's expected cash is its OWN float plus the cash that moved
+    in its OWN shift, never the whole day's.
+
+    ``exp`` is the whole day so far. Every drawer of the day already counted
+    stored the cash it was charged with at its count, and those shares add up
+    to the day up to the last count. So this drawer's share is the day so far
+    minus theirs: the cash that moved after the last earlier count, including a
+    balance paid now on an order opened in an earlier shift, and payouts
+    (booked by day only) not already charged. Each earlier drawer is
+    subtracted once, whatever its order or opened_at. A one-drawer day never
+    comes here, so its figures are exactly as before."""
+
+    def _taken(field: str) -> int:
+        return sum(int(s.get(field) or 0) for s in earlier)
+
+    # ponytail: clamped at 0 -- a record edited after an earlier count can
+    # leave a negative remainder; a negative sale or payout is never this
+    # drawer's. Per-shift ledgers would remove the clamp if that ever matters.
+    sales = max(int(exp["cash_sales_paisa"]) - _taken("cash_sales_paisa"), 0)
+    refunds = max(int(exp["cash_refunds_paisa"]) - _taken("cash_refunds_paisa"), 0)
+    payouts = max(int(exp["cash_payouts_paisa"]) - _taken("cash_payouts_paisa"), 0)
+    expected = int(exp["opening_float_paisa"]) + sales - refunds - payouts
+
+    def _prior(tender: str, key: str) -> float:
+        return sum(
+            float((((s.get("by_mode") or {}).get(tender) or {}).get(key)) or 0)
+            for s in earlier
+        )
+
+    by_mode = {}
+    for tender, row in (exp.get("by_mode") or {}).items():
+        collected = max(round(float(row.get("collected") or 0) - _prior(tender, "collected"), 2), 0.0)
+        refunded = max(round(float(row.get("refunded") or 0) - _prior(tender, "refunded"), 2), 0.0)
+        count = max(int(row.get("count") or 0) - int(_prior(tender, "count")), 0)
+        by_mode[tender] = {
+            **row,
+            "collected": collected,
+            "refunded": refunded,
+            "net": round(collected - refunded, 2),
+            "count": count,
+        }
+    return {
+        **exp,
+        "cash_sales_paisa": sales,
+        "cash_refunds_paisa": refunds,
+        "cash_payouts_paisa": payouts,
+        "expected_cash_paisa": expected,
+        "refund_double_entry_advisory": refunds > 0 and payouts > 0,
+        "negative_expected_advisory": expected < 0,
+        "by_mode": by_mode,
+    }
+
+
+# ---------------------------------------------------------------------------
+# D127: ONE rule for what a till drawer holds -- its latest count by ANY door
+# plus the cash moved since. The Cash Register close (its expected cash), a
+# new drawer's opening share (D60, blind_submit), the Cash Reconciliation
+# (which close is a later count, the D121 line) and the count's own alert id
+# (D128) all read it here; no reader keeps a copy.
+# ---------------------------------------------------------------------------
+
+_REGISTER_SESSIONS = "cash_register_sessions"
+
+# What a CLOSED Cash Register close is, read as a LATER count of a drawer.
+LATER_SHEET = "SHEET"  # its own sheet, with the cash it was charged since the previous count
+LATER_BANKED = "BANKED"  # no sheet anyone can start from; its bank deposit left the drawer
+LATER_UNKNOWN = "UNKNOWN"  # IMS cannot tell which drawer its cash or deposit was on
+
+# Why a register close compared nothing (stored as ``comparison_withheld_reason``).
+EARLIER_CLOSE_DRAWER_UNKNOWN = "EARLIER_CLOSE_DRAWER_UNKNOWN"
+EARLIER_CLOSE_DRAWER_UNKNOWN_MESSAGE = (
+    "An earlier Cash Register close today could not be placed on one drawer, "
+    "so this close's cash is not compared. Nothing is shown as short or over."
+)
+
+
+def _instant(value: Any) -> Optional[datetime]:
+    """A stored instant as naive UTC: a datetime, or the register's ISO
+    string (naive UTC, written by ``_iso_now``). None when it is neither."""
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is not None:
+        value = value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value
+
+
+def count_task_id(drawer_id: Any) -> str:
+    """D128(1): the ONE id of the manager task for a till drawer's count,
+    whichever door raises it (the Z-Read lock, or a Cash Register close that
+    meets the count unexplained). Insert-once under this id: a task completed
+    early never lets a second one be raised for the same count (a reopened
+    drawer keeps its count, so a relock raises none either)."""
+    return followup_task_id("variance", "count", drawer_id)
+
+
+def close_as_count(
+    close: Dict[str, Any], drawer: Optional[Dict[str, Any]], unplaced: bool = False
+) -> Optional[Dict[str, Any]]:
+    """D127: one CLOSED Cash Register close read as a LATER count of the till
+    drawer ``drawer`` (closed after the drawer's own count), or None when it
+    is not one: the close that made the drawer's count, a close before that
+    count, or one that only repeated it.
+
+    * ``SHEET``: judged on its own sheet from an earlier count (D120), or
+      stored on a new sheet over its own first count (``till_since_count``).
+      Its counted cash is the starting figure AS STORED (its expected was
+      already net of its bank deposit, D127(1)); ``cash_*_paisa`` / ``by_mode``
+      are what it was charged with since the previous count.
+    * ``BANKED``: no sheet the next close can start from -- closed without a
+      count, adopted the till's, nothing could judge it (D76), or its till
+      link FAILED (its window was never read against the day: starting from
+      its sheet would charge a sale made between two sessions as a shortage,
+      and would hide a difference it held). Its bank deposit is carried.
+    * ``UNKNOWN``: IMS cannot tell which drawer its cash or deposit was on --
+      a several-drawer close (D53) that was open while this drawer was
+      counted and began before it opened, or ``unplaced`` (D137(1), see
+      ``_unplaced_closes``): it BANKED cash and names no drawer, or its till
+      link FAILED while it was open across two drawers. D127(2): the next
+      close is then not compared; never a shortage IMS cannot prove. A close
+      that names no drawer and banked nothing took no cash out of any
+      drawer: it is not a count of this one (None) and blocks nothing."""
+    d = drawer or {}
+    at = _instant(close.get("closed_at"))
+    if at is None or d.get("blind_count_paisa") is None:
+        return None
+    since = close.get("till_since_count")
+    deposit = _to_int_paisa_from_rupees(close.get("bank_deposit") or 0)
+    entry = {"at": at, "session_id": close.get("session_id"), "bank_deposit_paisa": deposit}
+    status = close.get("variance_status")
+    # A close that started from the count (D120) or was stored on a new
+    # sheet over it is later than it by construction; the others are placed
+    # by their close instant against the count's.
+    if not (since or close.get("till_counted_earlier")):
+        count_at = _instant(d.get("blind_submitted_at"))
+        if count_at is None or at <= count_at:
+            return None
+        if d.get("blind_count_origin") == close.get("session_id"):
+            return None
+        if close.get("till_session_id") is None:
+            return {**entry, "kind": LATER_UNKNOWN} if unplaced else None
+    if since or close.get("till_counted_earlier"):
+        # Not compared only because an earlier close could not be placed
+        # (D127(2)): its sheet and the cash it was charged with are known,
+        # so the next close starts from it and is compared again.
+        unplaced = close.get("comparison_withheld_reason") == EARLIER_CLOSE_DRAWER_UNKNOWN
+        if since or not (
+            close.get("counted") is None
+            or close.get("counted_from_shared_record")
+            or (status == COMPARISON_UNAVAILABLE and not unplaced)
+        ):
+            return {
+                **entry,
+                "kind": LATER_SHEET,
+                "counted_paisa": _to_int_paisa_from_rupees(close.get("counted")),
+                **(
+                    since
+                    or {
+                        "cash_sales_paisa": _to_int_paisa_from_rupees(close.get("cash_sales") or 0),
+                        "cash_refunds_paisa": _to_int_paisa_from_rupees(close.get("cash_refunds") or 0),
+                        "cash_payouts_paisa": _to_int_paisa_from_rupees(close.get("cash_expenses") or 0),
+                        "by_mode": close.get("by_mode_breakdown") or {},
+                    }
+                ),
+            }
+        return {**entry, "kind": LATER_BANKED}
+    if close.get("till_link_ok") is False:
+        return {**entry, "kind": LATER_UNKNOWN if unplaced else LATER_BANKED}
+    if status == "SEVERAL_DRAWERS":
+        return {**entry, "kind": LATER_UNKNOWN}
+    return None
+
+
+def _open_across(close: Dict[str, Any], drawer: Dict[str, Any]) -> bool:
+    """The register session ``close`` was open when ``drawer`` opened (both
+    instants naive UTC). A drawer or session with no instant cannot be
+    placed and is not this case."""
+    began = _instant(close.get("opened_at"))
+    ended = _instant(close.get("closed_at"))
+    opened = _instant(drawer.get("opened_at"))
+    return bool(began and ended and opened and began < opened < ended)
+
+
+def _unplaced_closes(db, drawer: Dict[str, Any]):
+    """D135(3), D136(3), D137(1): THE test of an earlier Cash Register close
+    IMS cannot place, read by ``drawer_counts`` (after a count) and
+    ``banked_before_count`` (before it) alike. Such a close blocks a drawer's
+    comparison ONLY when it BANKED cash (bank_deposit > 0) AND IMS cannot
+    place it on one drawer:
+
+    * its till link FAILED and ANOTHER drawer of the shop-day opened while it
+      was open: its deposit may have left either drawer -- the one it names
+      (its deposit is not taken off it) or the one that opened inside it
+      (found here, though it names the other); or
+    * it names no drawer at all (till_session_id None) and closed on the
+      drawer's shop and IST day.
+
+    A close that banked nothing took no cash out of any drawer, so it
+    withholds nothing: a real shortage beyond the band is noted and alerted
+    (owner 2026-08-25). Its cash sales are the day's, which D60 charges by
+    day, never by register session.
+
+    Returns ``(failed, no_drawer, unplaced)``: the shop-day's CLOSED
+    failed-link closes that name a drawer and banked cash, the shop-day's
+    closes that name no drawer, and the ids of the closes that block.
+    RAISES when a read fails: read as "none", a deposit is carried to a
+    drawer it may never have left, or charged to none."""
+    from ..utils.ist import ist_date_str
+
+    coll = db.get_collection(_REGISTER_SESSIONS)
+    did = drawer.get("session_id") or drawer.get("_id")
+    store = drawer.get("store_id")
+    day = drawer.get("session_date")
+
+    def _on_day(c: Dict[str, Any]) -> bool:
+        return ist_date_str(_instant(c.get("closed_at"))) == day
+
+    def _banked(c: Dict[str, Any]) -> bool:
+        return _to_int_paisa_from_rupees(c.get("bank_deposit") or 0) > 0
+
+    failed = [
+        c
+        for c in coll.find({"store_id": store, "status": "CLOSED", "till_link_ok": False})
+        if _on_day(c) and c.get("till_session_id") is not None and _banked(c)
+    ]
+    no_drawer = [
+        c
+        for c in coll.find({"store_id": store, "status": "CLOSED", "till_session_id": None})
+        if _on_day(c)
+    ]
+    unplaced = {c.get("session_id") for c in no_drawer if _banked(c)}
+    unplaced |= {
+        c.get("session_id")
+        for c in failed
+        if c.get("till_session_id") != did and _open_across(c, drawer)
+    }
+    if any(c.get("till_session_id") == did for c in failed):
+        tills = _sessions_coll(db)
+        if tills is None:
+            raise RuntimeError("till sessions unavailable")
+        others = [
+            s
+            for s in tills.find({"store_id": store, "session_date": day})
+            if (s.get("_id") or s.get("session_id")) != did
+        ]
+        unplaced |= {
+            c.get("session_id")
+            for c in failed
+            if c.get("till_session_id") == did and any(_open_across(c, o) for o in others)
+        }
+    return failed, no_drawer, unplaced
+
+
+def drawer_counts(db, drawer: Dict[str, Any], own: Optional[str] = None) -> Dict[str, Any]:
+    """D127: every LATER count of ``drawer`` by a Cash Register close (see
+    ``close_as_count``), oldest first, leaving out the close ``own``:
+    ``{"sheets", "banked", "unknown", "count_noted"}``. A close that names
+    no drawer is read from the drawer's shop and IST day. ``count_noted``:
+    one of them already met the drawer's own count unexplained and owes its
+    alert (``till_count_variance``).
+
+    RAISES when the read fails: read as "none", a deposit or a shortage an
+    earlier session already accounted for is charged again."""
+    coll = db.get_collection(_REGISTER_SESSIONS)
+    did = drawer.get("session_id") or drawer.get("_id")
+    closes = list(coll.find({"till_session_id": did, "status": "CLOSED"}))
+    failed, no_drawer, unplaced = _unplaced_closes(db, drawer)
+    closes += no_drawer
+    closes += [c for c in failed if c.get("session_id") in unplaced and c.get("till_session_id") != did]
+    out: Dict[str, Any] = {"sheets": [], "banked": [], "unknown": [], "count_noted": False}
+    for c in closes:
+        if c.get("session_id") == own:
+            continue
+        later = close_as_count(c, drawer, unplaced=c.get("session_id") in unplaced)
+        if later is None:
+            continue
+        out["count_noted"] = out["count_noted"] or c.get("till_count_variance") is not None
+        bucket = {LATER_SHEET: "sheets", LATER_BANKED: "banked", LATER_UNKNOWN: "unknown"}
+        out[bucket[later["kind"]]].append(later)
+    for key in ("sheets", "banked", "unknown"):
+        out[key].sort(key=lambda c: c["at"])
+    return out
+
+
+def banked_before_count(db, drawer: Dict[str, Any], own: Optional[str] = None) -> Optional[int]:
+    """D127 (one count, one figure): the bank deposits recorded on the CLOSED
+    Cash Register sessions of a drawer that is not counted yet, leaving out
+    the close ``own`` (the one counting it now passes its own deposit).
+
+    The drawer is still OPEN, so none of these closes made its count: closed
+    without a sheet, or their till link failed. Their deposits left this
+    drawer before its count and are taken off the count's expected cash.
+    Left out, the drawer's count read SHORT by cash recorded as banked (in
+    the totals and at its Z-Read lock: a note and an alert), while every
+    register close balanced. ``close_as_count`` carries such a deposit only
+    AFTER the count; this is the window before it, so each deposit is taken
+    off once.
+
+    None (D136(3), D137(1)): an earlier close that BANKED cash and that the
+    SAME test as ``drawer_counts`` cannot place (``_unplaced_closes``: its
+    till link failed while it was open across two drawers, or it names no
+    drawer on the shop's IST day), so IMS cannot tell whether its deposit
+    left this drawer: the count is not compared. RAISES when a read fails:
+    read as "none", the count would store that false shortage."""
+    did = drawer.get("session_id") or drawer.get("_id")
+    _failed, _no_drawer, unplaced = _unplaced_closes(db, drawer)
+    if unplaced - {own}:
+        return None
+    closes = db.get_collection(_REGISTER_SESSIONS).find({"till_session_id": did, "status": "CLOSED"})
+    return sum(
+        _to_int_paisa_from_rupees(c.get("bank_deposit") or 0)
+        for c in closes
+        if c.get("session_id") != own
+    )
+
+
+def _charged(db, drawers: List[Dict[str, Any]], own: Optional[str] = None) -> List[Dict[str, Any]]:
+    """D60 / D127(3): what every count of these drawers was charged with --
+    each drawer's own count and every later sheet on it -- for ``_own_share``
+    to take off the day. Raises when a read fails."""
+    out: List[Dict[str, Any]] = []
+    for d in drawers:
+        out.append(d)
+        out.extend(drawer_counts(db, d, own)["sheets"])
+    return out
+
+
+def standing_count(db, drawer: Dict[str, Any], own: Optional[str] = None) -> Dict[str, Any]:
+    """D127, THE rule: what COUNTED till drawer ``drawer`` holds now, for the
+    Cash Register close ``own`` (left out of its own reading).
+
+    The latest count of the drawer by ANY door -- its till count (Blind EOD,
+    Day-End or the register close that made it) or a later register sheet --
+    less the bank deposits recorded after it on closes with no sheet, plus
+    the cash moved since it by the D60 rule (``_own_share``): the day so far
+    minus what every counted drawer of the day and every later sheet on them
+    was charged with. "Cash since the count's instant" cannot be read back:
+    payouts are booked by day only and orders are read by created_at.
+
+    ``{"paisa", "at", "banked_paisa", "moved", "unknown", "count_noted"}``.
+    ``moved`` is None when the cash since cannot be known: a counted drawer
+    of the day holds an older-code snapshot (D76/D86(3)). ``unknown``: a
+    close after the latest count could not be placed on one drawer, so the
+    asking close compares nothing (D127(2)); ``moved`` is still what it was
+    charged with, so the close after it starts from its sheet.
+    RAISES when a read fails: a zero here would be stored as a variance."""
+    later = drawer_counts(db, drawer, own)
+    sheets = later["sheets"]
+    start = sheets[-1] if sheets else {
+        "at": _instant(drawer.get("blind_submitted_at")),
+        "counted_paisa": int(drawer.get("blind_count_paisa") or 0),
+    }
+    # A count with no stored instant (a legacy row) is before every close.
+    since = start["at"] or datetime.min
+    banked = sum(c["bank_deposit_paisa"] for c in later["banked"] if c["at"] >= since)
+    unknown = any(c["at"] > since for c in later["unknown"])
+    result = {
+        "paisa": int(start["counted_paisa"]) - banked,
+        "at": start["at"],
+        "banked_paisa": banked,
+        "moved": None,
+        "unknown": unknown,
+        "count_noted": later["count_noted"],
+    }
+    counted = [drawer, *_counted_drawers(db, drawer)]
+    if any(s.get("cash_sales_paisa") is None for s in counted) or (
+        len(counted) > 1 and any("expected_net_of_drawers" not in s for s in counted)
+    ):
+        return result
+    store_id = drawer.get("store_id")
+    ws, we = _session_day_window(drawer)
+    payouts, off_till_excluded = auto_cash_payouts_paisa(db, store_id, ws, we)
+    exp = compute_expected(db, store_id, ws, we, result["paisa"], payouts)
+    result["moved"] = {
+        **_own_share(exp, _charged(db, counted, own)),
+        "off_till_excluded": off_till_excluded,
+    }
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -420,8 +1155,15 @@ def compute_face_ledger(
     *,
     opening_count: Optional[Dict[str, Any]] = None,
     closing_count: Optional[Dict[str, Any]] = None,
+    orders_window: Optional[tuple] = None,
 ) -> Dict[str, Any]:
     """Tally the drawer FACE BY FACE across the day.
+
+    ``orders_window`` (one drawer of a several-drawer day): orders are read
+    over that window (the whole day) and each cash payment is placed by WHEN
+    ITS CASH MOVED (received_at / paid_at, else the order's time) inside
+    [window_start, window_end). Without it, as before: every payment of an
+    order created in the window.
 
         opening float
           + notes taken in on every cash sale
@@ -467,14 +1209,31 @@ def compute_face_ledger(
 
     read_ok = True
     if db is not None:
-        match = tr.window_match(store_id, window_start, window_end)
+        if orders_window is not None:
+            match = tr.window_match(store_id, orders_window[0], orders_window[1])
+            # The day's first drawer takes everything before its count and the
+            # last everything after the previous count, so the drawers share
+            # the day's payments exactly (a payment received after midnight on
+            # a day's order stays with the day, as on a one-drawer day).
+            lo = None if window_start == orders_window[0] else tr._to_dt(window_start)
+            hi = None if window_end == orders_window[1] else tr._to_dt(window_end)
+        else:
+            match = tr.window_match(store_id, window_start, window_end)
         try:
             for order in db.get_collection("orders").find(
-                match, {"_id": 0, "payments": 1}
+                match, {"_id": 0, "payments": 1, "created_at": 1}
             ):
                 for pay in order.get("payments") or []:
                     if str((pay or {}).get("method") or "").upper() != "CASH":
                         continue
+                    if orders_window is not None:
+                        moved = tr._to_dt(
+                            (pay or {}).get("received_at")
+                            or (pay or {}).get("paid_at")
+                            or order.get("created_at")
+                        )
+                        if moved is None or (lo and moved < lo) or (hi and moved >= hi):
+                            continue
                     coverage["cash_sale_legs"] += 1
                     tendered = (pay or {}).get("cash_tendered_count")
                     change = (pay or {}).get("cash_change_count")
@@ -671,6 +1430,8 @@ def open_session(
         # The shared drawer already exists. If nobody had declared a float on
         # it and this door just did, that declaration lands -- see
         # _adopt_declared_float.
+        # An open whose reply was lost may still owe its audit row.
+        settle_followup(coll, {"_id": existing.get("_id")}, existing)
         if bool(denoms) or opening_float_paisa is not None:
             existing = _adopt_declared_float(
                 coll,
@@ -732,6 +1493,18 @@ def open_session(
         "locked_by": None,
         "reopen_count": 0,
         "history": [],
+        # The audit row this open owes, stored WITH it.
+        FOLLOWUP_FIELD: owed_followup(
+            owed_audit(
+                "till.open",
+                session_id=session_id,
+                at=now,
+                actor=actor,
+                store_id=store_id,
+                after={"status": STATUS_OPEN, "opening_float_paisa": declared},
+                detail={"session_date": session_date, "shift": (shift or "").upper() or None},
+            )
+        ),
     }
     try:
         coll.insert_one(dict(doc))
@@ -754,17 +1527,19 @@ def open_session(
             existing.pop("_id", None)
             return {"ok": True, "session": existing, "already_open": True}
         return {"ok": False, "error": "already_open", "http": 409}
-    except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "error": f"write_failed:{exc}", "http": 500}
+    except Exception:  # noqa: BLE001
+        # The driver's text (hosts, index names) is for the log, not the reply.
+        logger.exception("Till open failed for %s on %s", store_id, session_date)
+        # The insert may have committed with only its acknowledgement lost
+        # (the id is this request's own).
+        try:
+            landed = coll.find_one({"_id": session_id})
+        except Exception:  # noqa: BLE001
+            landed = None
+        if landed is None:
+            return {"ok": False, "error": "write_failed", "http": 500}
 
-    _audit(
-        "till.open",
-        entity_id=session_id,
-        actor=actor,
-        after={"status": STATUS_OPEN, "opening_float_paisa": declared},
-        store_id=store_id,
-        detail={"session_date": session_date, "shift": doc["shift"]},
-    )
+    settle_followup(coll, {"_id": session_id}, doc)
     doc.pop("_id", None)
     return {"ok": True, "session": doc}
 
@@ -785,6 +1560,8 @@ def blind_submit(
     window_start: Any = None,
     window_end: Any = None,
     idempotency_key: Optional[str] = None,
+    origin: Optional[str] = None,
+    bank_deposit_paisa: int = 0,
     actor: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Cashier posts the denomination counts (BLIND).
@@ -811,10 +1588,16 @@ def blind_submit(
     try:
         session = coll.find_one({"_id": session_id})
     except Exception:  # noqa: BLE001
-        session = None
+        # Unreadable is not absent: "not found" sent staff looking for a
+        # drawer that exists.
+        logger.exception("Till session read failed before counting %s", session_id)
+        return {"ok": False, "error": "session_read_failed", "http": 503, "message": _SESSION_READ_FAILED}
     if session is None:
         return {"ok": False, "error": "not_found", "http": 404}
 
+    # A count that already landed may still owe its manager task (its reply
+    # was lost, or the process stopped before raising it): the retry pays it.
+    settle_followup(coll, {"_id": session_id}, session)
     # Idempotent retry: same key on an already-submitted session -> existing state.
     if str(session.get("status")) == STATUS_BLIND_SUBMITTED:
         if idempotency_key and session.get("idempotency_key") == idempotency_key:
@@ -850,26 +1633,101 @@ def blind_submit(
     # reconciliation matches the day-close; the caller may override the bounds
     # (e.g. a sub-day shift). Computing at blind-submit time stamps computed_at so
     # a sale finalizing the same second is bounded by the day, not missed.
+    earlier: List[Dict[str, Any]] = []
+    charged: List[Dict[str, Any]] = []
     if window_start is not None:
         ws, we = window_start, window_end
     else:
         ws, we = _session_day_window(session)
+        # D60: the shop-day's drawers already counted. Unreadable is refused,
+        # never read as "none": that would charge this drawer with their cash.
+        # D127(3): with every later register sheet on them, so a drawer
+        # opened after another is locked does not inherit cash a sheet on
+        # that drawer already counted.
+        try:
+            earlier = _counted_drawers(db, session)
+            charged = _charged(db, earlier)
+        except Exception:  # noqa: BLE001
+            logger.exception("Drawer read failed before counting %s", session_id)
+            return {"ok": False, "error": "drawer_read_failed", "http": 503}
     # AUTO-PULLED, never hand-typed (owner ruling 2026-08-25): the payouts leg
     # comes from the expenses book for the session window -- the same read the
     # Finance close charges the drawer with.
-    payouts, off_till_excluded = auto_cash_payouts_paisa(db, store_id, ws, we)
-    exp = compute_expected(db, store_id, ws, we, int(session.get("opening_float_paisa", 0) or 0), payouts)
-    expected_cash_paisa = exp["expected_cash_paisa"]
-    variance_paisa = counted - expected_cash_paisa
+    # A failed orders / returns / expenses read is REFUSED, never stored as a
+    # zero: the drawer stays OPEN and the same count can simply be sent again.
+    try:
+        payouts, off_till_excluded = auto_cash_payouts_paisa(db, store_id, ws, we)
+        exp = compute_expected(db, store_id, ws, we, int(session.get("opening_float_paisa", 0) or 0), payouts)
+    except Exception:  # noqa: BLE001
+        logger.exception("Cash read failed before counting %s", session_id)
+        return {
+            "ok": False,
+            "error": "cash_read_failed",
+            "http": 503,
+            "message": (
+                "The day's cash sales or expenses could not be read, so this "
+                "count was not saved. Try again in a moment."
+            ),
+        }
+    # D76: older code stored WHOLE-DAY cash on every drawer (no
+    # expected_net_of_drawers key). Taking such a snapshot off this drawer's
+    # figure would charge it with the wrong cash, so no comparison is made.
+    old_snapshot = any("expected_net_of_drawers" not in s for s in earlier)
+    if earlier and not old_snapshot:
+        exp = _own_share(exp, charged)
+        payouts = exp["cash_payouts_paisa"]
     tol = get_variance_tolerance_paisa(store_id=store_id)
-    # A negative expected drawer means a cash-in is missing (see
-    # compute_expected). Suppress the variance VERDICT rather than crediting the
-    # cashier with a phantom overage; the raw variance number is still stored.
+    # A Cash Register close that counts the drawer may record cash banked
+    # out of it (D127: one count, one figure). Left out here, the till's own
+    # count of that drawer read short by the deposit -- in the totals and at
+    # its Z-Read lock -- where the register close it came from balanced. So
+    # do the drawer's EARLIER register closes that did not count it (no
+    # sheet, or their till link failed): their deposits left it before this
+    # count. Unreadable is refused, never read as "none".
+    # D136(3): None -- an earlier close IMS cannot place on one drawer (its
+    # till link failed while another drawer opened): nothing is compared.
+    try:
+        banked_before = banked_before_count(db, session, origin)
+    except Exception:  # noqa: BLE001
+        logger.exception("Register closes unreadable before counting %s", session_id)
+        return {"ok": False, "error": "drawer_read_failed", "http": 503}
+    unplaced = banked_before is None
+    deposit = max(int(bank_deposit_paisa or 0), 0) + max(banked_before or 0, 0)
+    if deposit:
+        exp = {**exp, "expected_cash_paisa": int(exp["expected_cash_paisa"]) - deposit}
+        exp["negative_expected_advisory"] = exp["expected_cash_paisa"] < 0
     negative_expected = bool(exp.get("negative_expected_advisory"))
-    vstatus = (
-        NEGATIVE_EXPECTED if negative_expected
-        else variance_status(variance_paisa, tol)
-    )
+    if old_snapshot:
+        expected_cash_paisa = variance_paisa = None
+        negative_expected = False
+        vstatus = COMPARISON_UNAVAILABLE
+        # D86(3): the figures above are the WHOLE day's, not this drawer's.
+        # Stored as not available, so no screen or total shows them as its own.
+        exp = {
+            **exp,
+            "cash_sales_paisa": None,
+            "cash_refunds_paisa": None,
+            "refund_double_entry_advisory": False,
+            "by_mode": None,
+        }
+        payouts = None
+    elif unplaced:
+        # D127(2), D136(3): never a shortage IMS cannot prove. The drawer's
+        # own figures stay stored (D60 charges a later drawer with them);
+        # no expected, no variance, no verdict, no note, no alert.
+        expected_cash_paisa = variance_paisa = None
+        negative_expected = False
+        vstatus = COMPARISON_UNAVAILABLE
+    else:
+        expected_cash_paisa = exp["expected_cash_paisa"]
+        variance_paisa = counted - expected_cash_paisa
+        # A negative expected drawer means a cash-in is missing (see
+        # compute_expected). Suppress the variance VERDICT rather than crediting
+        # the cashier with a phantom overage; the raw variance is still stored.
+        vstatus = (
+            NEGATIVE_EXPECTED if negative_expected
+            else variance_status(variance_paisa, tol)
+        )
 
     now = datetime.utcnow()
     # Guarded transition OPEN -> BLIND_SUBMITTED (only one count can land).
@@ -891,6 +1749,7 @@ def blind_submit(
                     ),
                     "blind_count_paisa": counted,
                     "cash_payouts_paisa": payouts,
+                    "bank_deposit_paisa": deposit,
                     # AUTO_EXPENSES: the figure above came from the expenses
                     # book, not a hand-typed box. The advisory says a payroll-
                     # shaped expense was deliberately left out (count only).
@@ -905,38 +1764,83 @@ def blind_submit(
                     "negative_expected_advisory": negative_expected,
                     "variance_paisa": variance_paisa,
                     "variance_status": vstatus,
+                    # Why nothing was compared, when the reason is not the
+                    # status itself (the row says why, D136(3)).
+                    "comparison_withheld_reason": (
+                        EARLIER_CLOSE_DRAWER_UNKNOWN if unplaced and not old_snapshot else None
+                    ),
                     "by_mode": exp["by_mode"],
+                    # D60: drawers of the day whose counted cash was taken off
+                    # this drawer's expected figure ([] on a one-drawer day).
+                    "expected_net_of_drawers": [
+                        s.get("_id") or s.get("session_id") for s in earlier
+                    ],
                     "tolerance_paisa": tol,
                     "computed_at": now,
                     "blind_submitted_at": now,
                     "blind_submitted_by": (actor or {}).get("user_id"),
+                    # WHICH DOOR made this count, stored with it: the Blind
+                    # EOD Tally, Day-End, or the id of the Cash Register
+                    # session whose close counted the drawer (D120 reads it).
+                    "blind_count_origin": origin or COUNT_ORIGIN_TILL,
                     "idempotency_key": idempotency_key,
+                    # Stored WITH the count, so the check-by-hand task cannot
+                    # be lost between this write and the lines below it.
+                    # The row the OPEN still owes is carried forward (a close
+                    # screen opens and counts in one request).
+                    FOLLOWUP_FIELD: owed_followup(
+                        *unpaid_followup_tasks(session),
+                        # Audit records the FULL truth (expected + variance)
+                        # -- the redaction is only for the cashier's HTTP
+                        # response, not the immutable trail.
+                        owed_audit(
+                            "till.blind_submit",
+                            session_id=session_id,
+                            at=now,
+                            actor=actor,
+                            store_id=store_id,
+                            before={"status": STATUS_OPEN},
+                            after={
+                                "status": STATUS_BLIND_SUBMITTED,
+                                "blind_count_paisa": counted,
+                                "expected_cash_paisa": expected_cash_paisa,
+                                "variance_paisa": variance_paisa,
+                            },
+                            detail={"session_date": session.get("session_date")},
+                        ),
+                        {
+                            "kind": "uncompared",
+                            "store_id": store_id,
+                            "session_date": session.get("session_date"),
+                            "session_id": session_id,
+                            "task_id": followup_task_id("uncompared", session_id),
+                        }
+                        if vstatus == COMPARISON_UNAVAILABLE and not (unplaced and not old_snapshot)
+                        else None
+                    ),
                 }
             },
             return_document=ReturnDocument.AFTER,
         )
-    except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "error": f"submit_failed:{exc}", "http": 500}
+    except Exception:  # noqa: BLE001
+        logger.exception("Till blind count failed for session %s", session_id)
+        # The write may have committed with only its acknowledgement lost.
+        # Answering "failed" then told the close screens the count never
+        # reached the till, for a drawer the till shows as counted.
+        updated = _own_write_landed(
+            coll, session_id, STATUS_BLIND_SUBMITTED,
+            "blind_submitted_at", "blind_submitted_by", now, actor,
+        )
+        if updated is None:
+            return {"ok": False, "error": "submit_failed", "http": 500}
     if updated is None:
         # Lost the race (status flipped off OPEN between read and update).
         return {"ok": False, "error": "already_submitted", "http": 409}
 
-    _audit(
-        "till.blind_submit",
-        entity_id=session_id,
-        actor=actor,
-        before={"status": STATUS_OPEN},
-        # Audit records the FULL truth (expected + variance) -- the redaction is
-        # only for the cashier's HTTP response, not the immutable trail.
-        after={
-            "status": STATUS_BLIND_SUBMITTED,
-            "blind_count_paisa": counted,
-            "expected_cash_paisa": expected_cash_paisa,
-            "variance_paisa": variance_paisa,
-        },
-        store_id=store_id,
-        detail={"session_date": session.get("session_date")},
-    )
+    # The audit row, and the check-by-hand task of an uncompared count (D76),
+    # from the record the count stored. Only the one count that landed reaches
+    # here.
+    settle_followup(coll, {"_id": session_id}, updated)
     updated["session_id"] = updated.get("_id")
     return {"ok": True, "session": updated}
 
@@ -961,6 +1865,57 @@ def record_screen_open(db, **kwargs: Any) -> Dict[str, Any]:
         return {"ok": False, "error": f"link_failed:{exc}"}
 
 
+def _drawer_order(session: Dict[str, Any]) -> tuple:
+    """D53 order of a shop-day's drawers, oldest first: opened_at, else
+    created_at (legacy rows), then the id. Datetimes and ISO strings compare
+    in one frame (a datetime's str() has a space where ISO has a 'T')."""
+
+    def _ts(value: Any) -> str:
+        if hasattr(value, "isoformat"):
+            return value.isoformat()
+        return str(value or "")
+
+    stamp = session.get("opened_at") or session.get("created_at")
+    return (_ts(stamp), str(session.get("_id") or session.get("session_id") or ""))
+
+
+def day_drawers(db, store_id: str, session_date: str) -> Optional[List[Dict[str, Any]]]:
+    """Each drawer of a shop-day, oldest first, with ITS OWN count and variance
+    (D53: drawers are never added together and a multi-drawer day has no
+    whole-day variance). The variance is the till's own, and only once a
+    manager has LOCKED that drawer (revealed it); before that it is None, as on
+    the Z-Read. None when the read fails -- the caller still says how many
+    drawers the day had."""
+    coll = _sessions_coll(db)
+    if coll is None:
+        return None
+    try:
+        rows = [
+            s
+            for s in coll.find({"store_id": store_id, "session_date": session_date})
+            if s.get("status") in (STATUS_OPEN, STATUS_BLIND_SUBMITTED, STATUS_LOCKED)
+        ]
+    except Exception:  # noqa: BLE001
+        logger.exception("Drawer list read failed for %s %s", store_id, session_date)
+        return None
+    _settle_each(coll, rows)
+    out = []
+    for s in sorted(rows, key=_drawer_order):
+        locked = s.get("status") == STATUS_LOCKED
+        out.append(
+            {
+                "session_id": s.get("session_id") or s.get("_id"),
+                "status": s.get("status"),
+                "opened_at": s.get("opened_at"),
+                "counted_paisa": s.get("blind_count_paisa"),
+                "variance_paisa": s.get("variance_paisa") if locked else None,
+                "variance_status": s.get("variance_status") if locked else None,
+                "comparison_withheld_reason": s.get("comparison_withheld_reason") if locked else None,
+            }
+        )
+    return out
+
+
 def record_screen_close(db, **kwargs: Any) -> Dict[str, Any]:
     """Fail-soft wrapper. See ``_record_screen_close``.
 
@@ -970,9 +1925,14 @@ def record_screen_close(db, **kwargs: Any) -> Dict[str, Any]:
     than a 500 on the close screen. The screen's own record is written either
     way, and the failure is stored on it rather than swallowed."""
     try:
-        return _record_screen_close(db, **kwargs)
+        link = _record_screen_close(db, **kwargs)
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": f"link_failed:{exc}"}
+    # More than one drawer on the day (D53): the caller stores each drawer's
+    # own count and variance, read AFTER this close's count landed.
+    if link.get("ok") and int(link.get("drawers_on_day") or 1) > 1:
+        link["drawers"] = day_drawers(db, kwargs["store_id"], kwargs["session_date"])
+    return link
 
 
 def _record_screen_close(
@@ -983,6 +1943,8 @@ def _record_screen_close(
     closing_rows: Optional[List[Dict[str, Any]]] = None,
     closing_count_state: Optional[str] = None,
     counted_paisa: Optional[int] = None,
+    origin: Optional[str] = None,
+    bank_deposit_paisa: int = 0,
     actor: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Land a closing count from EITHER close screen on the SAME till session.
@@ -1010,16 +1972,34 @@ def _record_screen_close(
     coll = _sessions_coll(db)
     if coll is None:
         return {"ok": False, "error": "no_db"}
+    # TWO DRAWERS ON ONE DAY (D40): a second drawer can be opened once the
+    # first is LOCKED (open_session only joins OPEN / BLIND_SUBMITTED). An
+    # UNCOUNTED (OPEN) drawer is the one being closed, so it is taken FIRST.
+    # Otherwise the day's LATEST drawer (last opened) is the one the day ended
+    # on -- never whichever row the database returns first, which is the
+    # oldest. A BLIND_SUBMITTED drawer does NOT outrank it: an older drawer can
+    # only be BLIND_SUBMITTED beside a later one through a reopen (the partial
+    # unique index allows one active drawer), and a reopened drawer was
+    # already counted and can never be recounted. Order (D53): opened_at; a
+    # legacy row with no opened_at uses created_at; ties and rows with
+    # neither fall back to the id. A day with one drawer finds that drawer
+    # either way, exactly as before.
     try:
-        existing = coll.find_one(
-            {
-                "store_id": store_id,
-                "session_date": session_date,
-                "status": {"$in": [STATUS_OPEN, STATUS_BLIND_SUBMITTED, STATUS_LOCKED]},
-            }
-        )
+        on_day = [
+            s
+            for s in coll.find({"store_id": store_id, "session_date": session_date})
+            if s.get("status") in (STATUS_OPEN, STATUS_BLIND_SUBMITTED, STATUS_LOCKED)
+        ]
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": f"read_failed:{exc}"}
+    # D110: a close that reads the day's drawers pays what they still owe
+    # (a drawer already counted is not written again below).
+    _settle_each(coll, on_day)
+    uncounted = [s for s in on_day if s.get("status") == STATUS_OPEN]
+    existing = max(uncounted or on_day, key=_drawer_order, default=None)
+    # How many drawers the day has. More than one means the count linked here
+    # is ONE drawer's, not the day's total; the close records say so.
+    drawers_on_day = max(len(on_day), 1)
 
     created = False
     if existing is None:
@@ -1030,7 +2010,11 @@ def _record_screen_close(
             actor=actor,
         )
         if not opened.get("ok"):
-            return {"ok": False, "error": opened.get("error", "open_failed")}
+            return {
+                "ok": False,
+                "error": opened.get("error", "open_failed"),
+                "drawers_on_day": drawers_on_day,
+            }
         existing = opened["session"]
         created = not opened.get("already_open", False)
 
@@ -1051,6 +2035,7 @@ def _record_screen_close(
             "session": existing,
             "created": created,
             "opening_float_not_recorded": float_missing,
+            "drawers_on_day": drawers_on_day,
             "already_counted": True,
         }
 
@@ -1069,6 +2054,7 @@ def _record_screen_close(
             "session": existing,
             "created": created,
             "opening_float_not_recorded": float_missing,
+            "drawers_on_day": drawers_on_day,
             "already_counted": False,
             "counted": False,
             "not_captured": True,
@@ -1085,19 +2071,34 @@ def _record_screen_close(
         closing_count_state=closing_count_state,
         blind_count_paisa=forward_total,
         allow_uncounted_total=not rows,
+        origin=origin,
+        bank_deposit_paisa=bank_deposit_paisa,
         actor=actor,
     )
     if not res.get("ok"):
         if res.get("error") in ("already_submitted", "already_locked"):
+            # Lost the race to count: the other door's count landed between our
+            # read and our submit. Carry the session as it stands NOW, so the
+            # caller reports the count that won (shared_counted_paisa) instead
+            # of its own.
             return {
                 "ok": True,
                 "session_id": session_id,
+                "session": get_session(db, session_id),
                 "created": created,
-            "opening_float_not_recorded": float_missing,
+                "opening_float_not_recorded": float_missing,
+                "drawers_on_day": drawers_on_day,
                 "already_counted": True,
                 "counted": True,
             }
-        return {"ok": False, "error": res.get("error", "submit_failed")}
+        # The day's drawer count is known even though this count did not land:
+        # the closing screen must not judge one drawer against the whole
+        # day's cash (D53) just because the link failed.
+        return {
+            "ok": False,
+            "error": res.get("error", "submit_failed"),
+            "drawers_on_day": drawers_on_day,
+        }
     submitted = int((res["session"] or {}).get("blind_count_paisa") or 0)
     return {
         "ok": True,
@@ -1105,6 +2106,7 @@ def _record_screen_close(
         "session": res["session"],
         "created": created,
         "opening_float_not_recorded": float_missing,
+        "drawers_on_day": drawers_on_day,
         "already_counted": False,
         "counted": True,
         "submitted_paisa": submitted,
@@ -1117,9 +2119,198 @@ def _record_screen_close(
     }
 
 
+def withheld_comparison(till_link: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Why a closing screen must NOT judge its count against its own window's
+    whole-day expected cash, or None when it may. ONE rule for both close
+    doors (Finance > Cash Register and Day-End):
+
+    * more than one drawer on the shop-day -> SEVERAL_DRAWERS (D53), whether
+      or not this close's count landed on the till;
+    * the link failed before the day's drawers could be read -> the drawer
+      count is unknown, so a whole-day comparison could be a false shortage
+      -> COMPARISON_UNAVAILABLE. Nothing is judged and no alert is raised
+      here; the till's own blind count still judges the drawer.
+
+    A one-drawer day (link ok, or failed after the drawers were read) keeps
+    exactly its old comparison."""
+    link = till_link or {}
+    drawers = link.get("drawers_on_day")
+    if drawers is not None and int(drawers) > 1:
+        return "SEVERAL_DRAWERS"
+    if not link.get("ok") and drawers is None:
+        return COMPARISON_UNAVAILABLE
+    return None
+
+
+def shared_counted_paisa(till_link: Optional[Dict[str, Any]]) -> Optional[int]:
+    """The counted figure ON THE SHARED TILL RECORD after a close linked to it
+    (the dict ``record_screen_close`` returned), or None when nothing was
+    counted there or the link failed.
+
+    This is the ONE answer for the store-day: whichever door counted the drawer
+    first owns it, and BOTH close screens (Finance > Cash Register and the
+    Day-End Report) must report that same number."""
+    session = (till_link or {}).get("session") or {}
+    value = session.get("blind_count_paisa")
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def count_by_another(
+    till_link: Optional[Dict[str, Any]],
+    opened_at: Any,
+    own: Optional[str] = None,
+    opened_on: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """D120: the drawer's count that a Cash Register close (session id
+    ``own``) did NOT make itself, as ``{"paisa", "at"}``, or None: a count
+    already standing when the session opened, or one made through ANOTHER
+    door (the Blind EOD Tally, Day-End) while it was open.
+
+    Such a close starts from that count: it is judged on its own sheet against
+    that count plus the cash moved since it -- never the earlier count against
+    the later cash (a shortage that does not exist).
+
+    A count made while the session was open is this case only when the till
+    recorded WHO made it (``blind_count_origin``) and it was not this session.
+    The session's own close lands its count on the till BEFORE the note check
+    (on a several-drawer day the figure the note is judged on is the till's
+    own, known only once the count lands), so a close refused for its note
+    and sent again finds the drawer already counted by itself: judged from
+    that count, a real shortage would read balanced. A count with no origin
+    (stored by the previous version) cannot be told apart and is read the
+    same way. Both instants are naive UTC; a count with no recorded instant
+    cannot be placed and is not this case either.
+
+    SEVERAL DRAWERS ON THE DAY: a session that began before the day's latest
+    drawer opened and was open while that drawer was counted may span more
+    than one drawer, and its sheet may hold more than that one drawer's cash
+    (D53): nothing is compared for it, and the next close on the drawer is
+    not compared either (``close_as_count``: UNKNOWN, D127(2)). A session
+    that opened on that drawer lives on it and is judged from its count, also
+    when the count was made while it was open. WHICH drawer a session opened
+    on is the one its own open stored (``opened_on``, the register row's
+    ``till_session_id``), never a comparison of the two instants: a register
+    open that CREATES the drawer stamps its own instant first, so the session
+    that opened the drawer read as one that began before it. Only a session
+    whose open named no drawer (its link failed, or older code) is placed by
+    the instants."""
+    link = till_link or {}
+    at = (link.get("session") or {}).get("blind_submitted_at")
+    origin = (link.get("session") or {}).get("blind_count_origin")
+    paisa = shared_counted_paisa(link)
+    if not link.get("already_counted") or paisa is None:
+        return None
+    at = _instant(at)
+    if at is None or not isinstance(opened_at, datetime):
+        return None
+    while_open = at > opened_at
+    # D127(2): a several-drawer session that began BEFORE this drawer opened
+    # may hold another drawer's cash (Codex's D53 replay: Rs 1,000 + Rs 3,000
+    # on one sheet), so IMS cannot tell its drawer and compares nothing. One
+    # that opened on this drawer lives on it and is judged from its count.
+    drawer_id = link.get("session_id") or (link.get("session") or {}).get("session_id")
+    drawer_opened = _instant((link.get("session") or {}).get("opened_at"))
+    on_drawer = (
+        opened_on == drawer_id
+        if opened_on
+        else drawer_opened is not None and opened_at >= drawer_opened
+    )
+    spans = int(link.get("drawers_on_day") or 1) > 1 and not on_drawer
+    if origin == own or (while_open and (not origin or spans)):
+        return None
+    return {"paisa": paisa, "at": at}
+
+
+def unlocked_count_variance(drawer: Optional[Dict[str, Any]]) -> tuple:
+    """``(variance_paisa, tolerance_paisa)`` of a drawer's OWN count while no
+    lock has taken its note. The variance is None once the drawer is LOCKED
+    (its lock took the note and raised the alert) or when it has none; the
+    band is the one stored with the count, None on a legacy row."""
+    d = drawer or {}
+    band = d.get("tolerance_paisa")
+    return (
+        d.get("variance_paisa") if d.get("status") != STATUS_LOCKED else None,
+        int(band) if band is not None else None,
+    )
+
+
+def count_awaiting_its_note(
+    db, drawer: Optional[Dict[str, Any]], own: Optional[str] = None, default_band: Any = 0
+) -> Optional[Dict[str, int]]:
+    """The drawer's own count when it is beyond the band and NOBODY has taken
+    its note yet, as ``{"variance_paisa", "tolerance_paisa"}``; else None.
+
+    Owner ruling 2026-08-25: above the band an explanation is mandatory and
+    the manager is alerted. D128(1): the difference is explained ONCE, by the
+    door that owns the count -- a Blind EOD or Day-End count at its Z-Read
+    lock, a register close's own count at that close. A later Cash Register
+    close that meets such a count unexplained asks no note for it: it shows
+    it and owes the count's alert under ``count_task_id`` (insert-once, the
+    lock's id), so a shortage nobody locked is still told to the manager,
+    once. Only when the count is the asking close's OWN (``own``: refused
+    for its note and sent again on another sheet) does it still need the
+    note there.
+
+    Not awaiting: a LOCKED drawer (its lock took both); a count made by
+    ANOTHER register session's close that explained it (its own judged
+    figure WAS this count, noted and alerted at that close: the same test
+    the lock uses, ``_register_close_note``). A count that close did not
+    explain (it judged its own window, another figure) is awaiting like a
+    Blind EOD count: else a count beyond the band never locked reached
+    nobody. ``own``: the register session asking -- its own count, refused
+    for the note, is still awaiting it. A count with no recorded door
+    (stored by the previous version) is read as awaiting."""
+    d = drawer or {}
+    origin = d.get("blind_count_origin")
+    if origin not in (None, COUNT_ORIGIN_TILL, COUNT_ORIGIN_DAY_END, own) and _register_close_note(db, d):
+        return None
+    variance, band = unlocked_count_variance(d)
+    band = default_band if band is None else band
+    if not needs_variance_note(variance, band):
+        return None
+    return {"variance_paisa": int(variance), "tolerance_paisa": int(band or 0)}
+
+
 # ---------------------------------------------------------------------------
 # Lifecycle: lock (manager reveals variance + soft-locks the Z-Read)
 # ---------------------------------------------------------------------------
+
+
+def _register_close_note(db, drawer: Dict[str, Any]) -> str:
+    """The note stored by the CLOSED Cash Register session that made the
+    drawer's count, or "" -- the lock then asks its own (owner 2026-08-25:
+    an explanation is mandatory above the band).
+
+    D135(1): only when that close's own judged figure WAS this count and was
+    itself beyond the band (the close stored ``count_note_for`` naming this
+    drawer and this very variance): the note was the required explanation of
+    the count being locked. An optional note typed at an in-band close, a
+    note for a different figure (the register's window was not the drawer's
+    day), a close stored by the previous version, a count by another door or
+    an unreadable close: "" (asked at the lock)."""
+    origin = drawer.get("blind_count_origin")
+    if origin in (None, COUNT_ORIGIN_TILL, COUNT_ORIGIN_DAY_END):
+        return ""
+    try:
+        close = db.get_collection(_REGISTER_SESSIONS).find_one(
+            {"session_id": origin, "status": "CLOSED"}
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Register close unreadable before locking (count by %s)", origin)
+        return ""
+    explained = (close or {}).get("count_note_for") or {}
+    if (
+        explained.get("till_session_id") != (drawer.get("_id") or drawer.get("session_id"))
+        or explained.get("variance_paisa") is None
+        or explained.get("variance_paisa") != drawer.get("variance_paisa")
+    ):
+        return ""
+    return str((close or {}).get("closing_note") or "").strip()
 
 
 def lock_session(
@@ -1153,12 +2344,18 @@ def lock_session(
     try:
         session = coll.find_one({"_id": session_id})
     except Exception:  # noqa: BLE001
-        session = None
+        logger.exception("Till session read failed before locking %s", session_id)
+        return {"ok": False, "error": "session_read_failed", "http": 503, "message": _SESSION_READ_FAILED}
     if session is None:
         return {"ok": False, "error": "not_found", "http": 404}
 
     store_id = session.get("store_id")
     day = str(session.get("session_date") or "")
+
+    # A lock that already landed may still owe its manager alert (its reply
+    # was lost, or the process stopped before raising it): the retry pays it,
+    # and is then told the drawer is already locked, as before.
+    settle_followup(coll, {"_id": session_id}, session)
 
     # Out-of-band variance demands a written explanation BEFORE the lock. The
     # band is the one stored at blind-submit (the band the verdict was judged
@@ -1169,6 +2366,12 @@ def lock_session(
         tolerance_paisa = get_variance_tolerance_paisa(store_id=store_id)
     clean_note = str(variance_note or "").strip()
     out_of_band = needs_variance_note(variance_paisa, tolerance_paisa)
+    if out_of_band and not clean_note:
+        # D128(1): a count's difference is explained ONCE, by the door that
+        # owns the count. A count MADE by a Cash Register close whose own
+        # judged figure was this count, beyond the band, was noted at that
+        # close; its note is the lock's (D135(1)). Anything else asks here.
+        clean_note = _register_close_note(db, session)
     if out_of_band and not clean_note:
         return {
             "ok": False,
@@ -1198,12 +2401,68 @@ def lock_session(
                     # The mandatory explanation for an out-of-band variance
                     # (None when the day balanced and none was given).
                     "variance_note": clean_note or None,
+                    # The manager alert this lock owes, stored WITH the lock.
+                    # Its id is the COUNT's (D128(1)): the same id a Cash
+                    # Register close uses when it meets this count
+                    # unexplained, insert-once, so a task completed early, a
+                    # retry of this lock or a reopen and relock (the count is
+                    # the same) never raises a second one. A task the count
+                    # still owes is carried forward.
+                    FOLLOWUP_FIELD: owed_followup(
+                        *unpaid_followup_tasks(session),
+                        # The lock leaves the count's figures as they stand,
+                        # so the row is known before the write.
+                        owed_audit(
+                            "till.lock",
+                            session_id=session_id,
+                            at=now,
+                            actor=actor,
+                            store_id=store_id,
+                            before={"status": STATUS_BLIND_SUBMITTED},
+                            after={
+                                "status": STATUS_LOCKED,
+                                "zread_number": zread,
+                                "expected_cash_paisa": session.get("expected_cash_paisa"),
+                                "variance_paisa": variance_paisa,
+                                "variance_status": session.get("variance_status"),
+                                "variance_note": clean_note or None,
+                            },
+                            severity=(
+                                "WARNING"
+                                if str(session.get("variance_status")) != "BALANCED"
+                                else "INFO"
+                            ),
+                            detail={"session_date": day},
+                        ),
+                        {
+                            "kind": "variance",
+                            "store_id": store_id,
+                            "session_date": day,
+                            "variance_paisa": variance_paisa,
+                            "tolerance_paisa": tolerance_paisa,
+                            "note": clean_note,
+                            "source": "blind EOD Z-Read lock",
+                            "session_id": session_id,
+                            "task_id": count_task_id(session_id),
+                            # D135(2): one task per count, showing the
+                            # figure this lock locks.
+                            "restate": True,
+                        }
+                        if out_of_band
+                        else None,
+                    ),
                 }
             },
             return_document=ReturnDocument.AFTER,
         )
-    except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "error": f"lock_failed:{exc}", "http": 500}
+    except Exception:  # noqa: BLE001
+        logger.exception("Till lock failed for session %s", session_id)
+        # The lock may have committed with only its acknowledgement lost.
+        locked = _own_write_landed(
+            coll, session_id, STATUS_LOCKED, "locked_at", "locked_by", now, actor
+        )
+        if locked is None:
+            return {"ok": False, "error": "lock_failed", "http": 500}
     if locked is None:
         present = None
         try:
@@ -1216,34 +2475,10 @@ def lock_session(
         # Still OPEN (never blind-submitted) -> cannot lock yet.
         return {"ok": False, "error": "not_submitted", "http": 409}
 
-    _audit(
-        "till.lock",
-        entity_id=session_id,
-        actor=actor,
-        before={"status": STATUS_BLIND_SUBMITTED},
-        after={
-            "status": STATUS_LOCKED,
-            "zread_number": zread,
-            "expected_cash_paisa": locked.get("expected_cash_paisa"),
-            "variance_paisa": locked.get("variance_paisa"),
-            "variance_status": locked.get("variance_status"),
-            "variance_note": locked.get("variance_note"),
-        },
-        store_id=store_id,
-        severity="WARNING" if str(locked.get("variance_status")) != "BALANCED" else "INFO",
-        detail={"session_date": day},
-    )
-    # Manager alert above the band (owner ruling 2026-08-25). After the lock
-    # won -- exactly one of two concurrent locks reaches this line.
-    if out_of_band:
-        raise_variance_task(
-            store_id=store_id,
-            session_date=day,
-            variance_paisa=variance_paisa,
-            tolerance_paisa=tolerance_paisa,
-            note=clean_note,
-            source="blind EOD Z-Read lock",
-        )
+    # The audit row, and the manager alert above the band (owner ruling
+    # 2026-08-25), from the record the lock stored. After the lock won --
+    # exactly one of two concurrent locks reaches this line.
+    settle_followup(coll, {"_id": session_id}, locked)
     locked["session_id"] = locked.get("_id")
     return {"ok": True, "session": locked}
 
@@ -1285,7 +2520,8 @@ def reopen_session(
     try:
         session = coll.find_one({"_id": session_id})
     except Exception:  # noqa: BLE001
-        session = None
+        logger.exception("Till session read failed before reopening %s", session_id)
+        return {"ok": False, "error": "session_read_failed", "http": 503, "message": _SESSION_READ_FAILED}
     if session is None:
         return {"ok": False, "error": "not_found", "http": 404}
 
@@ -1294,6 +2530,21 @@ def reopen_session(
     allowed = get_reopen_roles(store_id=store_id)
     if not (roles & allowed):
         return {"ok": False, "error": "not_permitted_to_reopen", "http": 403}
+
+    # A write that already landed may still owe its audit row or manager task
+    # (its reply was lost, or the process stopped first): the retry pays it.
+    settle_followup(coll, {"_id": session_id}, session)
+    # The identical retry of a reopen that already landed (same person, same
+    # reason, the drawer still as that reopen left it): the saved state, with
+    # nothing written again.
+    if (
+        str(session.get("status")) == STATUS_BLIND_SUBMITTED
+        and session.get("reopened_at") is not None
+        and session.get("reopened_by") == (actor or {}).get("user_id")
+        and session.get("reopen_reason") == clean_reason
+    ):
+        session["session_id"] = session.get("_id")
+        return {"ok": True, "session": session, "idempotent": True}
 
     now = datetime.utcnow()
     history_entry = {
@@ -1317,30 +2568,76 @@ def reopen_session(
                     "reopen_reason": clean_reason,
                     "locked_at": None,
                     "locked_by": None,
+                    # The audit row of this soft-lock release, stored WITH it.
+                    FOLLOWUP_FIELD: owed_followup(
+                        *unpaid_followup_tasks(session),
+                        owed_audit(
+                            "till.reopen",
+                            session_id=session_id,
+                            at=now,
+                            actor=actor,
+                            store_id=store_id,
+                            before={"status": STATUS_LOCKED},
+                            after={"status": STATUS_BLIND_SUBMITTED, "reason": clean_reason},
+                            severity="WARNING",
+                            detail={
+                                "session_date": session.get("session_date"),
+                                "reopen_count": int(session.get("reopen_count") or 0) + 1,
+                            },
+                        ),
+                    ),
                 },
                 "$inc": {"reopen_count": 1},
                 "$push": {"history": history_entry},
             },
             return_document=ReturnDocument.AFTER,
         )
-    except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "error": f"reopen_failed:{exc}", "http": 500}
+    except DuplicateKeyError:
+        # ONE active drawer per (store, date) -- the partial unique index
+        # refused to make this session active again because ANOTHER drawer for
+        # the same shop-day is open or awaiting its lock. Nothing was written.
+        # That is an ordinary conflict with a next step, not a server fault:
+        # say which drawer is in the way, never the index's own error text.
+        active = None
+        try:
+            active = coll.find_one(
+                {
+                    "store_id": store_id,
+                    "session_date": session.get("session_date"),
+                    "status": {"$in": [STATUS_OPEN, STATUS_BLIND_SUBMITTED]},
+                }
+            )
+        except Exception:  # noqa: BLE001
+            active = None
+        active = active or {}
+        return {
+            "ok": False,
+            "error": "another_drawer_open",
+            "http": 409,
+            "message": (
+                "Another cash drawer is already open for this shop on "
+                f"{session.get('session_date')}. Count and lock that drawer "
+                "first, then reopen this Z-Read."
+            ),
+            "active_session_id": active.get("_id"),
+            "active_status": active.get("status"),
+        }
+    except Exception:  # noqa: BLE001
+        # The driver's text (hosts, index names) is for the log, not the reply.
+        logger.exception("Till reopen failed for session %s", session_id)
+        # The reopen may have committed with only its acknowledgement lost.
+        reopened = _own_write_landed(
+            coll, session_id, STATUS_BLIND_SUBMITTED, "reopened_at", "reopened_by", now, actor
+        )
+        if reopened is None:
+            return {"ok": False, "error": "reopen_failed", "http": 500}
     if reopened is None:
         status = str(session.get("status"))
         if status != STATUS_LOCKED:
             return {"ok": False, "error": "not_locked", "http": 409}
         return {"ok": False, "error": "reopen_failed", "http": 409}
 
-    _audit(
-        "till.reopen",
-        entity_id=session_id,
-        actor=actor,
-        before={"status": STATUS_LOCKED},
-        after={"status": STATUS_BLIND_SUBMITTED, "reason": clean_reason},
-        store_id=store_id,
-        severity="WARNING",
-        detail={"session_date": session.get("session_date"), "reopen_count": reopened.get("reopen_count")},
-    )
+    settle_followup(coll, {"_id": session_id}, reopened)
     reopened["session_id"] = reopened.get("_id")
     return {"ok": True, "session": reopened}
 
@@ -1350,18 +2647,25 @@ def reopen_session(
 # ---------------------------------------------------------------------------
 
 
-def get_session(db, session_id: str) -> Optional[Dict[str, Any]]:
+def get_session(db, session_id: str, *, strict: bool = False) -> Optional[Dict[str, Any]]:
     """Load a till session by id (or None). Used by the routes to store-scope the
-    actor BEFORE a mutation (cross-store IDOR guard)."""
+    actor BEFORE a mutation (cross-store IDOR guard).
+
+    ``strict``: a read that FAILED raises instead of answering None, so a
+    route can say "could not be read" rather than "not found". A session that
+    still owes a manager task (see ``settle_followup``) is paid on the way."""
     coll = _sessions_coll(db)
     if coll is None:
         return None
     try:
         doc = coll.find_one({"_id": session_id})
     except Exception:  # noqa: BLE001
+        if strict:
+            raise
         return None
     if doc is not None:
         doc["session_id"] = doc.get("_id")
+        settle_followup(coll, {"_id": session_id}, doc)
     return doc
 
 
@@ -1372,8 +2676,14 @@ def list_sessions(
     session_date: Optional[str] = None,
     status: Optional[str] = None,
     limit: int = 50,
+    strict: bool = False,
 ) -> List[Dict[str, Any]]:
-    """Session rows for a store/date/status, newest first. DB absent -> []."""
+    """Session rows for a store/date/status, newest first. DB absent -> [].
+
+    ``strict``: a read that FAILED raises instead of answering [], so the
+    screen can say the drawers could not be read instead of showing a shop-day
+    with no drawer. A row that still owes a manager task is paid on the way
+    (the screen offers no retry once a drawer shows as counted or locked)."""
     coll = _sessions_coll(db)
     if coll is None:
         return []
@@ -1386,9 +2696,14 @@ def list_sessions(
         match["status"] = str(status).upper()
     try:
         cursor = coll.find(match, {"_id": 0}).sort("opened_at", -1).limit(int(limit))
-        return list(cursor)
+        rows = list(cursor)
     except Exception:  # noqa: BLE001
+        if strict:
+            raise
         return []
+    for row in rows:
+        settle_followup(coll, {"session_id": row.get("session_id")}, row)
+    return rows
 
 
 # Fields a SALES_CASHIER / CASHIER must NEVER see before the manager locks
@@ -1402,6 +2717,7 @@ _CASHIER_HIDDEN_FIELDS = (
     "expected_cash_paisa",
     "variance_paisa",
     "variance_status",
+    "comparison_withheld_reason",
     "cash_sales_paisa",
     "cash_refunds_paisa",
     "cash_payouts_paisa",
@@ -1412,6 +2728,9 @@ _CASHIER_HIDDEN_FIELDS = (
     "refund_double_entry_advisory",
     "off_till_expense_advisory",
     "variance_note",
+    # The manager task a count or lock owes: it names the variance, and that
+    # the count could not be compared.
+    FOLLOWUP_FIELD,
 )
 
 
@@ -1429,6 +2748,74 @@ def redact_for_cashier(session: Optional[Dict[str, Any]]) -> Optional[Dict[str, 
     return out
 
 
+def _own_face_ledger(db, session: Dict[str, Any]) -> Dict[str, Any]:
+    """The per-face tally over THIS drawer's shift. The shop-day's drawers
+    (counted or not) in D53 order split the day: a drawer's window ends where
+    the NEXT drawer opened (D86), or at its own count if that came first --
+    cash taken between a count and the next opening belongs to the next drawer,
+    as in the rupee figures (D60). A one-drawer day keeps the whole day,
+    exactly as before. On a several-drawer day each cash payment is placed by
+    when its cash moved (received_at), so a balance paid in a later shift on
+    an earlier order counts in the later drawer. Drawers unreadable -> the
+    whole day, marked read_ok False."""
+    from .tender_reconciliation import _to_dt
+
+    ws, we = _session_day_window(session)
+    read_ok = True
+    day: List[Dict[str, Any]] = []
+    try:
+        coll = _sessions_coll(db)
+        if coll is None:
+            raise RuntimeError("till sessions unavailable")
+        day = sorted(
+            (
+                s
+                for s in coll.find(
+                    {"store_id": session.get("store_id"), "session_date": session.get("session_date")}
+                )
+                if s.get("status") in (STATUS_OPEN, STATUS_BLIND_SUBMITTED, STATUS_LOCKED)
+            ),
+            key=_drawer_order,
+        )
+        _settle_each(coll, day)
+    except Exception:  # noqa: BLE001
+        day, read_ok = [], False
+
+    def _sid(s: Dict[str, Any]) -> Any:
+        return s.get("_id") or s.get("session_id")
+
+    def _edge(prev: Dict[str, Any], nxt: Dict[str, Any]) -> Any:
+        stamps = [
+            t
+            for t in (
+                _to_dt(prev.get("blind_submitted_at")),
+                _to_dt(nxt.get("opened_at") or nxt.get("created_at")),
+            )
+            if t is not None
+        ]
+        return min(stamps) if stamps else None
+
+    ids = [_sid(s) for s in day]
+    start, end = ws, we
+    if _sid(session) in ids:
+        i = ids.index(_sid(session))
+        if i > 0:
+            start = max(ws, _edge(day[i - 1], day[i]) or ws)
+        if i + 1 < len(day):
+            end = min(we, _edge(day[i], day[i + 1]) or we)
+    ledger = compute_face_ledger(
+        db,
+        session.get("store_id"),
+        start,
+        end,
+        opening_count=session.get("opening_count"),
+        closing_count=session.get("closing_count"),
+        orders_window=None if (start, end) == (ws, we) else (ws, we),
+    )
+    ledger["read_ok"] = bool(ledger.get("read_ok")) and read_ok
+    return ledger
+
+
 def build_zread(db, session_id: str) -> Dict[str, Any]:
     """Full Z-Read report payload for print: session metadata, opening float,
     denomination breakdown, sales-by-tender, expected, counted, variance, lock +
@@ -1440,9 +2827,16 @@ def build_zread(db, session_id: str) -> Dict[str, Any]:
         return {"ok": False, "error": "not_found", "http": 404}
 
     opening = int(session.get("opening_float_paisa", 0) or 0)
-    cash_sales = int(session.get("cash_sales_paisa", 0) or 0)
-    cash_refunds = int(session.get("cash_refunds_paisa", 0) or 0)
-    payouts = int(session.get("cash_payouts_paisa", 0) or 0)
+    # D86(3): a drawer with no comparison has no cash figures of its own (None,
+    # not available); every other drawer reads exactly as before.
+    unavailable = session.get("variance_status") == COMPARISON_UNAVAILABLE
+
+    def _cash(key: str) -> Optional[int]:
+        return None if unavailable else int(session.get(key, 0) or 0)
+
+    cash_sales = _cash("cash_sales_paisa")
+    cash_refunds = _cash("cash_refunds_paisa")
+    payouts = _cash("cash_payouts_paisa")
     expected = session.get("expected_cash_paisa")
     counted = session.get("blind_count_paisa")
     variance = session.get("variance_paisa")
@@ -1468,21 +2862,18 @@ def build_zread(db, session_id: str) -> Dict[str, Any]:
         or _denom.not_captured_block(opening),
         "closing_count": session.get("closing_count")
         or _denom.not_captured_block(int(counted or 0)),
-        "face_ledger": compute_face_ledger(
-            db,
-            session.get("store_id"),
-            *_session_day_window(session),
-            opening_count=session.get("opening_count"),
-            closing_count=session.get("closing_count"),
-        ),
+        "face_ledger": _own_face_ledger(db, session),
         "by_mode": session.get("by_mode") or {},
-        # The Z-Read identity: opening + cash_sales - cash_refunds - payouts =
-        # expected. cash_sales is GROSS collected; cash_refunds is the recorded
+        # The Z-Read identity: opening + cash_sales - cash_refunds - payouts -
+        # bank_deposit = expected. cash_sales is GROSS collected; cash_refunds is the recorded
         # cash refunds auto-deducted (a DISTINCT line from the manual payouts, so
         # a refund is never silently merged into "cash paid out").
         "cash_sales_paisa": cash_sales,
         "cash_refunds_paisa": cash_refunds,
         "cash_payouts_paisa": payouts,
+        # D127: cash banked out of the drawer on its register closes up to
+        # its count (0 on a drawer nothing banked from).
+        "bank_deposit_paisa": int(session.get("bank_deposit_paisa") or 0),
         # AUTO_EXPENSES on sessions submitted after the 2026-08-25 ruling;
         # None on older sessions whose payouts were hand-keyed.
         "cash_payouts_source": session.get("cash_payouts_source"),
@@ -1502,6 +2893,15 @@ def build_zread(db, session_id: str) -> Dict[str, Any]:
         "counted_cash_paisa": counted,
         "variance_paisa": variance,
         "variance_status": session.get("variance_status"),
+        "comparison_unavailable_message": (
+            (
+                EARLIER_CLOSE_DRAWER_UNKNOWN_MESSAGE
+                if session.get("comparison_withheld_reason") == EARLIER_CLOSE_DRAWER_UNKNOWN
+                else COMPARISON_UNAVAILABLE_MESSAGE
+            )
+            if session.get("variance_status") == COMPARISON_UNAVAILABLE
+            else None
+        ),
         "variance_note": session.get("variance_note"),
         "tolerance_paisa": session.get("tolerance_paisa"),
         "locked_at": session.get("locked_at"),
@@ -1552,40 +2952,26 @@ def ensure_till_indexes(db) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _audit(
-    action: str,
-    *,
-    entity_id: str,
-    actor: Optional[Dict[str, Any]],
-    before: Any = None,
-    after: Any = None,
-    detail: Optional[Dict[str, Any]] = None,
-    store_id: Optional[str] = None,
-    severity: str = "INFO",
-) -> None:
-    """One append-only hash-chained audit row via AuditRepository.create (NEVER
-    append_audit_entry). Fail-soft -- an audit failure never undoes the business
-    write that triggered it."""
+def _audit(*, row: Dict[str, Any]) -> bool:
+    """Write ONE owed audit row (see ``owed_audit``) through
+    AuditRepository.create (append-only, hash-chained; NEVER
+    append_audit_entry), once: ``log_id`` is the row's _id, so a row already
+    there is left alone. True when the row is KNOWN to be stored; False when it
+    is not, so the record that owes it keeps owing it. Never raises -- an
+    audit failure never undoes the business write that owes the row."""
     try:
         from api.dependencies import get_audit_repository
 
         repo = get_audit_repository()
         if repo is None:
-            return
-        repo.create(
-            {
-                "action": action,
-                "entity_type": "till_session",
-                "entity_id": entity_id,
-                "store_id": store_id or (actor or {}).get("active_store_id"),
-                "user_id": (actor or {}).get("user_id"),
-                "user_name": (actor or {}).get("full_name") or (actor or {}).get("username"),
-                "severity": severity,
-                "source": "eod_tally",
-                "before_state": before,
-                "after_state": after,
-                "detail": detail or {},
-            }
-        )
+            return False
+        coll = getattr(repo, "collection", None)
+
+        def stored() -> bool:
+            return coll is not None and coll.find_one({"log_id": row["log_id"]}, {"_id": 1}) is not None
+
+        # create() is fail-soft (None), also when a racing writer got there
+        # first: either way the row must be there.
+        return stored() or bool(repo.create(dict(row))) or stored()
     except Exception:  # noqa: BLE001
-        return
+        return False

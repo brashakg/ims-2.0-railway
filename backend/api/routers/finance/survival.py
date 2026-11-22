@@ -13,6 +13,7 @@ from fastapi import Depends, Query
 from ..auth import get_current_user
 from ...dependencies import resolve_store_scope
 from ...services import ap_engine
+from ...utils.expense_status import COMMITTED_EXPENSE_STATUS_MATCH
 from ...services import survival_cashflow
 from ...services import policy_engine
 from ._shared import (
@@ -64,7 +65,7 @@ def _survival_month_expense_rows(db, now: datetime, store_id: Optional[str] = No
     """Current-month committed expenses grouped by head (rupees).
 
     Same field conventions as the rest of this router: `expense_date` is a
-    date-only 'YYYY-MM-DD' string and committed states are APPROVED / PAID.
+    date-only 'YYYY-MM-DD' string and committed states are utils/expense_status.
     """
     start = date(now.year, now.month, 1).isoformat()
     end = (
@@ -74,7 +75,7 @@ def _survival_month_expense_rows(db, now: datetime, store_id: Optional[str] = No
     ).isoformat()
     match = {
         "expense_date": {"$gte": start, "$lt": end},
-        "status": {"$in": ["APPROVED", "PAID", "approved", "paid"]},
+        "status": {"$in": COMMITTED_EXPENSE_STATUS_MATCH},
     }
     if store_id:
         match["store_id"] = store_id

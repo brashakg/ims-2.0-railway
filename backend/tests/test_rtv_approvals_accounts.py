@@ -219,7 +219,7 @@ def test_a_manager_cannot_open_approve_reject_or_spend_one_by_id(world, role, ti
         assert got == ghost == {"error": "not_found"}
     # Nothing moved: still REQUESTED, no token, the manager's PIN untouched.
     after = _doc(world, rid)
-    assert after["status"] == "REQUESTED" and after["approval_token"] is None
+    assert after["status"] == "REQUESTED" and after.get("approval_token") is None
     assert after == before
     assert _attempts(world, _user(role)["user_id"]) is None
 

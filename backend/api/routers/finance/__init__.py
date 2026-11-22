@@ -115,6 +115,7 @@ from ._shared import (  # noqa: F401
     _order_is_interstate,
     _split_output_tax,
     _store_maps,
+    _company_shop_ids,
     _store_state_map,
     _customer_state_map,
     pnl_by_category,
@@ -240,7 +241,6 @@ from .cash_drawer_window import (  # noqa: F401
 )
 from .cash_drawer import (  # noqa: F401
     open_cash_register,
-    _shared_counted_paisa,
     close_cash_register,
     list_cash_register_sessions,
 )

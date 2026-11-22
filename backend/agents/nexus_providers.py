@@ -419,7 +419,11 @@ async def _sweep_booked_order(db, order, raw, existing, sid: str, live: bool) ->
         fulfilment_clock,
         reconcile_fulfillment,
     )
-    from api.services.shopify_refund import _refund_already_processed, handle_shopify_refund
+    from api.services.shopify_refund import (
+        _refund_already_processed,
+        handle_shopify_refund,
+        import_holds,
+    )
 
     key = f"pull:{sid}:{raw.get('updated_at') or ''}"
     dark = (
@@ -548,7 +552,11 @@ async def _sweep_booked_order(db, order, raw, existing, sid: str, live: bool) ->
             rid = str(r.get("id") or "") if isinstance(r, dict) else ""
             # The handler's own idempotency guard, asked up front so a refund
             # it already queued/credited costs nothing every hour.
-            if rid and not _refund_already_processed(db, rid):
+            # A refund the order-history import claimed and did not finish
+            # is fed too (decision D103(1)): the handler books nothing and
+            # says the import holds it, so the run reports it (status_failed)
+            # instead of passing over it in silence every hour.
+            if rid and (not _refund_already_processed(db, rid) or import_holds(db, rid)):
                 await feed("refunds/create", r, lambda r=r: handle_shopify_refund(db, r, webhook_id=None, topic="refunds/create"))
     except Exception as e:  # noqa: BLE001 - one bad order never aborts the run
         errors.append(f"{type(e).__name__}: {e}")

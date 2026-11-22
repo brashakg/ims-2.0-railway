@@ -308,3 +308,51 @@ describe('legacyTabTarget', () => {
     expect(legacyTabTarget('?tab=settle&date=2026-09-01')).toBe('/finance/expenses/settle?date=2026-09-01');
   });
 });
+
+// Audit L3-10. A float that could not be READ was shown as "No petty-cash
+// float is open for this store yet" with an Open float button beside it -- for
+// a float holding Rs 1,200. A failed read is not an answer: it must say the
+// float could not be loaded, offer the read again, and never offer to open a
+// second float. The same on Day Settlement, which reads the same float.
+describe('an unreadable petty-cash float is not "no float"', () => {
+  it('float: a failed read says so, offers no Open float, and recovers on retry', async () => {
+    api.getPettyCashBalance.mockRejectedValueOnce(new Error('503'));
+    renderRoute('/finance/expenses/float', ['STORE_MANAGER']);
+
+    const alert = await screen.findByRole('alert', undefined, FIND);
+    expect(alert.textContent).toMatch(/Could not load the petty-cash float/);
+    // The false business state, and the button that acts on it.
+    expect(screen.queryByText(/No petty-cash float is open/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Open float/ })).not.toBeInTheDocument();
+
+    // Recovery: the read works again and the real balance is back.
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByText('ZZ opening float', undefined, FIND)).toBeInTheDocument();
+    expect(screen.getByText('Float balance')).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(api.getPettyCashBalance).toHaveBeenCalledTimes(2);
+  });
+
+  it('float: POSITIVE CONTROL - a store with no float still gets Open float', async () => {
+    api.getPettyCashBalance.mockResolvedValue({
+      ok: true, store_id: 'ZZ-STORE', exists: false, balance: 0, float_limit: 0,
+      low_balance_threshold: 0, status: null, is_low: false, recent_ledger: [],
+    });
+    renderRoute('/finance/expenses/float', ['STORE_MANAGER']);
+    expect(await screen.findByText(/No petty-cash float is open/, undefined, FIND)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Open float/ })).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('settle: a failed read never says there is nothing to settle', async () => {
+    api.getPettyCashSettlementPosition.mockRejectedValueOnce(new Error('503'));
+    renderRoute('/finance/expenses/settle', ['STORE_MANAGER']);
+
+    const alert = await screen.findByRole('alert', undefined, FIND);
+    expect(alert.textContent).toMatch(/Could not load the petty-cash float/);
+    expect(screen.queryByText(/nothing to settle/)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByText('not yet settled', undefined, FIND)).toBeInTheDocument();
+  });
+});

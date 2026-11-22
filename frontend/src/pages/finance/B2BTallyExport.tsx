@@ -9,20 +9,23 @@
 // Exporting (or marking exported) advances PENDING invoices to IN_TALLY so the
 // companion Worklist screen reflects the same hand-off state.
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Download, Loader2, Receipt, CheckCircle2, AlertTriangle, FileDown,
 } from 'lucide-react';
-import { financeApi, type B2BInvoice, type B2BInvoiceSummary } from '../../services/api/finance';
+import { financeApi, type B2BInvoice } from '../../services/api/finance';
 import { storeApi } from '../../services/api/stores';
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
 import { userSeesAllStores } from '../../utils/storeAccess';
 import {
   inr, downloadBlob, currentMonthRange, TALLY_STATUS_STYLE, TALLY_STATUS_LABEL,
+  B2B_LOAD_FAILED, useB2BInvoiceList,
 } from './b2bTallyShared';
 
 interface StoreOpt { store_id: string; store_name?: string; store_code?: string }
+
+const NONE_SELECTED: Set<string> = new Set();
 
 export default function B2BTallyExport() {
   const toast = useToast();
@@ -33,10 +36,15 @@ export default function B2BTallyExport() {
   const [toDate, setToDate] = useState(def.to);
   const [storeId, setStoreId] = useState('');
   const [stores, setStores] = useState<StoreOpt[]>([]);
-  const [invoices, setInvoices] = useState<B2BInvoice[]>([]);
-  const [summary, setSummary] = useState<B2BInvoiceSummary | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const { invoices, summary, loading, failed, load } = useB2BInvoiceList({
+    from_date: fromDate || undefined,
+    to_date: toDate || undefined,
+    store_id: storeId || undefined,
+  });
+  // A selection belongs to the list it was made on: every load, and a load
+  // that fails, starts again with nothing selected.
+  const [picked, setPicked] = useState<{ of: B2BInvoice[]; ids: Set<string> }>({ of: [], ids: NONE_SELECTED });
+  const selected = picked.of === invoices ? picked.ids : NONE_SELECTED;
   const [busy, setBusy] = useState(false);
   const [rowBusy, setRowBusy] = useState<string | null>(null);
 
@@ -47,39 +55,16 @@ export default function B2BTallyExport() {
       .catch(() => setStores([]));
   }, []);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const r = await financeApi.listB2BInvoices({
-        from_date: fromDate || undefined,
-        to_date: toDate || undefined,
-        store_id: storeId || undefined,
-      });
-      setInvoices(r.invoices);
-      setSummary(r.summary);
-      setSelected(new Set());
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Failed to load B2B invoices');
-    } finally {
-      setLoading(false);
-    }
-  }, [fromDate, toDate, storeId, toast]);
-
-  useEffect(() => {
-    load();
-  }, [load]);
-
-  const toggle = (id: string) =>
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
+  const toggle = (id: string) => {
+    const next = new Set(selected);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    setPicked({ of: invoices, ids: next });
+  };
 
   const allSelected = invoices.length > 0 && selected.size === invoices.length;
   const toggleAll = () =>
-    setSelected(allSelected ? new Set() : new Set(invoices.map((i) => i.order_id)));
+    setPicked({ of: invoices, ids: allSelected ? NONE_SELECTED : new Set(invoices.map((i) => i.order_id)) });
 
   const downloadOne = async (inv: B2BInvoice) => {
     setRowBusy(inv.order_id);
@@ -223,6 +208,11 @@ export default function B2BTallyExport() {
             {loading ? (
               <tr><td colSpan={12} className="px-4 py-6 text-center text-gray-400">
                 <Loader2 className="w-4 h-4 animate-spin inline mr-1" /> Loading...
+              </td></tr>
+            ) : failed ? (
+              <tr><td colSpan={12} role="alert" className="px-4 py-6 text-center text-red-700">
+                {B2B_LOAD_FAILED}.{' '}
+                <button type="button" onClick={load} className="font-medium underline">Retry</button>
               </td></tr>
             ) : invoices.length === 0 ? (
               <tr><td colSpan={12} className="px-4 py-6 text-center text-gray-400">

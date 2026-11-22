@@ -64,32 +64,47 @@ async def get_tds_threshold_status(
     # to be date-only too: the old `fy_start_dt.isoformat()` produced
     # '2026-04-01T00:00:00', which sorts AFTER '2026-04-01' and silently
     # excluded every payment made on 1 April from the FY cumulative.
+    # Read through THE rule every reader of supplier money shares
+    # (ap_engine.with_logged_applications, decision D103(3)): a part-applied
+    # advance whose split row is not stored yet still counts in full, so the
+    # cumulative never reads low by the applied amount. The split row carries
+    # the advance's payment date, so the FY filter keeps the pair together.
+    # A read that fails is no answer (503), never "nothing paid this year",
+    # which would read as "threshold not crossed".
     try:
-        past_payments = list(
+        past_payments = ap_engine.with_logged_applications(list(
             db.get_collection("vendor_payments").find(
                 {
                     "vendor_id": vendor_id,
                     "payment_date": {"$gte": fy_start_dt.date().isoformat()},
                 },
-                {"amount": 1, "tds_amount": 1, "_id": 0},
+                {"amount": 1, "tds_amount": 1, "payment_id": 1, "applications": 1, "_id": 0},
             )
-        )
-    except Exception:
-        past_payments = []
+        ))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="This supplier's payments could not be read. Try again.",
+        ) from exc
 
     cumulative_fy = sum(
         float(p.get("amount") or 0) + float(p.get("tds_amount") or 0)
         for p in past_payments
     )
 
-    # Fetch admin-edited TDS rate overrides (fail-soft)
+    # The admin-edited TDS rates. A read that fails is no answer (503): the
+    # built-in rates in their place could say "no TDS" where the admin's
+    # threshold says it is due.
     overrides = None
     try:
         cfg = db.get_collection("tds_rate_config").find_one({}, {"_id": 0})
         if cfg:
             overrides = cfg.get("rates")
-    except Exception:
-        pass
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="The TDS rates could not be read. Try again.",
+        ) from exc
 
     result = ap_engine.tds_threshold_status(
         section=section,

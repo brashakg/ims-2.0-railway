@@ -152,5 +152,57 @@ describe('CashRegisterPage - a count that came from the other door says so', () 
     expect(await screen.findByText('ZZ-CR-2')).toBeInTheDocument();
     expect(screen.getAllByText('₹2,000')).not.toHaveLength(0);
     expect(screen.queryByTestId(BADGE)).not.toBeInTheDocument();
+    expect(screen.queryByTestId('several-drawers')).not.toBeInTheDocument();
+  });
+
+  it('D40: a day with two drawers marks the count as the last drawer only', async () => {
+    primeHistory({ ...CLOSED_OWN, till_drawers_on_day: 2 });
+    render(<CashRegisterPage />);
+
+    expect((await screen.findByTestId('several-drawers')).textContent).toMatch(/Last of 2 drawers/);
+  });
+
+  it('D53: a several-drawer close shows each drawer, never one variance or a balanced verdict', async () => {
+    primeHistory({
+      ...CLOSED_OWN,
+      till_drawers_on_day: 2,
+      variance: null,
+      variance_status: 'SEVERAL_DRAWERS',
+      till_drawers: [
+        { session_id: 'A', status: 'LOCKED', counted_paisa: 100000, variance_paisa: 0 },
+        { session_id: 'B', status: 'LOCKED', counted_paisa: 300000, variance_paisa: 20000 },
+      ],
+    });
+    render(<CashRegisterPage />);
+
+    expect((await screen.findByTestId('several-drawers-verdict')).textContent).toMatch(/2 drawers/);
+    const list = screen.getByTestId('cash-register-drawer-list').textContent ?? '';
+    expect(list).toMatch(/Drawer 1: counted ₹1,000, variance ₹0/);
+    expect(list).toMatch(/Drawer 2: counted ₹3,000, variance \+₹200/);
+    expect(screen.queryByText('Not counted')).not.toBeInTheDocument();
+  });
+});
+
+describe('CashRegisterPage - a close that could not read the drawers claims no variance', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('Codex PR-1421-round2 F-A: says "Comparison not available", never short or not counted', async () => {
+    primeHistory({
+      ...CLOSED_OWN,
+      session_id: 'ZZ-CR-4',
+      counted: 3000,
+      expected: 4000,
+      variance: null,
+      variance_status: 'COMPARISON_UNAVAILABLE',
+      till_link_ok: false,
+      till_link_error: 'read_failed',
+    });
+    render(<CashRegisterPage />);
+
+    const cell = await screen.findByText('ZZ-CR-4');
+    const row = within(cell.closest('tr') as HTMLElement);
+    expect(row.getByTestId('comparison-unavailable-verdict')).toHaveTextContent('Comparison not available');
+    expect(row.queryByText('-₹1,000')).not.toBeInTheDocument();
+    expect(row.queryByText('Not counted')).not.toBeInTheDocument();
   });
 });

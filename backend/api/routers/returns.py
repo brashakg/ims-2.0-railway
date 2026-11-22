@@ -456,7 +456,9 @@ def _already_returned_qty(
             if own_shopify_refund_id and rid == own_shopify_refund_id:
                 refunds[rid] = refunds.get(rid, 0.0) + _own_restock_share(doc, item_id, product_id)
                 continue
-            for prior in doc.get("items") or []:
+            # An imported note (RET-HIST) has no items: its goods_lines are
+            # the goods it gave back, the cost the P&L gives back (D45 b).
+            for prior in doc.get("items") or doc.get("goods_lines") or []:
                 if not isinstance(prior, dict) or not _same_line(prior, item_id, product_id):
                     continue
                 try:
@@ -6799,12 +6801,17 @@ def _drawer_closed_today(store_id: Optional[str]) -> bool:
     if coll is None:
         return False
     try:
-        return coll.find_one({"store_id": store_id, "session_date": ist_today().isoformat(),
-                              "status": {"$in": [eod_tally.STATUS_BLIND_SUBMITTED,
-                                                 eod_tally.STATUS_LOCKED]}}) is not None
+        drawer = coll.find_one({"store_id": store_id, "session_date": ist_today().isoformat(),
+                                "status": {"$in": [eod_tally.STATUS_BLIND_SUBMITTED,
+                                                   eod_tally.STATUS_LOCKED]}})
     except Exception as exc:  # noqa: BLE001
         logger.error("[RETURNS] Day-End state unreadable for %s: %s", store_id, exc)
         raise HTTPException(status_code=503, detail="Could not check today's Day-End - try again.")
+    if drawer is not None:
+        # D110: every reader of a till drawer pays the audit row or manager
+        # task it still owes (never raises; nothing owed, nothing written).
+        eod_tally.settle_followup(coll, {"_id": drawer.get("_id")}, drawer)
+    return drawer is not None
 
 
 @router.post("/advance-refund", status_code=201)

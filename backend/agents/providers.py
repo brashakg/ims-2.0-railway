@@ -128,7 +128,10 @@ def _should_dispatch(phone: str) -> tuple[bool, str]:
     if DISPATCH_MODE == "test":
         if not TEST_PHONE:
             return False, "DISPATCH_MODE=test but TEST_PHONE unset"
-        if phone.strip().replace("+", "").replace(" ", "") != TEST_PHONE.strip().replace("+", "").replace(" ", ""):
+        # Same normalizer as the send itself (L1-F31): "+91 98..", "098.."
+        # and a bare 10-digit TEST_PHONE are one number. An unusable
+        # TEST_PHONE normalizes to "" and so matches nothing.
+        if _normalize_phone(phone) != _normalize_phone(TEST_PHONE):
             return False, f"DISPATCH_MODE=test — only TEST_PHONE receives messages; phone {phone[-4:]} suppressed"
         return True, "test dispatch to TEST_PHONE"
     if DISPATCH_MODE == "live":
@@ -138,15 +141,24 @@ def _should_dispatch(phone: str) -> tuple[bool, str]:
 
 
 def _normalize_phone(phone: str) -> str:
-    """Strip formatting, ensure 91- country prefix for India."""
-    p = "".join(c for c in (phone or "") if c.isdigit())
-    if not p:
+    """The provider form of an Indian mobile: "91" + the 10-digit number, or
+    "" when the input is not one (every send door then refuses with
+    "invalid phone" -- nothing is sent to a guessed number).
+
+    One rule with the rest of IMS: services.phone.normalize_indian_mobile
+    decides what the 10-digit number is, by LENGTH -- so "9123456789",
+    "09123456789" and "+91 9123456789" are all 919123456789. This used to
+    test `startswith("91")` first, so a national number that happens to begin
+    with 91 went to MSG91 with no country code (audit L1-F31), and any other
+    digit string was passed through as typed.
+    """
+    from api.services.phone import normalize_indian_mobile
+
+    try:
+        national = normalize_indian_mobile(phone)
+    except ValueError:
         return ""
-    if p.startswith("0"):  # drop trunk prefix
-        p = p[1:]
-    if not p.startswith("91") and len(p) == 10:
-        p = "91" + p
-    return p
+    return f"91{national}" if national else ""
 
 
 # ============================================================================

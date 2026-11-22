@@ -2781,8 +2781,8 @@ def stamp_bills_as_of(db, bills: list) -> list:
     recorded payment and is never served. Returns `bills`, stamped in place."""
     ids = [b.get("bill_id") for b in bills if b.get("bill_id")]
     try:
-        from ..services.supplier_credit_reads import payable_credit_rows
-        money = [list(db.get_collection("vendor_payments").find({"bill_id": {"$in": ids}}, {"_id": 0})),
+        from ..services.supplier_credit_reads import payable_credit_rows, payments_on_bills
+        money = [payments_on_bills(db, ids),
                  [row for row in payable_credit_rows(db) if row.get("bill_id") in ids]]
     except Exception as exc:
         raise HTTPException(503, "Supplier bill balances could not be verified. Retry the report.") from exc

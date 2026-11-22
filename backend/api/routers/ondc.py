@@ -22,15 +22,16 @@ ADMIN SURFACE (SUPERADMIN / ADMIN JWT required):
   GET  /status        enabled? last publish? ONDC order count + TCS total
   POST /publish       Manually trigger catalog publish to SNP
 
-DARK CONTRACT: callbacks are fail-soft -- a bad / unsigned payload logs a
-warning and returns the Beckn ACK (required by protocol) without crashing.
-Order ingestion is gated: when IMS_ONDC_ENABLED is off, on_confirm logs the
-payload but does NOT write to `orders`.
+DARK CONTRACT (decision D20): while ONDC is switched off
+(ondc_seller.ondc_enabled is false -- the default) EVERY callback door is
+refused with a Beckn NACK, correctly signed or not: nothing is published,
+no order is read, written or cancelled. An unsigned / wrongly signed callback
+is refused whether ONDC is on or off. Both rules live in ONE gate,
+`_authentic_callback`, which every door calls first.
 
-SIGNATURE VERIFICATION: when the `integrations.ondc.config.ukp` key is set,
-every inbound callback validates the `Authorization` header HMAC-SHA256
-signature. Without a ukp the gate is skipped (useful for dev / SNP sandbox
-where signatures are optional).
+SIGNATURE VERIFICATION: every inbound callback validates the `Authorization`
+header HMAC-SHA256 signature against `integrations.ondc.config.ukp`. Without
+a ukp nothing can be verified, so every callback is refused (BUG-102).
 
 AUDIT: every on_confirm + on_cancel attempt writes an audit_logs row
 (fail-soft -- audit failure never blocks the Beckn ACK).
@@ -153,9 +154,9 @@ async def _verify_callback(request: Request, db) -> Optional[Dict[str, Any]]:
     Returns the parsed JSON payload dict (with a ``_signature_invalid`` flag) on
     success, or None on a hard failure (unparse-able body). The signature is
     FAIL CLOSED (BUG-102): a missing signing key OR a bad signature marks the
-    payload ``_signature_invalid=True`` so the state-changing callbacks
-    (on_confirm / on_cancel) reject it instead of ingesting / cancelling a real
-    order on behalf of an unauthenticated caller.
+    payload ``_signature_invalid=True``, and ``_authentic_callback`` (the gate
+    every door goes through) rejects it instead of acting for, or disclosing
+    an order to, an unauthenticated caller.
     """
     try:
         body = await request.body()
@@ -183,6 +184,37 @@ async def _verify_callback(request: Request, db) -> Optional[Dict[str, Any]]:
         payload["_signature_invalid"] = True
 
     return payload
+
+
+async def _authentic_callback(request: Request, db, door: str):
+    """THE gate of every Beckn callback door: ``(payload, None)`` for a
+    correctly signed request while ONDC is switched ON, ``(None, <NACK>)``
+    otherwise.
+
+    Audit L1-F35: on_confirm / on_cancel each checked ``_signature_invalid``
+    by hand; on_search and on_status never did, so an unsigned caller could
+    trigger a catalogue publish (a real outbound push once ONDC is armed) and
+    read any ONDC order's status. Every door now refuses here, BEFORE any
+    side effect or order read -- a door that does not call this is the bug.
+    """
+    payload = await _verify_callback(request, db)
+    if payload is None:
+        return None, _beckn_nack(message="Malformed request body")
+    if payload.get("_signature_invalid"):
+        logger.warning("[ONDC] %s: invalid/absent signature -- rejecting (NACK)", door)
+        return None, _beckn_nack(
+            payload.get("context") or {}, message="Invalid signature"
+        )
+    # D20 / 1416-P2c: ONDC OFF refuses every callback, signed or not. Checked
+    # AFTER the signature so only an authentic caller learns that it is off.
+    # on_confirm / on_cancel used to carry their own copy of this check (and
+    # ACK); on_search still published and on_status still answered.
+    if not ondc_seller.ondc_enabled(db):
+        logger.warning("[ONDC] %s: ONDC is switched off -- rejecting (NACK)", door)
+        return None, _beckn_nack(
+            payload.get("context") or {}, message="ONDC is switched off"
+        )
+    return payload, None
 
 
 def _write_audit(db, action: str, payload: Dict[str, Any], result: Dict[str, Any]) -> None:
@@ -216,12 +248,14 @@ def _write_audit(db, action: str, payload: Dict[str, Any], result: Dict[str, Any
 async def on_search(request: Request) -> Dict[str, Any]:
     """SNP triggers a /search: IMS responds by publishing the catalog.
 
-    Fail-soft: always returns ACK. Catalog push is DARK when not enabled.
+    Fail-soft: a signed request gets ACK while ONDC is on. An unsigned
+    request, or any request while ONDC is off, is NACKed and publishes nothing
+    (L1-F35, D20).
     """
     db = _get_db()
-    payload = await _verify_callback(request, db)
-    if payload is None:
-        return _beckn_nack(message="Malformed request body")
+    payload, nack = await _authentic_callback(request, db, "on_search")
+    if nack is not None:
+        return nack
 
     context = payload.get("context") or {}
 
@@ -247,9 +281,9 @@ async def on_select(request: Request) -> Dict[str, Any]:
     Full implementation requires the SNP's /select flow integration.
     """
     db = _get_db()
-    payload = await _verify_callback(request, db)
-    if payload is None:
-        return _beckn_nack(message="Malformed request body")
+    payload, nack = await _authentic_callback(request, db, "on_select")
+    if nack is not None:
+        return nack
 
     context = payload.get("context") or {}
     logger.info(
@@ -266,9 +300,9 @@ async def on_init(request: Request) -> Dict[str, Any]:
     to be added in BVI-20 follow-up.
     """
     db = _get_db()
-    payload = await _verify_callback(request, db)
-    if payload is None:
-        return _beckn_nack(message="Malformed request body")
+    payload, nack = await _authentic_callback(request, db, "on_init")
+    if nack is not None:
+        return nack
 
     context = payload.get("context") or {}
     logger.info(
@@ -287,25 +321,14 @@ async def on_confirm(request: Request) -> Dict[str, Any]:
     (so the buyer doesn't hang; retry is the SNP's responsibility).
     """
     db = _get_db()
-    payload = await _verify_callback(request, db)
-    if payload is None:
-        return _beckn_nack(message="Malformed request body")
+    payload, nack = await _authentic_callback(request, db, "on_confirm")
+    if nack is not None:
+        return nack
 
     context = payload.get("context") or {}
 
-    if payload.get("_signature_invalid"):
-        logger.warning(
-            "[ONDC] on_confirm: invalid/absent signature -- rejecting (NACK)"
-        )
-        return _beckn_nack(context, message="Invalid signature")
-
-    # BUG-102: only ingest when the seller-node is actually enabled (IMS_ONDC_ENABLED
-    # + creds). When DARK we ACK so the SNP doesn't hang but write NO order -- this
-    # is the contract the module docstring already promised but never enforced.
-    if not ondc_seller.ondc_enabled(db):
-        logger.warning("[ONDC] on_confirm: ONDC disabled (DARK) -- not ingesting order")
-        return _beckn_ack(context)
-
+    # BUG-102: an order is ingested only while the seller-node is enabled
+    # (IMS_ONDC_ENABLED + creds) -- refused above by _authentic_callback.
     result = ondc_seller.ingest_ondc_order(db, payload)
     _write_audit(db, "on_confirm", payload, result)
 
@@ -324,11 +347,12 @@ async def on_confirm(request: Request) -> Dict[str, Any]:
 
 @router.post("/on_status")
 async def on_status(request: Request) -> Dict[str, Any]:
-    """Buyer queries order status. Return the IMS order status."""
+    """Buyer queries order status. Return the IMS order status -- to a
+    signed caller only (L1-F35: it used to answer anyone)."""
     db = _get_db()
-    payload = await _verify_callback(request, db)
-    if payload is None:
-        return _beckn_nack(message="Malformed request body")
+    payload, nack = await _authentic_callback(request, db, "on_status")
+    if nack is not None:
+        return nack
 
     context = payload.get("context") or {}
     order_id = ((payload.get("message") or {}).get("order") or {}).get("id")
@@ -363,24 +387,15 @@ async def on_status(request: Request) -> Dict[str, Any]:
 async def on_cancel(request: Request) -> Dict[str, Any]:
     """Buyer or SNP cancels the order. Update IMS order status to CANCELLED."""
     db = _get_db()
-    payload = await _verify_callback(request, db)
-    if payload is None:
-        return _beckn_nack(message="Malformed request body")
+    payload, nack = await _authentic_callback(request, db, "on_cancel")
+    if nack is not None:
+        return nack
 
     context = payload.get("context") or {}
 
-    # BUG-102: a forged/unsigned on_cancel must NOT flip a real order to CANCELLED.
-    # Previously on_cancel never read _signature_invalid at all, so even with a
-    # signing key configured a bad-signature cancel still executed.
-    if payload.get("_signature_invalid"):
-        logger.warning(
-            "[ONDC] on_cancel: invalid/absent signature -- rejecting (NACK)"
-        )
-        return _beckn_nack(context, message="Invalid signature")
-
-    if not ondc_seller.ondc_enabled(db):
-        logger.warning("[ONDC] on_cancel: ONDC disabled (DARK) -- not cancelling order")
-        return _beckn_ack(context)
+    # BUG-102: a forged/unsigned on_cancel, or any on_cancel while ONDC is
+    # off, must NOT flip a real order to CANCELLED -- refused above by
+    # _authentic_callback, like every door.
 
     order_data = (payload.get("message") or {}).get("order") or {}
     ondc_order_id = _s(order_data.get("id", ""))
