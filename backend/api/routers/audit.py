@@ -48,23 +48,29 @@ async def verify_audit_trail(current_user: dict = Depends(get_current_user)):
 
     Returns:
         {
-          "intact": bool,                # True if the whole chain verifies
+          "intact": bool,                # True ONLY if every check ran and passed
+          "verified": bool,              # the trail was read end to end
+          "reason": str | null,          # why it is not intact (verify_chain)
           "broken_at_seq": int | null,   # seq of the first tampered/broken row
-          "entries_checked": int         # chained rows walked
+          "entries_checked": int,        # chained rows walked
+          "unchained_rows": int | null   # rows outside the hash chain
         }
 
-    Fail-soft: with no DB connected, returns an intact empty result (0 entries)
-    rather than erroring -- there is nothing to tamper with yet.
+    A trail that could NOT be read (no database, a failed read) is never
+    reported intact (R20): it answers 503 with the same body, intact false and
+    verified false -- "nothing is known" is not "verified empty".
     """
     _require_superadmin(current_user)
 
+    from database.repositories.audit_chain import unverified_result, verify_chain
+
     audit_repo = get_audit_repository()
-    if audit_repo is None:
-        return {"intact": True, "broken_at_seq": None, "entries_checked": 0}
-
-    from database.repositories.audit_chain import verify_chain
-
-    return verify_chain(audit_repo.collection)
+    result = (
+        unverified_result() if audit_repo is None else verify_chain(audit_repo.collection)
+    )
+    if not result["verified"]:
+        raise HTTPException(status_code=503, detail=result)
+    return result
 
 
 # ---------------------------------------------------------------------------

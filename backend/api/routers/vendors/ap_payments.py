@@ -13,7 +13,6 @@ from ._shared import (
     _AP_ROLES,
     _get_db,
     ap_engine,
-    datetime,
     get_vendor_repository,
     require_roles,
     resolve_store_scope,
@@ -30,6 +29,7 @@ from .ap_bills import (
     _rejected_goods_hold,
 )
 from ._shared import in_reach_or_404
+from .numbering import generate_supplier_credit_number
 from ...dependencies import NO_SHOP_DETAIL, is_no_shop_scope
 
 # The answer for a named bill that is not there for the caller -- the words
@@ -214,6 +214,19 @@ def _money_shop(
     return _shop_by_the_suppliers_bills(db, vendor_id, money or {})
 
 
+def _asked_shop(bill, asked_query, asked_body, current_user, receipt=None) -> dict:
+    """The shop a retried payment or supplier credit must match (PR #1423
+    review B): the one this request itself decides -- its bill's, its
+    receipt's, the shop it names, a non-admin's own -- by _money_shop's own
+    rule (its refusals too). {} when it decides none (an admin naming no
+    bill, receipt or shop: the shop then comes from the supplier's bills, not
+    from the request)."""
+    shop = _money_shop(bill, asked_query, asked_body, current_user, receipt)
+    if shop is None and bill is None and not (receipt or {}).get("store_id"):
+        return {}
+    return {"store_id": shop}
+
+
 def _month(day) -> Optional[tuple]:
     """(year, month) of a stored day on the IST clock (ap_engine.parse_date:
     '2026-09-30T20:00:00+00:00' is 1 October in India), else None."""
@@ -282,6 +295,9 @@ def _ledger_rows(db, vendor_id: str, scope: Optional[str]) -> tuple:
                 {"vendor_id": vendor_id}, {"_id": 0}
             )
         )
+        # A part-application cut off between its two writes is finished here,
+        # so the ledger never shows an advance reduced with no row for it.
+        payments += _finish_half_applied(db, payments, {p.get("payment_id") for p in payments})
         debit_notes = payable_credit_rows(db, vendor_id=vendor_id)
     except Exception as exc:
         raise HTTPException(503, "Supplier balances could not be verified. Retry the ledger.") from exc
@@ -326,9 +342,11 @@ async def create_vendor_payment(
     # A retried request (the client retries a 5xx; a 504 may come after the
     # save) answers the payment it already recorded -- the same payment only.
     db = _get_db()
+    named = _named_bill_in_scope_or_404(db, vendor_id, payment.bill_id, current_user)
     sent = {
         "vendor_id": vendor_id, "amount": round(payment.amount, 2), "bill_id": payment.bill_id,
         "payment_date": payment.payment_date, "tds_amount": tds_amount, "reference": payment.reference,
+        "mode": payment.mode, **_asked_shop(named, store_id, payment.store_id, current_user),
     }
     if payment.request_id and db is not None:
         done = _replayed_payment(db, payment.request_id, sent, current_user)
@@ -346,7 +364,6 @@ async def create_vendor_payment(
     # stamped with its shop (an admin's naming no bill and no shop: the
     # supplier's shop by its bills, worked out on this row's own dates).
     created_at = utc_now_iso()
-    named = _named_bill_in_scope_or_404(db, vendor_id, payment.bill_id, current_user)
     shop = _money_shop(
         named,
         store_id,
@@ -386,33 +403,93 @@ async def create_vendor_payment(
         "created_at": created_at,
     }
     db = _get_db()
-    if db is not None:
-        try:
-            if payment.request_id:
-                _ensure_request_index(db)
-            db.get_collection("vendor_payments").insert_one(dict(doc))
-        except Exception as exc:
-            # The same request racing itself: the unique request_id index let
-            # one through -- answer with that one (or refuse, as above).
-            done = _replayed_payment(db, payment.request_id, sent, current_user) if payment.request_id else None
-            if done is not None:
-                return done
+    if db is None:
+        # Nowhere to save: never a 201 for a payment nothing stored.
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    if payment.request_id:
+        _ensure_request_index(db)
+    try:
+        db.get_collection("vendor_payments").insert_one(dict(doc))
+    except Exception as exc:
+        # The same request racing itself (the unique request_id index let one
+        # through), or a save that landed with its reply lost: answer with the
+        # stored payment (or refuse, as above). Only a payment that is not
+        # stored is "failed".
+        done = (
+            _replayed_payment(db, payment.request_id, sent, current_user)
+            if payment.request_id else _landed(db, "vendor_payments", "payment_id", doc)
+        )
+        if done is None:
             raise HTTPException(
                 status_code=500, detail="Failed to save payment"
             ) from exc
         _recompute_bill_status(db, payment.bill_id)
+        return done
+    _recompute_bill_status(db, payment.bill_id)
     return _clean(doc)
 
 
-def _replayed_payment(db, request_id: str, sent: dict, current_user: dict) -> Optional[dict]:
-    """The payment this request id already recorded, answered again -- only
+_UNCONFIRMED = "Could not confirm the save. Check the supplier's ledger before recording it again."
+
+
+def _landed(db, collection: str, id_field: str, doc: dict) -> Optional[dict]:
+    """A save whose insert raised, with no request id to replay by: the stored
+    row if it landed all the same (its reply was lost), None if it did not.
+    No answer is a 503 -- never "failed", which a retry would record twice."""
+    try:
+        row = db.get_collection(collection).find_one({id_field: doc[id_field]}, {"_id": 0})
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=503, detail=_UNCONFIRMED,
+        ) from exc
+    return _clean(row) if row else None
+
+
+def _store_split_row(db, row: dict) -> None:
+    """Insert-once under its own _id (its payment_id): the apply door and a
+    read finishing it can both write it and one row is stored. An insert that
+    raised is read back -- stored is stored; anything else is a 503, never a
+    give-back (which could cross a row that did land) and never 'failed'."""
+    try:
+        db.get_collection("vendor_payments").insert_one({**row, "_id": row["payment_id"]})
+    except Exception as exc:  # noqa: BLE001
+        if _landed(db, "vendor_payments", "payment_id", row) is None:
+            raise HTTPException(status_code=503, detail=_UNCONFIRMED) from exc
+
+
+def _finish_half_applied(db, advances: list, stored: Optional[set] = None) -> list:
+    """A part-application is two writes: the advance is reduced and logs the
+    application, then the row naming the bill is inserted. One cut off in
+    between (a crash, a lost reply) is finished here, never undone: every
+    logged application whose row is not stored gets its row. Until then every
+    reader counts the logged application as that row all the same
+    (ap_engine.with_logged_applications), so this only stores what the figures
+    already show. Returns the rows it stored. `stored`: the payment ids known to exist (else read)."""
+    owed = [(a, e) for a in advances for e in (a.get("applications") or []) if e.get("payment_id")]
+    if not owed:
+        return []
+    if stored is None:
+        stored = {r.get("payment_id") for r in db.get_collection("vendor_payments").find(
+            {"payment_id": {"$in": [e["payment_id"] for _, e in owed]}}, {"_id": 0, "payment_id": 1})}
+    rows = [ap_engine.split_row(a, e) for a, e in owed if e["payment_id"] not in stored]
+    for row in rows:
+        _store_split_row(db, row)
+        _recompute_bill_status(db, row["bill_id"])
+    return rows
+
+
+def _replayed_payment(
+    db, request_id: str, sent: dict, current_user: dict, collection: str = "vendor_payments"
+) -> Optional[dict]:
+    """The payment (with collection="vendor_debit_notes": the supplier credit)
+    this request id already recorded, answered again -- only
     to a caller who can see it (in_reach_or_404, as any payment read) and only
     when it is the same payment: supplier, amount, bill, date, TDS, reference.
     The same id with anything else is a stale form saved twice with different
     details: 409, never the earlier payment passed off as this one. None when
     the id recorded nothing."""
     try:
-        row = db.get_collection("vendor_payments").find_one({"request_id": request_id}, {"_id": 0})
+        row = db.get_collection(collection).find_one({"request_id": request_id}, {"_id": 0})
     except Exception as exc:
         raise HTTPException(status_code=503, detail="Database unavailable") from exc
     if row is None:
@@ -432,16 +509,19 @@ def _replayed_payment(db, request_id: str, sent: dict, current_user: dict) -> Op
     return _clean(row)
 
 
-def _ensure_request_index(db) -> None:
+def _ensure_request_index(db, collection: str = "vendor_payments") -> None:
     """Unique on request_id (sparse: older payments carry none), so the same
     request racing itself can record only one payment. create_index is a
     no-op once the index exists; payments are few, so it runs each time.
-    Never blocks a payment: without it the read-first check still answers a
-    retry that arrives after the save."""
+    Without it two copies of one request at once could both save (twice the
+    money), so a request id whose index cannot be ensured is a 503 before
+    anything is written (PR #1423 review: a missing index); the form's retry
+    saves it once."""
     try:
-        db.get_collection("vendor_payments").create_index("request_id", unique=True, sparse=True)
-    except Exception:  # noqa: BLE001
-        logger.warning("[AP] vendor_payments.request_id index could not be ensured", exc_info=True)
+        db.get_collection(collection).create_index("request_id", unique=True, sparse=True)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[AP] %s.request_id index could not be ensured", collection, exc_info=True)
+        raise HTTPException(status_code=503, detail="Could not save safely right now. Try again.") from exc
 
 
 class AdvanceApply(BaseModel):
@@ -483,6 +563,18 @@ async def apply_advance_to_bill(
     except Exception as exc:
         raise HTTPException(status_code=503, detail="Database unavailable") from exc
     in_reach_or_404(adv, current_user, "Payment not found")
+    already = "This advance was already applied - refresh to see what is left of it."
+    try:
+        finished = _finish_half_applied(db, [adv])
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Database unavailable") from exc
+    if finished:
+        # An earlier application of this advance had been cut off between its
+        # two writes; it is finished now. This request was made on the figures
+        # from before that: the form reloads and shows what is left.
+        raise HTTPException(status_code=409, detail=already)
     if ap_engine._has_bill_id(adv.get("bill_id")):
         raise HTTPException(status_code=409, detail="This payment is already applied to a bill.")
     bill = _named_bill_in_scope_or_404(db, vendor_id, body.bill_id, current_user)
@@ -510,10 +602,7 @@ async def apply_advance_to_bill(
     cash, tds = round(float(adv.get("amount") or 0), 2), round(float(adv.get("tds_amount") or 0), 2)
     gross = round(cash + tds, 2)
     if round(body.advance_left, 2) != gross:
-        raise HTTPException(
-            status_code=409,
-            detail="This advance was already applied - refresh to see what is left of it.",
-        )
+        raise HTTPException(status_code=409, detail=already)
     if applied > gross:
         raise HTTPException(
             status_code=422, detail=f"This advance has only Rs {gross:,.2f} to apply."
@@ -536,29 +625,22 @@ async def apply_advance_to_bill(
     now, actor = utc_now_iso(), current_user.get("user_id")
     unchanged = {"payment_id": payment_id, "amount": adv.get("amount"), "bill_id": adv.get("bill_id")}
     stamp = {"bill_id": body.bill_id, "store_id": bill.get("store_id"), "applied_at": now, "applied_by": actor}
-    if applied == gross:
-        moved = coll.update_one(unchanged, {"$set": stamp})
-        row = {**adv, **stamp}
-    else:
-        # The split row is a new payment row: not the advance's applications
-        # log, nor its form's request_id (unique -- the copy would be refused).
-        row = {**{k: v for k, v in adv.items() if k not in ("applications", "request_id")}, **stamp,
-               "payment_id": str(uuid.uuid4()), "amount": applied, "applied_from": payment_id}
-        moved = coll.update_one(unchanged, {
-            "$set": {"amount": round(cash - applied, 2)},
-            "$push": {"applications": {"payment_id": row["payment_id"], "bill_id": body.bill_id,
-                                       "amount": applied, "at": now, "by": actor}},
-        })
-        if moved.matched_count:  # the advance's `applications` names the row below
-            try:
-                coll.insert_one(dict(row))
-            except Exception as exc:
-                coll.update_one(  # give the advance back what this call took
-                    {"payment_id": payment_id},
-                    {"$inc": {"amount": applied},
-                     "$pull": {"applications": {"payment_id": row["payment_id"]}}},
-                )
-                raise HTTPException(status_code=500, detail="Failed to apply the advance") from exc
+    # A part-application: the advance logs it and keeps the rest; the applied
+    # part becomes a new payment row naming the bill (ap_engine.split_row). The log
+    # entry is written with the reduction, so a call cut off before its row
+    # is stored is finished by _finish_half_applied -- never given back.
+    entry = {"payment_id": str(uuid.uuid4()), "bill_id": body.bill_id, "store_id": bill.get("store_id"),
+             "amount": applied, "at": now, "by": actor}
+    row = {**adv, **stamp} if applied == gross else ap_engine.split_row(adv, entry)
+    try:
+        moved = coll.update_one(unchanged, {"$set": stamp} if applied == gross else {
+            "$set": {"amount": round(cash - applied, 2)}, "$push": {"applications": entry}})
+    except Exception as exc:
+        # Written or not, nobody can say: never 'failed' (a retry is refused
+        # or finishes it; it is never applied twice).
+        raise HTTPException(status_code=503, detail=_UNCONFIRMED) from exc
+    if moved.matched_count and applied != gross:
+        _store_split_row(db, row)
     if not moved.matched_count:
         raise HTTPException(
             status_code=409,
@@ -614,6 +696,18 @@ async def create_debit_note(
     db_early = _get_db()
     named = _named_bill_in_scope_or_404(db_early, vendor_id, note.bill_id, current_user)
     receipt = _named_receipt_in_scope_or_404(db_early, vendor_id, note.grn_id, current_user)
+    # A retried request (a 5xx retried, a 504 after the save) answers the note
+    # it already recorded -- the same note only (audit L3-27): its receipt
+    # and its shop too (PR #1423 review B), checked as a new note's are.
+    sent = {
+        "vendor_id": vendor_id, "amount": round(note.amount, 2), "bill_id": note.bill_id,
+        "date": note.date, "cn_type": note.cn_type, "reason": note.reason, "grn_id": note.grn_id,
+        **_asked_shop(named, store_id, note.store_id, current_user, receipt),
+    }
+    if note.request_id and db_early is not None:
+        done = _replayed_payment(db_early, note.request_id, sent, current_user, "vendor_debit_notes")
+        if done is not None:
+            return done
     created_at = utc_now_iso()
     shop = _money_shop(
         named,
@@ -626,11 +720,16 @@ async def create_debit_note(
         money={"date": note.date, "created_at": created_at},
     )
 
+    if db_early is None:
+        # Nowhere to save: never a 201 for a credit nothing stored.
+        raise HTTPException(status_code=503, detail="Database unavailable")
     dn_id = str(uuid.uuid4())
-    prefix = vendor_id[:3].upper() if vendor_id else "DN"
     doc = {
+        **({"request_id": note.request_id} if note.request_id else {}),
         "debit_note_id": dn_id,
-        "debit_note_number": f"DN-{prefix}-{datetime.now().strftime('%y%m%d%H%M')}",
+        # One consecutive reference per shop and year (L3-27); it was the
+        # supplier id plus the minute, shared by same-minute credits.
+        "debit_note_number": generate_supplier_credit_number(shop),
         "vendor_id": vendor_id,
         "vendor_name": (vendor or {}).get("trade_name")
         or (vendor or {}).get("legal_name"),
@@ -649,15 +748,25 @@ async def create_debit_note(
         "created_by": current_user.get("user_id"),
         "created_at": created_at,
     }
-    db = _get_db()
-    if db is not None:
-        try:
-            db.get_collection("vendor_debit_notes").insert_one(dict(doc))
-        except Exception as exc:
+    db = db_early
+    if note.request_id:
+        _ensure_request_index(db, "vendor_debit_notes")
+    try:
+        db.get_collection("vendor_debit_notes").insert_one(dict(doc))
+    except Exception as exc:
+        # The same request racing itself (the unique index let one through),
+        # or a save that landed with its reply lost: the stored note.
+        done = (
+            _replayed_payment(db, note.request_id, sent, current_user, "vendor_debit_notes")
+            if note.request_id else _landed(db, "vendor_debit_notes", "debit_note_id", doc)
+        )
+        if done is None:
             raise HTTPException(
                 status_code=500, detail="Failed to save debit note"
             ) from exc
         _recompute_bill_status(db, note.bill_id)
+        return done
+    _recompute_bill_status(db, note.bill_id)
     return _clean(doc)
 
 

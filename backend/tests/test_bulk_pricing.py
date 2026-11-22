@@ -39,6 +39,7 @@ import asyncio
 import os
 import sys
 import uuid
+from datetime import datetime
 from typing import Any, Dict, List
 
 import pytest
@@ -277,6 +278,24 @@ def _seed_products(mongo_db, products: List[Dict[str, Any]]) -> List[str]:
     return pids
 
 
+def _expected_of(preview: Dict[str, Any]) -> List[Any]:
+    from api.routers.products import BulkReviewedRow
+
+    return [
+        BulkReviewedRow(product_id=r["product_id"], mrp=r.get("old_mrp", r.get("mrp")), offer_price=r["old_offer_price"], version=r.get("version", ""))
+        for r in preview["rows"]
+    ]
+
+
+async def _reviewed(fn, body):
+    """L1-F47: an Apply names the rows its preview showed. Preview first, then
+    Apply exactly those (a dry run is passed through unchanged)."""
+    if not body.apply:
+        return await fn(body, ADMIN_USER)
+    pre = await fn(body.model_copy(update={"apply": False}), ADMIN_USER)
+    return await fn(body.model_copy(update={"expected": _expected_of(pre)}), ADMIN_USER)
+
+
 def _get_product(mongo_db, pid: str) -> Dict[str, Any]:
     return mongo_db["products"].find_one({"product_id": pid})
 
@@ -327,7 +346,7 @@ class TestBulkOfferEndpoint:
 
         pids = _seed_products(mongo_db, _sample_catalog())
         body = BulkOfferRequest(action="SET", discount_percent=5.0, apply=False)
-        res = await bulk_offer_update(body, ADMIN_USER)
+        res = await _reviewed(bulk_offer_update, body)
 
         assert res["dry_run"] is True
         assert res["summary"]["counts"]["total"] == 3
@@ -344,7 +363,7 @@ class TestBulkOfferEndpoint:
         pids = _seed_products(mongo_db, _sample_catalog())
         # 5% off everything: fine for MASS(15)/PREMIUM(20), violates Cartier(2).
         body = BulkOfferRequest(action="SET", discount_percent=5.0, apply=True)
-        res = await bulk_offer_update(body, ADMIN_USER)
+        res = await _reviewed(bulk_offer_update, body)
 
         rows = {r["sku"]: r for r in res["rows"]}
         lux = rows["BLK-LUX-1"]
@@ -374,7 +393,7 @@ class TestBulkOfferEndpoint:
         body = BulkOfferRequest(
             action="SET", discount_percent=2.0, brand="Cartier", apply=True
         )
-        res = await bulk_offer_update(body, ADMIN_USER)
+        res = await _reviewed(bulk_offer_update, body)
 
         assert res["summary"]["counts"]["total"] == 1  # brand filter
         lux_doc = _get_product(mongo_db, pids[1])
@@ -391,7 +410,7 @@ class TestBulkOfferEndpoint:
         pids = _seed_products(mongo_db, cat)
 
         body = BulkOfferRequest(action="CLEAR", brand="Ray-Ban", apply=True)
-        res = await bulk_offer_update(body, ADMIN_USER)
+        res = await _reviewed(bulk_offer_update, body)
 
         doc = _get_product(mongo_db, pids[0])
         assert doc["offer_price"] == 1000.0  # reset to MRP
@@ -406,10 +425,10 @@ class TestBulkOfferEndpoint:
         body = BulkOfferRequest(
             action="SET", discount_percent=5.0, brand="Ray-Ban", apply=True
         )
-        first = await bulk_offer_update(body, ADMIN_USER)
+        first = await _reviewed(bulk_offer_update, body)
         assert first["summary"]["committed"] == 1
 
-        second = await bulk_offer_update(body, ADMIN_USER)
+        second = await _reviewed(bulk_offer_update, body)
         assert second["summary"]["committed"] == 0
         assert second["summary"]["counts"]["unchanged"] == 1
 
@@ -421,7 +440,7 @@ class TestBulkOfferEndpoint:
         body = BulkOfferRequest(
             action="SET", discount_percent=5.0, brand="Ray-Ban", apply=True
         )
-        await bulk_offer_update(body, ADMIN_USER)
+        await _reviewed(bulk_offer_update, body)
 
         log = mongo_db["audit_logs"].find_one({"action": "BULK_OFFER_UPDATE"})
         assert log is not None
@@ -439,7 +458,7 @@ class TestBulkPriceEndpoint:
         pids = _seed_products(mongo_db, _sample_catalog())
         # +10% to MRP, dry run.
         body = BulkPriceRequest(mode="PERCENT", target="MRP", amount=10.0, apply=False)
-        res = await bulk_price_update(body, ADMIN_USER)
+        res = await _reviewed(bulk_price_update, body)
 
         assert res["dry_run"] is True
         for pid in pids:
@@ -458,7 +477,7 @@ class TestBulkPriceEndpoint:
         body = BulkPriceRequest(
             mode="PERCENT", target="BOTH", amount=10.0, brand="Ray-Ban", apply=True
         )
-        res = await bulk_price_update(body, ADMIN_USER)
+        res = await _reviewed(bulk_price_update, body)
 
         doc = _get_product(mongo_db, pids[0])
         assert doc["mrp"] == 1100.0
@@ -476,7 +495,7 @@ class TestBulkPriceEndpoint:
         body = BulkPriceRequest(
             mode="FLAT", target="OFFER", amount=-6000.0, brand="Cartier", apply=True
         )
-        res = await bulk_price_update(body, ADMIN_USER)
+        res = await _reviewed(bulk_price_update, body)
 
         row = res["rows"][0]
         assert row["ok"] is False
@@ -497,7 +516,7 @@ class TestBulkPriceEndpoint:
         body = BulkPriceRequest(
             mode="FLAT", target="MRP", amount=-200.0, brand="Ray-Ban", apply=True
         )
-        res = await bulk_price_update(body, ADMIN_USER)
+        res = await _reviewed(bulk_price_update, body)
 
         row = res["rows"][0]
         assert row["ok"] is False
@@ -513,7 +532,7 @@ class TestBulkPriceEndpoint:
         body = BulkPriceRequest(
             mode="PERCENT", target="MRP", amount=10.0, brand="Ray-Ban", apply=True
         )
-        await bulk_price_update(body, ADMIN_USER)
+        await _reviewed(bulk_price_update, body)
 
         log = mongo_db["audit_logs"].find_one({"action": "BULK_PRICE_UPDATE"})
         assert log is not None
@@ -544,7 +563,7 @@ class TestBulkPriceEndpoint:
             store_id="BV-STORE-A",
             apply=False,
         )
-        res = await bulk_price_update(body, ADMIN_USER)
+        res = await _reviewed(bulk_price_update, body)
         assert res["summary"]["counts"]["total"] == 1
         assert res["rows"][0]["sku"] == "BLK-MASS-1"
 
@@ -559,7 +578,7 @@ class TestBulkValidation:
 
         body = BulkPriceRequest(mode="WRONG", target="OFFER", amount=1.0)
         with pytest.raises(HTTPException) as ei:
-            await bulk_price_update(body, ADMIN_USER)
+            await _reviewed(bulk_price_update, body)
         assert ei.value.status_code == 400
 
     async def test_set_without_value_rejected(self, patch_db, mongo_db):
@@ -568,5 +587,162 @@ class TestBulkValidation:
 
         body = BulkOfferRequest(action="SET")  # neither pct nor price
         with pytest.raises(HTTPException) as ei:
-            await bulk_offer_update(body, ADMIN_USER)
+            await _reviewed(bulk_offer_update, body)
         assert ei.value.status_code == 400
+
+
+class TestApplyBoundToReviewedRows:
+    """L1-F47 (Codex PR-1429 round 1): Apply re-selected the scope, so a row
+    added or edited after the preview was changed unseen, and a lost reply
+    retried re-applied the delta (1000 -> 1010 -> 1020). An Apply now names
+    the reviewed rows and their prices; each row moves at most once."""
+
+    @staticmethod
+    def _plus10():
+        from api.routers.products import BulkPriceRequest
+
+        return BulkPriceRequest(mode="FLAT", target="BOTH", amount=10.0, brand="Ray-Ban")
+
+    async def _preview_then_apply(self, fn, body):
+        pre = await fn(body, ADMIN_USER)
+        return body.model_copy(update={"apply": True, "expected": _expected_of(pre)})
+
+    async def test_lost_reply_retry_never_applies_the_delta_twice(self, mongo_db, patch_db):
+        from api.routers.products import bulk_price_update
+
+        pids = _seed_products(mongo_db, _sample_catalog())
+        apply = await self._preview_then_apply(bulk_price_update, self._plus10())
+        first = await bulk_price_update(apply, ADMIN_USER)
+        assert first["summary"]["committed"] == 1
+        # The reply was lost; the same reviewed Apply is sent again.
+        again = await bulk_price_update(apply, ADMIN_USER)
+        assert again["summary"]["committed"] == 0
+        assert again["summary"]["counts"]["already_applied"] == 1
+        assert again["rows"][0]["already_applied"] is True
+        doc = _get_product(mongo_db, pids[0])
+        assert (doc["mrp"], doc["offer_price"]) == (1010.0, 1010.0)
+
+    async def test_a_row_moved_back_to_its_old_price_is_never_reapplied(self, mongo_db, patch_db):
+        """D94(1) ABA: W1 lands 1000 -> 1010, someone edits it back to 1000,
+        then W1's identical retry arrives. The price matches the preview
+        again, but the row's version does not: left alone, never 1010 again."""
+        from database.repositories.product_repository import ProductRepository
+        from api.routers.products import bulk_price_update
+
+        pids = _seed_products(mongo_db, _sample_catalog())
+        apply = await self._preview_then_apply(bulk_price_update, self._plus10())
+        assert (await bulk_price_update(apply, ADMIN_USER))["summary"]["committed"] == 1
+        assert ProductRepository(mongo_db["products"]).update(pids[0], {"mrp": 1000.0, "offer_price": 1000.0})
+        again = await bulk_price_update(apply, ADMIN_USER)
+        assert again["summary"]["committed"] == 0
+        assert again["summary"]["counts"]["changed_since_preview"] == 1
+        assert again["rows"][0]["reason"] == "CHANGED_SINCE_PREVIEW"
+        doc = _get_product(mongo_db, pids[0])
+        assert (doc["mrp"], doc["offer_price"]) == (1000.0, 1000.0)
+
+    async def test_a_row_added_after_the_preview_refuses_the_whole_apply(self, mongo_db, patch_db):
+        from fastapi import HTTPException
+        from api.routers.products import bulk_offer_update, bulk_price_update, BulkOfferRequest
+
+        _seed_products(mongo_db, _sample_catalog())
+        price_apply = await self._preview_then_apply(bulk_price_update, self._plus10())
+        offer_apply = await self._preview_then_apply(
+            bulk_offer_update, BulkOfferRequest(action="SET", discount_percent=10.0, brand="Ray-Ban")
+        )
+        late = _sample_catalog()[0] | {"sku": "BLK-MASS-LATE", "model": "Late"}
+        late_pid = _seed_products(mongo_db, [late])[0]
+        for fn, body in ((bulk_price_update, price_apply), (bulk_offer_update, offer_apply)):
+            with pytest.raises(HTTPException) as ei:
+                await fn(body, ADMIN_USER)
+            assert ei.value.status_code == 409
+            assert "1 added" in ei.value.detail
+        for doc in mongo_db["products"].find({"brand": "Ray-Ban"}):
+            assert (doc["mrp"], doc["offer_price"]) == (1000.0, 1000.0), doc["sku"]
+        assert mongo_db["audit_logs"].count_documents({}) == 0
+
+    async def test_a_price_edited_after_the_preview_is_left_alone_and_keeps_the_edit(self, mongo_db, patch_db):
+        """D94(1): a row changed since the preview is reported and left alone."""
+        from api.routers.products import bulk_price_update
+
+        pids = _seed_products(mongo_db, _sample_catalog())
+        apply = await self._preview_then_apply(bulk_price_update, self._plus10())
+        mongo_db["products"].update_one({"product_id": pids[0]}, {"$set": {"offer_price": 900.0}})
+        res = await bulk_price_update(apply, ADMIN_USER)
+        assert res["summary"]["committed"] == 0
+        assert res["summary"]["counts"]["changed_since_preview"] == 1
+        assert res["rows"][0]["reason"] == "CHANGED_SINCE_PREVIEW" and res["rows"][0]["applied"] is False
+        doc = _get_product(mongo_db, pids[0])
+        assert (doc["mrp"], doc["offer_price"]) == (1000.0, 900.0)
+
+    async def test_apply_without_reviewed_rows_is_refused(self, mongo_db, patch_db):
+        from fastapi import HTTPException
+        from api.routers.products import bulk_price_update
+
+        pids = _seed_products(mongo_db, _sample_catalog())
+        with pytest.raises(HTTPException) as ei:
+            await bulk_price_update(self._plus10().model_copy(update={"apply": True}), ADMIN_USER)
+        assert ei.value.status_code == 422
+        assert _get_product(mongo_db, pids[0])["mrp"] == 1000.0
+
+    @pytest.mark.parametrize("racer_value,want", [("same-apply", "applied"), (1010.0, "refused"), (1234.0, "refused")])
+    async def test_a_concurrent_write_between_check_and_write_moves_the_row_once(
+        self, mongo_db, patch_db, monkeypatch, racer_value, want
+    ):
+        """The identical retry of this Apply (or an editor) writes the row
+        between this Apply's check and its write: the compare-and-set write
+        does not land, so the row never moves twice. The identical retry's
+        write is this Apply's own (D94: same Apply id); anyone else's -- even
+        to the same price -- is 'changed since preview' and left alone."""
+        import api.routers.products as products_mod
+
+        pids = _seed_products(mongo_db, _sample_catalog())
+        apply = await self._preview_then_apply(products_mod.bulk_price_update, self._plus10())
+        checked = products_mod._reviewed_states  # pylint: disable=protected-access
+
+        same = racer_value == "same-apply"
+        value = 1010.0 if same else racer_value
+        racer = {"mrp": value, "offer_price": value, "updated_at": datetime.now()}
+        if same:
+            racer["bulk_write_id"] = products_mod._bulk_apply_id(  # pylint: disable=protected-access
+                "BULK_PRICE_UPDATE", ADMIN_USER, apply
+            )
+
+        def racing(*a, **kw):
+            out = checked(*a, **kw)
+            mongo_db["products"].update_one({"product_id": pids[0]}, {"$set": racer})
+            return out
+
+        monkeypatch.setattr(products_mod, "_reviewed_states", racing)
+        res = await products_mod.bulk_price_update(apply, ADMIN_USER)
+        row = res["rows"][0]
+        if want == "applied":
+            assert res["summary"]["committed"] == 1 and row["applied"] is True
+        else:
+            assert res["summary"]["committed"] == 0 and row["applied"] is False
+            assert row["reason"] == "CHANGED_SINCE_PREVIEW"
+        doc = _get_product(mongo_db, pids[0])
+        assert (doc["mrp"], doc["offer_price"]) == (value, value)
+
+    async def test_a_failed_read_is_503_never_an_empty_or_unscoped_preview(self, mongo_db, patch_db, monkeypatch):
+        from fastapi import HTTPException
+        import api.routers.products as products_mod
+
+        _seed_products(mongo_db, _sample_catalog())
+        monkeypatch.setattr(products_mod, "_store_scoped_product_ids", lambda _sid: None)
+        with pytest.raises(HTTPException) as ei:
+            await products_mod.bulk_price_update(
+                products_mod.BulkPriceRequest(mode="PERCENT", target="MRP", amount=5.0, store_id="BV-STORE-A"),
+                ADMIN_USER,
+            )
+        assert ei.value.status_code == 503
+
+        class _Down:
+            def find(self, *_a, **_k):
+                raise RuntimeError("mongo down")
+
+        repo = products_mod.get_product_repository()
+        monkeypatch.setattr(repo, "collection", _Down(), raising=False)
+        monkeypatch.setattr(products_mod, "get_product_repository", lambda: repo)
+        with pytest.raises(HTTPException) as ei:
+            await products_mod.bulk_offer_update(products_mod.BulkOfferRequest(action="CLEAR"), ADMIN_USER)
+        assert ei.value.status_code == 503

@@ -16,6 +16,7 @@ import { financeApi } from '../../services/api/finance';
 import { AutoLogoutSettings } from '../../components/settings/AutoLogoutSettings';
 import { settingsApi } from '../../services/api/settings';
 import { useAuth } from '../../context/AuthContext';
+import { isSuperAdmin } from '../../utils/capabilities';
 import { useLoadedSettings, settingsLoadErrorText } from '../../hooks/useLoadedSettings';
 import { SettingsLoadError } from '../../components/settings/SettingsLoadError';
 
@@ -135,8 +136,8 @@ function SystemSection({ systemStatus }: { systemStatus: { database: string; api
 // merges). Switching it off runs the stock pass at once (settings.py).
 export function WebPageTypesSetting() {
   const toast = useToast();
-  const { hasRole } = useAuth();
-  const canEdit = hasRole(['SUPERADMIN']);
+  const { user } = useAuth();
+  const canEdit = isSuperAdmin(user?.roles); // PUT /settings/system is SUPERADMIN-only
   // A failed read is not "off": the box stays locked and says so.
   const { data: current, status, reload, update: setCurrent } = useLoadedSettings<Record<string, unknown>>(async () => {
     const d = await settingsApi.getSystemSettings();

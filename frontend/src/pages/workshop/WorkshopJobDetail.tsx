@@ -13,7 +13,7 @@ import {
   handoverBlockerMessage,
   QC_ACTIONABLE_STATUSES,
 } from './qcHandover';
-import { resolveLensConfig, resolveStatusConfig, resolvePriorityConfig } from './shared';
+import { resolveLensConfig, resolveStatusConfig, resolvePriorityConfig, NOT_ON_FILE, FINISHED_JOB_STATUSES } from './shared';
 import type { LensStatus } from './shared';
 import { VendorCaptureBlock } from './VendorCaptureBlock';
 import type { WorkshopPageState } from './useWorkshopPage';
@@ -48,7 +48,7 @@ export function WorkshopJobDetail({ page }: { page: WorkshopPageState }) {
                   <span className={clsx('text-sm font-medium', resolvePriorityConfig(selectedJob.priority).class)}>
                     {selectedJob.priority}
                   </span>
-                  {isOverdue(selectedJob.promisedDate) && !['READY', 'DELIVERED', 'CANCELLED'].includes(selectedJob.status) && (
+                  {isOverdue(selectedJob.promisedDate) && !FINISHED_JOB_STATUSES.includes(selectedJob.status) && (
                     <span className="px-2 py-1 bg-red-50 text-red-700 text-xs rounded-full font-medium">Overdue</span>
                   )}
                 </div>
@@ -57,10 +57,10 @@ export function WorkshopJobDetail({ page }: { page: WorkshopPageState }) {
                 <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 space-y-2">
                   <h3 className="text-sm font-medium text-gray-500">Customer</h3>
                   <p className="font-medium text-gray-900 flex items-center gap-2">
-                    <User className="w-4 h-4" /> {selectedJob.customerName}
+                    <User className="w-4 h-4" /> {selectedJob.customerName || NOT_ON_FILE}
                   </p>
                   <p className="text-sm text-gray-500 flex items-center gap-2">
-                    <Phone className="w-4 h-4" /> {selectedJob.customerPhone}
+                    <Phone className="w-4 h-4" /> {selectedJob.customerPhone || NOT_ON_FILE}
                   </p>
                 </div>
 
@@ -68,15 +68,15 @@ export function WorkshopJobDetail({ page }: { page: WorkshopPageState }) {
                 <div className="grid grid-cols-2 gap-4">
                   <div>
                     <p className="text-sm text-gray-500">Order Number</p>
-                    <p className="font-medium">{selectedJob.orderNumber}</p>
+                    <p className="font-medium">{selectedJob.orderNumber || NOT_ON_FILE}</p>
                   </div>
                   <div>
                     <p className="text-sm text-gray-500">Frame</p>
-                    <p className="font-medium">{selectedJob.frameName}</p>
+                    <p className="font-medium">{selectedJob.frameName || NOT_ON_FILE}</p>
                   </div>
                   <div>
                     <p className="text-sm text-gray-500">Lens Type</p>
-                    <p className="font-medium">{selectedJob.lensType}</p>
+                    <p className="font-medium">{selectedJob.lensType || NOT_ON_FILE}</p>
                   </div>
                   {selectedJob.frameBarcode && (
                     <div>
@@ -111,6 +111,14 @@ export function WorkshopJobDetail({ page }: { page: WorkshopPageState }) {
                     </div>
                   )}
                 </div>
+
+                {/* Fitting instructions from the sale (L2-WS-F03) */}
+                {selectedJob.fittingInstructions && (
+                  <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
+                    <p className="text-sm font-medium text-blue-800">Fitting instructions</p>
+                    <p className="text-sm text-blue-800 mt-1 whitespace-pre-line">{selectedJob.fittingInstructions}</p>
+                  </div>
+                )}
 
                 {/* Notes */}
                 {selectedJob.notes && (

@@ -476,7 +476,10 @@ def test_a_claim_whose_finished_read_failed_is_not_acknowledged_as_done(db, monk
 
     assert len(reads) >= 2
     assert row["processed"] is False and row["status"] == "failed", row
-    assert "exception:TimeoutError" in row["handler_error"]
+    # Main's D118 answer to an unreadable claim (merged): a retried error.
+    from api.services.shopify_refund import CLAIM_UNREADABLE_TEXT
+
+    assert CLAIM_UNREADABLE_TEXT in row["handler_error"]
     assert _money_rows(db) == before
 
     # Reads working again: the fresh claim is still reported unfinished (the
@@ -593,7 +596,10 @@ def test_a_failed_retry_claim_is_a_retryable_failure_not_a_duplicate(db, monkeyp
         row = _drain(db, "refund-claim-" + mode)
     assert hits, "the retry claim was not exercised"
     assert row["processed"] is False and row["status"] == "failed", row
-    assert "claim held or unverified" in row["handler_error"]
+    # A claim write that raised is main's D118 retried error (merged).
+    from api.services.shopify_refund import CLAIM_UNREADABLE_TEXT
+
+    assert CLAIM_UNREADABLE_TEXT in row["handler_error"]
     assert db.credit_note_ledger.count_documents({}) == ledger_before
     ret = db.returns.find_one({"shopify_refund_id": _REFUND_ID})
     assert ret["credit_note_issued"] is False
@@ -603,6 +609,7 @@ def test_a_failed_retry_claim_is_a_retryable_failure_not_a_duplicate(db, monkeyp
         # acknowledge it (single winner) until the claim goes stale.
         row = _drain(db, "refund-claim-" + mode)
         assert row["processed"] is False and row["status"] == "failed", row
+        assert "claim held or unverified" in row["handler_error"]  # D55: never "duplicate"
         assert db.credit_note_ledger.count_documents({}) == ledger_before
         db.returns.update_one({"shopify_refund_id": _REFUND_ID}, {"$set": {
             "reprocessing_at": (datetime.now(timezone.utc) - timedelta(minutes=20)).isoformat()}})
@@ -886,3 +893,4 @@ def test_two_drains_raising_the_alert_at_once_open_one_task(db, an_admin, monkey
     for wid in ("race-1", "race-2"):
         assert f"id {wid}." in tasks[0]["description"]
         assert "alert_pending" not in db.webhook_inbox.find_one({"webhook_id": wid})
+

@@ -32,3 +32,17 @@ describe('adminUserApi.updateUser login identity', () => {
     expect(payload).not.toHaveProperty('email');
   });
 });
+
+describe('adminUserApi D93: the roles the editor saw', () => {
+  it('maps expectedRoles to expected_roles on update and revert', async () => {
+    await adminUserApi.updateUser('u1', { discountCap: 15, expectedRoles: ['SALES_STAFF'] });
+    expect(mockPut.mock.calls[0][1]).toMatchObject({ discount_cap: 15, expected_roles: ['SALES_STAFF'] });
+    const mockPost = api.post as unknown as ReturnType<typeof vi.fn>;
+    mockPost.mockResolvedValue({ data: {} });
+    await adminUserApi.revertUserPermissions('u1', 'log1', ['ACCOUNTANT']);
+    expect(mockPost).toHaveBeenCalledWith('/users/u1/permissions/revert', {
+      audit_log_id: 'log1',
+      expected_roles: ['ACCOUNTANT'],
+    });
+  });
+});

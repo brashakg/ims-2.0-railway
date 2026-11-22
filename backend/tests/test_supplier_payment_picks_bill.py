@@ -281,33 +281,216 @@ def test_the_form_is_offered_exactly_what_the_refusal_allows(ap):
     assert _pay(world, {"amount": 600, "bill_id": "B1"}).status_code == 201
 
 
-class _InsertFailsAfterRival:
-    """vendor_payments whose next insert fails -- after a rival application
-    of the same advance has taken its own share in between."""
+class _Faulty:
+    """vendor_payments whose next `op` (insert_one / update_one) fails once.
+    `lands`: the write is stored and only its reply is lost."""
 
-    def __init__(self, real, adv):
-        self._real, self._adv = real, adv
+    def __init__(self, real, op, lands, before=None):
+        self._real, self._op, self._lands, self._before, self.armed = real, op, lands, before, True
 
     def __getattr__(self, name):
         return getattr(self._real, name)
 
-    def insert_one(self, doc, *a, **k):
-        left = self._real.find_one({"payment_id": self._adv})["amount"]
-        self._real.update_one({"payment_id": self._adv}, {"$set": {"amount": left - 50}})
-        self._real.insert_one({**doc, "payment_id": "RIVAL", "amount": 50})
-        raise OSError("insert failed")
+    def _write(self, op, *a, **k):
+        if op != self._op or not self.armed:
+            return getattr(self._real, op)(*a, **k)
+        self.armed = False
+        if self._before:
+            self._before()
+        if self._lands:
+            getattr(self._real, op)(*a, **k)
+        raise OSError(f"vendor_payments {op}: no reply")
+
+    def insert_one(self, *a, **k):
+        return self._write("insert_one", *a, **k)
+
+    def update_one(self, *a, **k):
+        return self._write("update_one", *a, **k)
 
 
-def test_a_failed_apply_gives_back_only_what_it_took(ap, monkeypatch):
+def _faulty(memory, monkeypatch, op, lands, before=None):
+    coll = _Faulty(memory.vendor_payments, op, lands, before)
+    monkeypatch.setattr(vendors_pkg, "_get_db", lambda: SimpleNamespace(
+        get_collection=lambda name: coll if name == "vendor_payments" else memory[name]))
+    return coll
+
+
+def _recorded(memory, adv):
+    """What the books hold for one advance: what is left of it plus every
+    payment row applied from it."""
+    rows = list(memory.vendor_payments.find({"$or": [{"payment_id": adv}, {"applied_from": adv}]}))
+    return sum(r["amount"] for r in rows), len(rows) - 1
+
+
+# --- PR #1423 round 15: a part-application is two writes ----------------------
+
+
+def test_a_part_apply_whose_row_landed_with_its_reply_lost_is_applied_once(ap, monkeypatch):
+    """The split row was stored and only its reply was lost: the door gave
+    the advance its amount back and said 'Failed' -- Rs 1,400 recorded for
+    Rs 1,000 paid, and the retry applied it a second time."""
+    memory, world = ap
+    memory.vendor_bills.update_one({}, {"$set": {"total_amount": 5000}})
+    adv = _pay(world, {"amount": 1000}).json()["payment_id"]
+    _faulty(memory, monkeypatch, "insert_one", lands=True)
+    done = _apply(world, adv, "B1", 400, left=1000)
+    assert done.status_code == 200 and done.json()["advance_left"] == 600
+    assert _recorded(memory, adv) == (1000, 1)
+    again = _apply(world, adv, "B1", 400, left=1000)  # the accountant's retry
+    assert again.status_code == 409 and "already applied" in again.json()["detail"]
+    assert _recorded(memory, adv) == (1000, 1)
+    assert _owed_and_advances(world) == (4600, 600)
+
+
+@pytest.mark.parametrize("op,lands", [("insert_one", False), ("update_one", True)])
+def test_a_part_apply_cut_off_between_its_two_writes_is_finished_never_lost(ap, monkeypatch, op, lands):
+    """The advance was reduced and the row naming the bill never written (the
+    insert failed, the process died, or the first write's reply was lost):
+    Rs 400 of a real payment left the supplier's ledger and nothing brought it
+    back. Now the door says it could not confirm (never 'failed', never a
+    give-back that can cross a row that did land) and the application is
+    finished by the next read of the supplier's ledger or the next apply."""
+    memory, world = ap
+    memory.vendor_bills.update_one({}, {"$set": {"total_amount": 5000}})
+    adv = _pay(world, {"amount": 1000}).json()["payment_id"]
+    _faulty(memory, monkeypatch, op, lands)
+    cut = _apply(world, adv, "B1", 400, left=1000)
+    assert cut.status_code == 503 and "Could not confirm" in cut.json()["detail"]
+    assert _recorded(memory, adv) == (600, 0)  # half done: the row is still owed
+    if op == "insert_one":  # the screen the message sends the accountant to
+        assert _advance_left(world, adv, ACCT_PUNE) == 600
+        assert _recorded(memory, adv) == (1000, 1)
+    again = _apply(world, adv, "B1", 400, left=1000)  # the retry finishes it too
+    assert again.status_code == 409 and "already applied" in again.json()["detail"]
+    assert _recorded(memory, adv) == (1000, 1)
+    row = memory.vendor_payments.find_one({"applied_from": adv})
+    assert (row["bill_id"], row["amount"], row["store_id"], row["_id"]) == ("B1", 400, PUN, row["payment_id"])
+    assert _owed_and_advances(world) == (4600, 600)
+    assert memory.vendor_bills.find_one({"bill_id": "B1"})["status"] == "PARTIAL"
+    # Finished once: reading again, or applying the rest, adds nothing.
+    assert _apply(world, adv, "B1", 600).status_code == 200
+    assert _recorded(memory, adv) == (1000, 1)
+    assert _owed_and_advances(world) == (4000, 0)
+
+
+def test_a_cut_off_apply_is_finished_and_a_rival_keeps_its_share(ap, monkeypatch):
+    """A rival application took its own Rs 50 of the advance between this
+    call's two writes, and this call's row was not written: the rival's 50
+    stands and this call's 300 is finished, 400 paid in all."""
     memory, world = ap
     adv = _pay(world, {"amount": 400}).json()["payment_id"]
-    proxy = SimpleNamespace(get_collection=lambda name: (
-        _InsertFailsAfterRival(memory[name], adv) if name == "vendor_payments" else memory[name]))
-    monkeypatch.setattr(vendors_pkg, "_get_db", lambda: proxy)
-    assert _apply(world, adv, "B1", 300, left=400).status_code == 500
-    # The rival's 50 stands; the failed 300 went back: 350 + 50 = 400 paid.
-    assert memory.vendor_payments.find_one({"payment_id": adv})["amount"] == 350
-    assert sum(p["amount"] for p in memory.vendor_payments.find({})) == 400
+
+    def rival():
+        left = memory.vendor_payments.find_one({"payment_id": adv})["amount"]
+        memory.vendor_payments.update_one({"payment_id": adv}, {"$set": {"amount": left - 50}})
+        memory.vendor_payments.insert_one(payment(50, "B1", store_id=PUN, payment_id="RIVAL", applied_from=adv))
+
+    _faulty(memory, monkeypatch, "insert_one", lands=False, before=rival)
+    assert _apply(world, adv, "B1", 300, left=400).status_code == 503
+    assert _advance_left(world, adv, ACCT_PUNE) == 50
+    assert _recorded(memory, adv) == (400, 2)
+
+
+def test_a_read_that_finishes_the_application_first_leaves_one_row(ap, monkeypatch):
+    """A ledger read finished the application between the door's two writes:
+    the row is insert-once (its own _id), so the door's insert is a duplicate
+    key, read back as stored -- one row, never two."""
+    memory, world = ap
+    adv = _pay(world, {"amount": 400}).json()["payment_id"]
+    real = memory.vendor_payments
+
+    class _ReaderFirst:
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+        def insert_one(self, doc, *a, **k):
+            real.insert_one(dict(doc))  # the row the read stored
+            return real.insert_one(doc, *a, **k)
+
+    monkeypatch.setattr(vendors_pkg, "_get_db", lambda: SimpleNamespace(
+        get_collection=lambda name: _ReaderFirst() if name == "vendor_payments" else memory[name]))
+    assert _apply(world, adv, "B1", 300, left=400).status_code == 200
+    assert _recorded(memory, adv) == (400, 1)
+
+
+def test_a_half_done_application_counts_for_every_reader_of_supplier_money(ap, monkeypatch):
+    """PR #1423 review (1423-R15-advance-apply): the advance was reduced and
+    logged, its row naming the bill not stored, and nobody has opened the
+    supplier's ledger. Aging, the bill's left-to-pay, the dashboard and the
+    Purchases report read the bill as untouched (Rs 400 too much owed), and a
+    Rs 1,000 payment naming the bill was accepted -- Rs 1,400 on a Rs 1,000
+    bill for good once the ledger was read. The logged application now counts
+    in the shared row rule, written or not."""
+    memory, world = ap
+    memory.vendors.insert_one({"vendor_id": "V1"})
+    adv = _pay(world, {"amount": 1000}).json()["payment_id"]
+    _faulty(memory, monkeypatch, "insert_one", lands=False)
+    assert _apply(world, adv, "B1", 400, left=1000).status_code == 503
+    half_done = (600, 0)  # the advance is reduced, no row names the bill
+    assert _recorded(memory, adv) == half_done
+    assert _owed_and_advances(world) == (600, 600)
+    listed = world.ok("/vendors/V1/bills", ACCT_PUNE)["bills"][0]
+    assert (listed["status"], listed["outstanding"]) == ("PARTIAL", 600)
+    dash = world.ok("/finance/owner-dashboard", ACCT_PUNE)["payables"]
+    assert (dash["total"], dash["advances"]) == (600, 600)
+    report = world.ok("/vendors/purchases-this-month", ACCT_PUNE, month="2026-10")
+    # The report nets every payment against the supplier: all Rs 1,000 paid.
+    assert (report["totals"]["paid"], report["totals"]["owed"]) == (1000, 0)
+    # The TDS threshold's FY cumulative reads through the same rule (decision
+    # D103(3)): the Rs 400 applied is paid money whether or not its row is
+    # stored -- it read Rs 600, low by the applied amount.
+    assert _tds_cumulative(world) == 1000
+    # The over-pay guard (A12-2): a payment naming the bill, and a second
+    # advance applied to it, are held to the Rs 600 really left.
+    over = _pay(world, {"amount": 1000, "bill_id": "B1"})
+    assert over.status_code == 422 and over.json()["detail"]["left"] == 600
+    other = _pay(world, {"amount": 700}).json()["payment_id"]
+    assert _apply(world, other, "B1", 700, left=700).json()["detail"]["left"] == 600
+    assert _recorded(memory, adv) == half_done  # no reader above wrote anything
+    assert _pay(world, {"amount": 600, "bill_id": "B1"}).status_code == 201
+    # The ledger read stores the row: the same figures, the bill never over 1,000.
+    world.ok("/vendors/V1/ledger", ACCT_PUNE)
+    assert _recorded(memory, adv) == (1000, 1)
+    assert sum(r["amount"] for r in memory.vendor_payments.find({"bill_id": "B1"})) == 1000
+    assert _owed_and_advances(world) == (0, 1300)
+    assert _tds_cumulative(world) == 2300  # the stored row counts once, not twice
+    assert world.ok("/vendors/V1/bills", ACCT_PUNE)["bills"][0]["status"] == "PAID"
+
+
+def _tds_cumulative(world):
+    return world.ok("/vendors/tds/threshold-status", ACCT_PUNE, vendor_id="V1", section="194C_OTHER",
+                    current_payment=0, fy_start="2026-04-01")["cumulative_fy_payments"]
+
+
+@pytest.mark.parametrize("down", ["vendor_payments", "tds_rate_config"])
+def test_the_tds_threshold_never_answers_from_a_read_that_failed(ap, monkeypatch, down):
+    """A failed read of the supplier's payments used to answer a cumulative
+    of 0 (200): "threshold not crossed". A failed read of the admin's TDS
+    rates used the built-in ones. Both are no answer now (503)."""
+    memory, world = ap
+    assert _pay(world, {"amount": 1000}).status_code == 201
+    assert _tds_cumulative(world) == 1000
+
+    def refuse(*_a, **_k):
+        raise OSError(f"{down}: read refused")
+
+    broken = SimpleNamespace(find=refuse, find_one=refuse)
+    monkeypatch.setattr(vendors_pkg, "_get_db", lambda: SimpleNamespace(
+        get_collection=lambda name: broken if name == down else memory[name]))
+    res = world.get("/vendors/tds/threshold-status", ACCT_PUNE, vendor_id="V1", section="194C_OTHER",
+                    current_payment=0, fy_start="2026-04-01")
+    assert res.status_code == 503 and "Try again" in res.json()["detail"]
+
+
+def test_a_whole_apply_whose_reply_was_lost_says_so_and_is_applied_once(ap, monkeypatch):
+    memory, world = ap
+    adv = _pay(world, {"amount": 400}).json()["payment_id"]
+    _faulty(memory, monkeypatch, "update_one", lands=True)
+    lost = _apply(world, adv, "B1", 400, left=400)
+    assert lost.status_code == 503 and "Could not confirm" in lost.json()["detail"]
+    assert _apply(world, adv, "B1", 400, left=400).status_code == 409  # already on the bill
+    assert _recorded(memory, adv) == (400, 0)
+    assert _owed_and_advances(world) == (600, 0)
 
 
 # --- review round 4 -----------------------------------------------------------
@@ -340,7 +523,7 @@ def test_the_same_payment_request_racing_itself_records_one(ap, monkeypatch):
             seen.append(1)
             memory.vendor_payments.insert_one(  # the twin saved in between
                 payment(300, "B1", store_id=PUN, payment_id="TWIN", request_id=request_id,
-                        payment_date="2026-10-15", tds_amount=0.0))
+                        payment_date="2026-10-15", tds_amount=0.0, mode="BANK"))  # as the request saves it
             return None
         return real(db, request_id, sent, user)
 

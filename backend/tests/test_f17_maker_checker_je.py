@@ -628,15 +628,19 @@ def test_tally_journal_voucher_xml_only_posted(db):
 
 
 def test_fail_soft_no_db():
-    # db=None -> empty reads, no-op writes, never raises.
-    assert je_service.get_je(None, "JE-x") is None
-    assert je_service.list_jes(None) == []
+    # db=None -> no-op writes. A journal READ with no database raises the 503
+    # the routes answer: never "no journals" / "not found" (D84; Codex round 3
+    # R3-A removed the lenient get_je that answered None).
+    for read in (lambda: je_service.list_jes(None), lambda: je_service.get_je(None, "JE-x")):
+        with pytest.raises(je_service.JournalStoreUnavailable) as unreadable:
+            read()
+        assert unreadable.value.status_code == 503
     assert je_service.create_je(None, store_id=None, entity_id=None,
                                 entry_date=_entry_date(), description="x",
                                 lines=_two_line("5001", "2001", 100.0),
                                 maker_id="m")["ok"] is False
-    assert je_service.pnl_adjustments(None, store_id=None, from_dt=None, to_dt=None) == {
-        "je_revenue_adjustment": 0.0, "je_expense_adjustment": 0.0}
+    with pytest.raises(RuntimeError):  # D116: no journal store is not "no journals"
+        je_service.pnl_adjustments(None, store_id=None, from_dt=None, to_dt=None)
     # list_accounts falls back to the static catalogue with no DB.
     accts = je_service.list_accounts(None, manual_only=True)
     assert any(a["account_code"] == "5001" for a in accts)
@@ -736,8 +740,10 @@ def test_account_type_snapshot_survives_coa_edit(db):
 
 def test_reverse_je_claims_first_no_orphan_mirror(db):
     """P3 regression: reverse_je must CLAIM the original (POSTED->REVERSED)
-    BEFORE inserting the mirror. If the mirror insert fails, the claim is
-    compensated (original back to POSTED) and NO orphan mirror exists."""
+    BEFORE inserting the mirror. If the mirror insert fails, NO orphan mirror
+    exists and the claim STAYS, naming the mirror still to be written (PR
+    #1411 round 4: un-flipping it let an insert whose reply was lost be
+    followed by a second reversal); Reverse again writes that mirror."""
     je_id = _post_revenue_je(db, amount=500.0)
     coll = db.get_collection("journal_entries")
     real_insert = coll.insert_one
@@ -751,12 +757,14 @@ def test_reverse_je_claims_first_no_orphan_mirror(db):
     finally:
         coll.insert_one = real_insert
     assert res["ok"] is False and res["error"] == "write_failed"
-    # Original restored to POSTED; no orphan mirror anywhere.
-    assert je_service.get_je(db, je_id)["status"] == "POSTED"
+    # The claim stands on the original; no orphan mirror anywhere.
+    claimed = je_service.get_je(db, je_id)
+    assert claimed["status"] == "REVERSED" and claimed["reversed_by"]
     assert not [d for d in coll.docs if d.get("reversal_of") == je_id]
-    # And a normal reversal afterwards still works (state not corrupted).
+    # And Reverse afterwards finishes it: the one mirror the claim names.
     res2 = je_service.reverse_je(db, je_id=je_id, actor_id="user_B")
-    assert res2["ok"] is True
+    assert res2["ok"] is True and res2["reversal_je_id"] == claimed["reversed_by"]
+    assert len([d for d in coll.docs if d.get("reversal_of") == je_id]) == 1
 
 
 def test_approve_rearms_validity_window(db):
@@ -785,7 +793,10 @@ def test_approve_rearms_validity_window(db):
 
 def test_requested_expiry_still_enforced(db):
     """Companion to the re-arm: a REQUESTED approval past its TTL still cannot
-    be approved (the re-arm happens only ON approval, never resurrects)."""
+    be approved (the re-arm happens only ON approval, never resurrects).
+    Decision D54 (2026-11-14): the JOURNAL is not stranded by it -- a checker's
+    Approve raises the journal's request again and decides that one; the lapsed
+    request itself stays lapsed, never approved."""
     _seed_user(db, "user_A", pin="1111", roles=["ADMIN"])
     _seed_user(db, "user_B", pin="2222", roles=["ADMIN"])
     je_id = _draft(db, "user_A", amount=700.0)
@@ -793,9 +804,15 @@ def test_requested_expiry_still_enforced(db):
     past = appr._now() - timedelta(minutes=1)
     db.get_collection("approval_requests").update_one(
         {"request_id": request_id}, {"$set": {"expires_at": past}})
+    eng = appr.ApprovalEngine(db=db)
+    res = eng.approve(request_id, approver_user_id="user_B", approver_roles=["ADMIN"], pin="2222")
+    assert (res["ok"], res["error"]) == (False, "expired")
     res = je_service.approve_je(db, je_id=je_id, approver_id="user_B",
                                 approver_roles=["ADMIN"], pin="2222")
-    assert res["ok"] is False
+    assert res["ok"] is True, res
+    lapsed = db.get_collection("approval_requests").find_one({"request_id": request_id})
+    assert (lapsed["status"], lapsed.get("reviewed_by")) == ("EXPIRED", None)
+    assert res["je"]["approval_request_id"] != request_id
 
 
 def test_hq_je_not_readable_by_store_roles():
@@ -808,7 +825,7 @@ def test_hq_je_not_readable_by_store_roles():
 
     hq_je = {"je_id": "JE-HQ1", "store_id": None, "status": "POSTED", "lines": []}
     with _m.patch.object(fin, "_get_db", lambda: object()), \
-         _m.patch.object(fin.je_service, "get_je", lambda _db, _id: dict(hq_je)):
+         _m.patch.object(fin.je_service, "get_je", lambda _db, _id, **_k: dict(hq_je)):
         acct = {"roles": ["ACCOUNTANT"], "user_id": "a1",
                 "active_store_id": "S1", "store_ids": ["S1"]}
         try:

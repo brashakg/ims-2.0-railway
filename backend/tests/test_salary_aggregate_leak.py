@@ -89,6 +89,9 @@ _PAYROLL = [
         "month": 3,
         "breakdown": {"ctc_cost": SOLO_CTC},
         "net_salary": 40000.0,
+        # A real run row always carries a status; only an APPROVED/PAID one is
+        # a cost in the P&L (audit L3-02: a DRAFT is not).
+        "status": "PAID",
     }
 ]
 
@@ -557,7 +560,7 @@ class _FakeUserRepo:
     def search_users(self, q, store_id=None):
         return [dict(_EMPLOYEE_DOC)]
 
-    def find_many(self, query=None, skip=0, limit=100):
+    def find_many(self, query=None, sort=None, skip=0, limit=100, strict=False):  # real signature
         return [dict(_EMPLOYEE_DOC)]
 
 

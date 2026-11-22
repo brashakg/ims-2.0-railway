@@ -6,7 +6,20 @@ import { useState, useEffect } from 'react';
 import { Plus, Edit2, Trash2 } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 import { adminLensApi } from '../../services/api';
+import { getErrorMessage } from '../../utils/errorHandler';
 import type { LensBrand, LensIndex, LensCoating, LensAddon } from './settingsTypes';
+
+// L1-F08: a price must be a plain non-negative rupee amount (up to 2 decimals).
+// Anything else (blank, "banana", "12abc", "-5", "1e3") is refused - never
+// turned into 0, which made the item free. A deliberate "0" is kept, and a
+// digit string too long to be a finite number is refused.
+function parseLensPrice(raw: string | null): number | null {
+  const t = (raw ?? '').trim();
+  if (!/^\d+(\.\d{1,2})?$/.test(t)) return null;
+  // A 400-digit string passes the pattern but is Infinity as a number.
+  const n = Number(t);
+  return Number.isFinite(n) ? n : null;
+}
 
 // Audit L1-F09: the row actions were bare 12px SVGs with a click handler - no
 // tab stop, no role, no name. A real button, named for its row.
@@ -134,8 +147,8 @@ export function LensMasterSection() {
                             await adminLensApi.deleteLensBrand(brand.id);
                             toast.success('Lens brand deleted');
                             loadLensData();
-                          } catch {
-                            toast.error('Failed to delete lens brand');
+                          } catch (e) {
+                            toast.error(getErrorMessage(e, 'Failed to delete lens brand'));
                           }
                         }
                       }}
@@ -153,9 +166,10 @@ export function LensMasterSection() {
             <h3 className="text-sm font-medium text-gray-600">Lens Indices</h3>
             <button
               onClick={async () => {
-                const value = prompt('Enter index value (e.g., 1.56):');
-                const name = prompt('Enter index name (e.g., Standard):');
-                if (value && name) {
+                const value = prompt('Enter index value (e.g., 1.56):')?.trim();
+                if (!value) return;
+                const name = prompt('Enter index name (e.g., Standard):')?.trim();
+                if (name) {
                   try {
                     await adminLensApi.createLensIndex({ value, multiplier: 1.0, description: name });
                     toast.success('Lens index added');
@@ -193,8 +207,8 @@ export function LensMasterSection() {
                           await adminLensApi.deleteLensIndex(idx.id);
                           toast.success('Lens index deleted');
                           loadLensData();
-                        } catch {
-                          toast.error('Failed to delete lens index');
+                        } catch (e) {
+                          toast.error(getErrorMessage(e, 'Failed to delete lens index'));
                         }
                       }
                     }}
@@ -211,20 +225,25 @@ export function LensMasterSection() {
             <h3 className="text-sm font-medium text-gray-600">Coatings</h3>
             <button
               onClick={async () => {
-                const name = prompt('Enter coating name:');
-                const priceStr = prompt('Enter coating price:');
-                if (name && priceStr) {
-                  try {
-                    await adminLensApi.createLensCoating({
-                      name,
-                      code: name.toUpperCase().replace(/\s+/g, '_'),
-                      price: parseFloat(priceStr) || 0,
-                    });
-                    toast.success('Coating added');
-                    loadLensData();
-                  } catch {
-                    toast.error('Failed to add coating');
-                  }
+                const name = prompt('Enter coating name:')?.trim();
+                if (!name) return;
+                const priceStr = prompt('Enter coating price (Rs., e.g. 500 or 0):');
+                if (priceStr === null) return;
+                const price = parseLensPrice(priceStr);
+                if (price === null) {
+                  toast.error('Coating not added: enter the price as a number like 500 or 0');
+                  return;
+                }
+                try {
+                  await adminLensApi.createLensCoating({
+                    name,
+                    code: name.toUpperCase().replace(/\s+/g, '_'),
+                    price,
+                  });
+                  toast.success('Coating added');
+                  loadLensData();
+                } catch {
+                  toast.error('Failed to add coating');
                 }
               }}
               className="text-sm text-bv-red-600 hover:underline flex items-center gap-1"
@@ -291,21 +310,26 @@ export function LensMasterSection() {
             <h3 className="text-sm font-medium text-gray-600">Add-ons</h3>
             <button
               onClick={async () => {
-                const name = prompt('Enter add-on name:');
-                const priceStr = prompt('Enter add-on price:');
-                if (name && priceStr) {
-                  try {
-                    await adminLensApi.createLensAddon({
-                      name,
-                      code: name.toUpperCase().replace(/\s+/g, '_'),
-                      price: parseFloat(priceStr) || 0,
-                      type: 'ADDON',
-                    });
-                    toast.success('Add-on added');
-                    loadLensData();
-                  } catch {
-                    toast.error('Failed to add add-on');
-                  }
+                const name = prompt('Enter add-on name:')?.trim();
+                if (!name) return;
+                const priceStr = prompt('Enter add-on price (Rs., e.g. 300 or 0):');
+                if (priceStr === null) return;
+                const price = parseLensPrice(priceStr);
+                if (price === null) {
+                  toast.error('Add-on not added: enter the price as a number like 300 or 0');
+                  return;
+                }
+                try {
+                  await adminLensApi.createLensAddon({
+                    name,
+                    code: name.toUpperCase().replace(/\s+/g, '_'),
+                    price,
+                    type: 'ADDON',
+                  });
+                  toast.success('Add-on added');
+                  loadLensData();
+                } catch {
+                  toast.error('Failed to add add-on');
                 }
               }}
               className="text-sm text-bv-red-600 hover:underline flex items-center gap-1"

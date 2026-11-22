@@ -85,6 +85,34 @@ def generate_grn_number(store_id: str, store_code: Optional[str] = None) -> str:
     )
 
 
+def generate_supplier_credit_number(store_id: Optional[str]) -> str:
+    """The reference a supplier credit (debit note) recorded in Accounts
+    carries: ``DN/{store}/{FY}/{serial}``, consecutive per shop and financial
+    year from the shared counters collection (audit L3-27). It used to be the
+    supplier's id plus the MINUTE, so two credits recorded in the same minute
+    printed the same reference. Notes recorded before keep their reference.
+
+    A counter that cannot be read is a 503 before the note is written (as an
+    unreadable shop code is, _store_code_of): never the time-derived fallback,
+    which two credits recorded in the same second would share."""
+    from ...services.purchase_numbering import next_purchase_number
+
+    try:
+        return next_purchase_number(
+            _counters_collection(),
+            doc_type="DN",
+            store_id=store_id,
+            store_code=_store_code_of(store_id) if store_id else None,
+            strict=True,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=503, detail="Could not save safely right now. Try again."
+        ) from exc
+
+
 def classify_grn_line_variance(received_qty, ordered_qty, tolerance: int = 0) -> str:
     """Classify a single received line against what was ordered on the PO.
 
