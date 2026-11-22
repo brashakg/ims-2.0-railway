@@ -3106,7 +3106,16 @@ def _adopt(order: Dict[str, Any], orig: Dict[str, Any], token: str, owner: str, 
     except Exception as exc:  # noqa: BLE001
         logger.warning("[SHOPIFY_REFUND] take-over of booking %s errored: %s", token, exc)
     mine = {"order_id": order.get("order_id"), "items": {"$elemMatch": {**ident, "claim_tokens": new}}}
-    return new if coll.find_one(mine) is not None else None
+    if coll.find_one(mine) is not None:
+        return new
+    if coll.find_one(match) is not None:
+        # The write did not land and the other run's booking is still there:
+        # no take-over, and no answer either. Read as "taken back", the cap
+        # counted the booking as done and the run stamped 'applied' with its
+        # piece never placed -- so the step answers unreadable instead
+        # (restock_refund: StockUnreadable, nothing placed, its task open).
+        raise RuntimeError(f"take-over of a booking on order {order.get('order_id')} was not written")
+    return None
 
 
 def _task_repo() -> Any:
@@ -3165,6 +3174,12 @@ def _restock_booked(
     held = [row for _piece, row, _slots in adopted] + (held or [])
     result: Dict[str, Any] = {"applied": False}
     unbooked = 0.0
+    # The same test settle_bookings reads a booking's slots by: a stock store
+    # with a collection. With none, nobody could ever read the slots, so a
+    # booking there is un-booked by count as before.
+    from ..routers.returns import get_stock_repository
+
+    readable = getattr(get_stock_repository(), "collection", None) is not None
     try:
         result = restock(pieces, keys or None) if (adopted or slot_keys is not None) else restock(pieces)
     finally:
@@ -3176,8 +3191,8 @@ def _restock_booked(
         # one write fail (the count is per product, the slots per booking),
         # and un-booked a piece a live worker this run took over still
         # landed: either way a later run placed one piece twice.
-        unbooked = _release_unlanded(order, [row for row in held if not _names_its_slots(row)],
-                                     result, refund_id)
+        unbooked = _release_unlanded(
+            order, [row for row in held if not (readable and _names_its_slots(row))], result, refund_id)
     # What this call took back off the order lines (returns._reopen_by_booking).
     result["unbooked"] = unbooked
     # Its units are in the mark: a doc row of them must never add to it.

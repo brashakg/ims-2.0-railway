@@ -832,3 +832,42 @@ def test_a_confirm_whose_restock_was_left_open_is_finished_by_the_sweep(native, 
         assert doc["restock_applied"] is True and doc["restock_stock_ids"] == ["U1"]
         assert native.credit_note_ledger.count_documents({}) == 1
         assert R.finish_stopped_stock_steps() == 0
+
+
+def test_a_take_over_whose_write_fails_never_reads_as_put_back(native, monkeypatch):
+    """Found while hunting this round: a run that takes over another run's
+    booking (settle_bookings -> _adopt) and whose write does not land, the
+    old token still on the line. Before: read as 'taken back', the cap
+    counted the booking as done, nothing was placed and the record was
+    stamped 'Restock applied' with U1 SOLD -- no task, no door left."""
+    _seed(native, units=["U1"])
+    native.returns.update_one({"return_id": RID}, {"$set": {"shopify_refund_id": RF}})
+    real = _transient_once(monkeypatch)
+    assert R._retry_restock(RID, USER, STORE)["restock_applied"] is False  # its booking stays
+    monkeypatch.setattr(R, "_flip_sold_unit", real)
+    assert _booked(native) == (1.0, 1.0)
+    real_coll = R._orders_coll
+
+    class _TakeOverDown:
+        def __getattr__(self, name):
+            return getattr(real_coll(), name)
+
+        def update_one(self, flt, update, *a, **k):
+            if any("$[t]" in key for key in (update.get("$set") or {})):
+                raise RuntimeError("socket reset")  # the take-over write, not landed
+            return real_coll().update_one(flt, update, *a, **k)
+
+    monkeypatch.setattr(R, "_orders_coll", _TakeOverDown)
+    try:
+        out = R._retry_restock(RID, USER, STORE)
+        assert out["restock_applied"] is False, out
+    except HTTPException as exc:
+        assert exc.status_code in (409, 503), exc.detail
+    assert _units(native) == {"U1": ("SOLD", OID)} and _booked(native) == (1.0, 1.0)
+    assert native.returns.find_one({"return_id": RID})["restock_applied"] is False
+    monkeypatch.setattr(R, "_orders_coll", real_coll)
+    assert R._retry_restock(RID, USER, STORE)["restock_applied"] is True
+    for _ in range(2):
+        assert _units(native) == {"U1": ("AVAILABLE", None)} and _booked(native) == (1.0, 1.0)
+        assert native.stock_units.count_documents({}) == 1
+        assert R._retry_restock(RID, USER, STORE)["message"] == "Already restocked"

@@ -1919,8 +1919,11 @@ def test_a_stock_in_task_that_did_not_land_leaves_the_frame_to_the_next_door(swe
     """The task insert fails (BaseRepository.create swallows it and answers
     None). Goods back answered stock_in with the id of a task that does not
     exist and kept the booking, so the confirm restocked nothing, the retry
-    said "Already restocked": no task, no stock row, no door left. A task
-    that did not land is no booking: released, and the next door raises it."""
+    said "Already restocked": no task, no stock row, no door left. Since the
+    review of 22f53ec0 the booking stays (its run is named on it) and the
+    next door raises ITS task under that run's fixed id (settle_bookings):
+    released, a later run booked the frame again under a new run and could
+    raise a second task beside one whose save was only unknown."""
     from fastapi import HTTPException
 
     oid, rid = 60188, 700388
@@ -1936,11 +1939,16 @@ def test_a_stock_in_task_that_did_not_land_leaves_the_frame_to_the_next_door(swe
         _goods_back(row)
     assert no.value.status_code == 503 and "stock_in_task_not_saved" in no.value.detail
     line = _doc(swept, oid)["items"][0]
-    assert not line.get("returned_qty") and not (line.get("restocked_refunds") or {}).get(str(rid))
+    assert (line.get("returned_qty"), (line.get("restocked_refunds") or {}).get(str(rid))) == (1, 1)
+    assert _stock_in(swept, oid) == []
     monkeypatch.setattr(tasks, "insert_one", real)
     res = _confirm(swept["review"].find_one({"review_id": row["review_id"]}))["result"]
-    assert res["stock_in_task"] and res["restock_applied"] is True
+    # The confirm raised the stopped run's task (settle_bookings), under that
+    # run's fixed id; the frame stays booked once.
+    assert res["restock_applied"] is True
     assert _minted(swept) == [] and len(_stock_in(swept, oid)) == 1, "one frame, one task"
+    line = _doc(swept, oid)["items"][0]
+    assert (line.get("returned_qty"), (line.get("restocked_refunds") or {}).get(str(rid))) == (1, 1)
 
 
 def test_a_stock_in_task_whose_reply_was_lost_is_one_task(swept, monkeypatch):
@@ -2912,7 +2920,9 @@ def test_a_historical_booking_whose_task_and_release_both_failed_still_raises_it
                                                                                       monkeypatch):
     """The stock-in task insert fails and so does the release of the booking.
     Left on the line, the next Goods back answered stock_in with no task, the
-    confirm finalized the restock, and no task ever asked for the frame."""
+    confirm finalized the restock, and no task ever asked for the frame.
+    Since the review of 22f53ec0 no release is even tried (the booking names
+    its run): the next door raises that run's task."""
     from fastapi import HTTPException
 
     oid, rid = 60213, 700413
@@ -2928,11 +2938,11 @@ def test_a_historical_booking_whose_task_and_release_both_failed_still_raises_it
     monkeypatch.setattr(returns_router, "_orders_coll", lambda: lossy)
     with pytest.raises(HTTPException) as no:
         _goods_back(row)
-    assert no.value.status_code == 503 and lossy.failed
+    assert no.value.status_code == 503 and not lossy.failed  # the booking is never taken back
     monkeypatch.setattr(tasks, "insert_one", real)
     back = _goods_back(swept["review"].find_one({"review_id": row["review_id"]}))["result"]
-    [task] = _stock_in(swept, oid)
-    assert (back["status"], back["stock_in_task"]) == ("stock_in", task["task_id"])
+    [task] = _stock_in(swept, oid)  # raised by this press for the first press's booking
+    assert back["status"] == "stock_in" and task["status"] == "OPEN"
     _confirm(swept["review"].find_one({"review_id": row["review_id"]}))
     assert _minted(swept) == [] and len(_stock_in(swept, oid)) == 1, "one frame, one task"
 
