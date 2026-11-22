@@ -859,7 +859,7 @@ def count_task_id(drawer_id: Any) -> str:
 
 
 def close_as_count(
-    close: Dict[str, Any], drawer: Optional[Dict[str, Any]], spans_another: bool = False
+    close: Dict[str, Any], drawer: Optional[Dict[str, Any]], unplaced: bool = False
 ) -> Optional[Dict[str, Any]]:
     """D127: one CLOSED Cash Register close read as a LATER count of the till
     drawer ``drawer`` (closed after the drawer's own count), or None when it
@@ -877,14 +877,13 @@ def close_as_count(
       its sheet would charge a sale made between two sessions as a shortage,
       and would hide a difference it held). Its bank deposit is carried.
     * ``UNKNOWN``: IMS cannot tell which drawer its cash or deposit was on --
-      no drawer at all, or a several-drawer close (D53) that was open while
-      this drawer was counted and began before it opened. D127(2): the next
-      close is then not compared; never a shortage IMS cannot prove.
-      ``spans_another`` (D135(3)): a close whose till link FAILED and whose
-      session was open while ANOTHER drawer of the shop-day opened (see
-      ``drawer_counts``): its cash and deposit may be on either drawer, so it
-      is UNKNOWN, never BANKED -- a deposit counts only against its own
-      drawer, and IMS cannot tell which one that was."""
+      a several-drawer close (D53) that was open while this drawer was
+      counted and began before it opened, or ``unplaced`` (D137(1), see
+      ``_unplaced_closes``): it BANKED cash and names no drawer, or its till
+      link FAILED while it was open across two drawers. D127(2): the next
+      close is then not compared; never a shortage IMS cannot prove. A close
+      that names no drawer and banked nothing took no cash out of any
+      drawer: it is not a count of this one (None) and blocks nothing."""
     d = drawer or {}
     at = _instant(close.get("closed_at"))
     if at is None or d.get("blind_count_paisa") is None:
@@ -903,7 +902,7 @@ def close_as_count(
         if d.get("blind_count_origin") == close.get("session_id"):
             return None
         if close.get("till_session_id") is None:
-            return {**entry, "kind": LATER_UNKNOWN}
+            return {**entry, "kind": LATER_UNKNOWN} if unplaced else None
     if since or close.get("till_counted_earlier"):
         # Not compared only because an earlier close could not be placed
         # (D127(2)): its sheet and the cash it was charged with are known,
@@ -930,7 +929,7 @@ def close_as_count(
             }
         return {**entry, "kind": LATER_BANKED}
     if close.get("till_link_ok") is False:
-        return {**entry, "kind": LATER_UNKNOWN if spans_another else LATER_BANKED}
+        return {**entry, "kind": LATER_UNKNOWN if unplaced else LATER_BANKED}
     if status == "SEVERAL_DRAWERS":
         return {**entry, "kind": LATER_UNKNOWN}
     return None
@@ -946,47 +945,74 @@ def _open_across(close: Dict[str, Any], drawer: Dict[str, Any]) -> bool:
     return bool(began and ended and opened and began < opened < ended)
 
 
-def _spanning_failed_closes(db, drawer: Dict[str, Any]):
-    """D135(3), D136(3): THE spanning test. A close whose till link FAILED
-    keeps the drawer it opened on (D127(2)). When ANOTHER drawer of the
-    shop-day opened while it was open, its cash and its bank deposit may be on
-    either one: it is UNKNOWN for both -- for its own drawer (its deposit is
-    not taken off it) and for the drawer that opened inside it (found here,
-    though it names the other). ``drawer_counts`` (after a count) and
-    ``banked_before_count`` (before it) both read it from here.
+def _unplaced_closes(db, drawer: Dict[str, Any]):
+    """D135(3), D136(3), D137(1): THE test of an earlier Cash Register close
+    IMS cannot place, read by ``drawer_counts`` (after a count) and
+    ``banked_before_count`` (before it) alike. Such a close blocks a drawer's
+    comparison ONLY when it BANKED cash (bank_deposit > 0) AND IMS cannot
+    place it on one drawer:
 
-    Returns ``(failed, spanning)``: the shop-day's CLOSED failed-link closes
-    that name a drawer, and the ids of those that span ``drawer`` or, naming
-    it, span another drawer. RAISES when a read fails: read as "none", the
-    deposit is carried to a drawer it may never have left."""
+    * its till link FAILED and ANOTHER drawer of the shop-day opened while it
+      was open: its deposit may have left either drawer -- the one it names
+      (its deposit is not taken off it) or the one that opened inside it
+      (found here, though it names the other); or
+    * it names no drawer at all (till_session_id None) and closed on the
+      drawer's shop and IST day.
+
+    A close that banked nothing took no cash out of any drawer, so it
+    withholds nothing: a real shortage beyond the band is noted and alerted
+    (owner 2026-08-25). Its cash sales are the day's, which D60 charges by
+    day, never by register session.
+
+    Returns ``(failed, no_drawer, unplaced)``: the shop-day's CLOSED
+    failed-link closes that name a drawer and banked cash, the shop-day's
+    closes that name no drawer, and the ids of the closes that block.
+    RAISES when a read fails: read as "none", a deposit is carried to a
+    drawer it may never have left, or charged to none."""
     from ..utils.ist import ist_date_str
 
     coll = db.get_collection(_REGISTER_SESSIONS)
     did = drawer.get("session_id") or drawer.get("_id")
+    store = drawer.get("store_id")
     day = drawer.get("session_date")
+
+    def _on_day(c: Dict[str, Any]) -> bool:
+        return ist_date_str(_instant(c.get("closed_at"))) == day
+
+    def _banked(c: Dict[str, Any]) -> bool:
+        return _to_int_paisa_from_rupees(c.get("bank_deposit") or 0) > 0
+
     failed = [
         c
-        for c in coll.find(
-            {"store_id": drawer.get("store_id"), "status": "CLOSED", "till_link_ok": False}
-        )
-        if ist_date_str(_instant(c.get("closed_at"))) == day and c.get("till_session_id") is not None
+        for c in coll.find({"store_id": store, "status": "CLOSED", "till_link_ok": False})
+        if _on_day(c) and c.get("till_session_id") is not None and _banked(c)
     ]
-    spanning = {c.get("session_id") for c in failed if c.get("till_session_id") != did and _open_across(c, drawer)}
+    no_drawer = [
+        c
+        for c in coll.find({"store_id": store, "status": "CLOSED", "till_session_id": None})
+        if _on_day(c)
+    ]
+    unplaced = {c.get("session_id") for c in no_drawer if _banked(c)}
+    unplaced |= {
+        c.get("session_id")
+        for c in failed
+        if c.get("till_session_id") != did and _open_across(c, drawer)
+    }
     if any(c.get("till_session_id") == did for c in failed):
         tills = _sessions_coll(db)
         if tills is None:
             raise RuntimeError("till sessions unavailable")
         others = [
             s
-            for s in tills.find({"store_id": drawer.get("store_id"), "session_date": day})
+            for s in tills.find({"store_id": store, "session_date": day})
             if (s.get("_id") or s.get("session_id")) != did
         ]
-        spanning |= {
+        unplaced |= {
             c.get("session_id")
             for c in failed
             if c.get("till_session_id") == did and any(_open_across(c, o) for o in others)
         }
-    return failed, spanning
+    return failed, no_drawer, unplaced
 
 
 def drawer_counts(db, drawer: Dict[str, Any], own: Optional[str] = None) -> Dict[str, Any]:
@@ -999,30 +1025,17 @@ def drawer_counts(db, drawer: Dict[str, Any], own: Optional[str] = None) -> Dict
 
     RAISES when the read fails: read as "none", a deposit or a shortage an
     earlier session already accounted for is charged again."""
-    from ..utils.ist import ist_date_str
-
     coll = db.get_collection(_REGISTER_SESSIONS)
     did = drawer.get("session_id") or drawer.get("_id")
-    day = drawer.get("session_date")
-
-    def _on_day(c: Dict[str, Any]) -> bool:
-        return ist_date_str(_instant(c.get("closed_at"))) == day
-
     closes = list(coll.find({"till_session_id": did, "status": "CLOSED"}))
-    closes += [
-        c
-        for c in coll.find(
-            {"store_id": drawer.get("store_id"), "status": "CLOSED", "till_session_id": None}
-        )
-        if _on_day(c)
-    ]
-    failed, spanning = _spanning_failed_closes(db, drawer)
-    closes += [c for c in failed if c.get("session_id") in spanning and c.get("till_session_id") != did]
+    failed, no_drawer, unplaced = _unplaced_closes(db, drawer)
+    closes += no_drawer
+    closes += [c for c in failed if c.get("session_id") in unplaced and c.get("till_session_id") != did]
     out: Dict[str, Any] = {"sheets": [], "banked": [], "unknown": [], "count_noted": False}
     for c in closes:
         if c.get("session_id") == own:
             continue
-        later = close_as_count(c, drawer, spans_another=c.get("session_id") in spanning)
+        later = close_as_count(c, drawer, unplaced=c.get("session_id") in unplaced)
         if later is None:
             continue
         out["count_noted"] = out["count_noted"] or c.get("till_count_variance") is not None
@@ -1047,15 +1060,15 @@ def banked_before_count(db, drawer: Dict[str, Any], own: Optional[str] = None) -
     AFTER the count; this is the window before it, so each deposit is taken
     off once.
 
-    None (D136(3)): a failed-link close the SAME spanning test as
-    ``drawer_counts`` cannot place -- open while another drawer of the
-    shop-day opened, naming this drawer or the other -- so IMS cannot tell
-    whether its deposit left this drawer: the count is not compared. RAISES
-    when a read fails: read as "none", the count would store that false
-    shortage."""
+    None (D136(3), D137(1)): an earlier close that BANKED cash and that the
+    SAME test as ``drawer_counts`` cannot place (``_unplaced_closes``: its
+    till link failed while it was open across two drawers, or it names no
+    drawer on the shop's IST day), so IMS cannot tell whether its deposit
+    left this drawer: the count is not compared. RAISES when a read fails:
+    read as "none", the count would store that false shortage."""
     did = drawer.get("session_id") or drawer.get("_id")
-    _failed, spanning = _spanning_failed_closes(db, drawer)
-    if spanning - {own}:
+    _failed, _no_drawer, unplaced = _unplaced_closes(db, drawer)
+    if unplaced - {own}:
         return None
     closes = db.get_collection(_REGISTER_SESSIONS).find({"till_session_id": did, "status": "CLOSED"})
     return sum(
