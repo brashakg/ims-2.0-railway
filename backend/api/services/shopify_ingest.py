@@ -1544,9 +1544,12 @@ def _ensure_unique_hist_cn_ref_index(db) -> None:
     ('SHOPIFY-HIST-REFUND-<refund id>') are unique by construction and every
     historical CN row stamps historical=True, so the partial filter pins exactly
     the racing writes. Idempotent + fail-soft: an index-build failure (e.g.
-    unexpected pre-existing duplicate rows in prod) logs and skips -- booking
-    then proceeds with the find-then-insert guard exactly as before, never
-    crashing the import."""
+    unexpected pre-existing duplicate rows in prod) logs and skips. The
+    booking never relies on it (PR #1423 review R2-A): each historical note's
+    ledger row is inserted under its own ``_id`` (_hist_cn_ledger_id), so a
+    second writer of the same refund is refused by Mongo's always-present
+    ``_id`` index whether or not this one exists. The index stays for rows an
+    older import wrote with a random ``_id``."""
     try:
         coll = db.get_collection("credit_note_ledger")
         if coll is None:
@@ -1562,10 +1565,22 @@ def _ensure_unique_hist_cn_ref_index(db) -> None:
         )
     except Exception as exc:  # noqa: BLE001 -- backstop only; never block booking
         logger.warning(
-            "[SHOPIFY_INGEST] uniq_hist_cn_ref index ensure failed (continuing "
-            "with find-then-insert dedupe): %s",
+            "[SHOPIFY_INGEST] uniq_hist_cn_ref index ensure failed (continuing: "
+            "each note's ledger row is insert-once on its own _id): %s",
             exc,
         )
+
+
+def _hist_cn_ledger_id(refund_id: str) -> str:
+    """The ``_id`` of a historical refund's credit-note ledger row: its
+    idempotency ref ('SHOPIFY-HIST-REFUND-<refund id>'). INSERT-ONCE without
+    any index of ours (PR #1423 review R2-A): two import runs that both passed
+    the "is it booked" read can land only one row -- the second insert is a
+    duplicate key on ``_id``, which every Mongo collection always has. The
+    importer is the only writer of these rows."""
+    from . import shopify_refund
+
+    return shopify_refund._hist_refund_ref(refund_id)
 
 
 def _hist_cn_note_number(refund_id: str) -> str:
@@ -1576,6 +1591,71 @@ def _hist_cn_note_number(refund_id: str) -> str:
     ('SHOPIFY-HIST-REFUND-<id>') is NEVER changed."""
     tail = "".join(ch for ch in str(refund_id) if ch.isalnum())[-12:].upper()
     return f"CNH-{tail}" if tail else "CNH-0"
+
+
+def _book_import_goods(
+    db, order_doc: Dict[str, Any], refund_id: str, goods: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Decision D66: an imported refund note's goods lines give their cost
+    back in the P&L, so each piece is booked back on its order line the way
+    every other door books one -- the counter's own check
+    (returns._units_already_back) and its atomic claim, with this refund's
+    mark (returns._claim_returnable_qty). The goods lines kept are what the
+    line's mark for THIS refund says, read back from the stored order after
+    the claim: a piece the counter (or another refund) already took back is
+    never given back a second time, and a re-run (the import's duplicate-path
+    heal) books nothing twice -- the mark is per refund, so a claim already on
+    the line matches no second time -- and stamps the same lines again.
+
+    PR #1423 review D: an answer that cannot be read (the docs, the claim, the
+    order read back) raises -- never "money only" taken as final: the caller
+    leaves the note unstamped and reports it failed, and the next import run
+    heals it from the mark."""
+    from ..routers import returns as _r
+
+    order_id = order_doc.get("order_id")
+    orders = db.get_collection("orders")
+
+    def _fresh():
+        doc = orders.find_one({"order_id": order_id}, {"_id": 0, "items": 1})
+        if doc is None:
+            raise RuntimeError(f"order {order_id} not found")
+        return _r._order_line_index(doc)
+
+    def _mark(line) -> float:
+        return float((line.get("restocked_refunds") or {}).get(str(refund_id)) or 0)
+
+    idx = _fresh()
+    want: Dict[str, list] = {}
+    for g in goods:
+        orig = (idx["by_item"].get(str(g.get("order_item_id")))
+                or idx["by_product"].get(str(g.get("product_id"))))
+        if orig is not None:
+            key = str(orig.get("item_id") or orig.get("product_id"))
+            row = want.setdefault(key, [orig, 0.0, []])
+            row[1] += float(g.get("return_qty") or 0)
+            row[2].append(g)
+    for orig, qty, _lines in want.values():
+        need = qty - _mark(orig)
+        if need <= 0:
+            continue
+        back = _r._units_already_back(order_id, orig)
+        if back is None:
+            raise RuntimeError(f"returns of order {order_id} could not be read")
+        keep = max(0.0, min(need, _r._line_purchased_qty(orig) - back[0]))
+        if keep > 0:
+            _r._claim_returnable_qty(order_id, orig, keep, refund_id, qty, uuid.uuid4().hex)
+    idx = _fresh()
+    kept: List[Dict[str, Any]] = []
+    for key, (_orig, _qty, lines) in want.items():
+        line = idx["by_item"].get(key) or idx["by_product"].get(key) or {}
+        left = _mark(line)
+        for g in lines:
+            q = min(float(g.get("return_qty") or 0), left)
+            left -= q
+            if q > 0:
+                kept.append({**g, "return_qty": q})
+    return kept
 
 
 def _book_historical_refund_credit_notes(
@@ -1606,10 +1686,18 @@ def _book_historical_refund_credit_notes(
     Shopify shows NO money for is reported as residual, never auto-posted. The
     billed gross is never silently over-posted.
 
-    A minimal `returns` doc stamped with each Shopify refund id is ALSO written so a
-    FUTURE real refund webhook for the same refund is recognised as already-credited
-    by shopify_refund._refund_already_processed (idempotent), rather than
-    double-crediting.
+    A minimal `returns` doc stamped with each Shopify refund id is written FIRST
+    (_claim_returns_doc): it is this import's CLAIM of the refund, the same claim
+    a live refund door takes, so the import and a webhook / accountant Confirm
+    racing it book ONE credit note between them (PR #1423 review F-1423-G), and a
+    FUTURE real refund webhook for the same refund is recognised as
+    already-credited by shopify_refund._refund_already_processed. Order per
+    refund: claim (written UNFINISHED) -> goods booked back on the order line
+    -> ledger row -> the claim stamped finished (decision D103(1)). A run cut
+    off anywhere in between leaves an unfinished claim: no reader takes it for
+    a credited refund, a live door answers "held by the import" (never a
+    silent duplicate), and the next run finishes it once and reports it
+    (unfinished_claims_found / unfinished_claims_finished).
 
     Coverage: a `partially_refunded` order books one credit note per refund entry
     (from its refund_line_items). A fully `refunded` order with no per-line refund
@@ -1639,6 +1727,11 @@ def _book_historical_refund_credit_notes(
         # fallback would stack a whole-order CN on top of existing per-refund
         # CNs (reversal exceeding the invoice).
         "duplicate_refunds": 0,
+        # Decision D103(1): claims of this import that an earlier run left
+        # unfinished (it stopped between its claim and the "finished" stamp),
+        # and how many of them this run finished.
+        "unfinished_claims_found": 0,
+        "unfinished_claims_finished": 0,
     }
     fin = str(payload.get("financial_status") or "").strip().lower()
     if fin not in ("refunded", "partially_refunded"):
@@ -1657,12 +1750,27 @@ def _book_historical_refund_credit_notes(
             summary["unmapped_refunds"] = 1
             return summary
 
+    def _record_failed(refund: Dict[str, Any]) -> None:
+        summary["cn_failed"] += 1
+        rid = str(refund.get("id") or "?").strip() or "?"
+        if len(summary["cn_failed_refund_ids"]) < 20:
+            summary["cn_failed_refund_ids"].append(rid)
+
+    def _all_failed() -> Dict[str, Any]:
+        # Nothing could be booked (no ledger, no pricing machinery): every
+        # refund is reported failed -- never an order that reads as having
+        # nothing to reverse. The next import run books them.
+        for refund in refunds:
+            if isinstance(refund, dict):
+                _record_failed(refund)
+        return summary
+
     try:
         ledger = db.get_collection("credit_note_ledger")
     except Exception:  # noqa: BLE001
         ledger = None
     if ledger is None:
-        return summary
+        return _all_failed()
     try:
         returns_coll = db.get_collection("returns")
     except Exception:  # noqa: BLE001
@@ -1674,33 +1782,60 @@ def _book_historical_refund_credit_notes(
         from . import shopify_refund
     except Exception as exc:  # noqa: BLE001
         logger.warning("[SHOPIFY_INGEST] historical refund machinery import failed: %s", exc)
-        return summary
+        return _all_failed()
 
-    # Concurrency backstops (idempotent, fail-soft): the unique partial index on
-    # historical CN refs closes the create-vs-heal booking race, and the returns
-    # uniq_shopify_refund_id index (normally built lazily by the LIVE refund
-    # path only) gives the historical stamps the same insert-level guarantee.
+    # The historical CN ref index is a backstop only (each note's ledger row is
+    # insert-once on its own _id). The returns uniq_shopify_refund_id index is
+    # NOT a backstop (PR #1423 review F-1423-G): it is what makes this import's
+    # claim of a refund and a live refund door's claim of the same refund ONE
+    # claim. If it cannot be confirmed nothing is booked (reported failed; the
+    # next import run books it) -- a missing index must never be able to
+    # double a GST reversal (the D82 rule).
     _ensure_unique_hist_cn_ref_index(db)
     try:
         shopify_refund._ensure_unique_refund_index(
-            db, shopify_refund._RETURNS_COLLECTION
+            db, shopify_refund._RETURNS_COLLECTION, strict=True
         )
-    except Exception:  # noqa: BLE001 -- backstop only
-        pass
+        claimable = returns_coll is not None
+    except Exception as exc:  # noqa: BLE001
+        claimable = False
+        logger.warning(
+            "[SHOPIFY_INGEST] uniq_shopify_refund_id on returns could not be confirmed "
+            "-- no historical credit note is booked on order %s this run: %s",
+            order_doc.get("order_id"), exc,
+        )
 
     customer_id = order_doc.get("customer_id")
     billing_store = order_doc.get("store_id")
     order_items = [i for i in (order_doc.get("items") or []) if isinstance(i, dict)]
     unmapped_real_ids: List[str] = []
 
-    def _stamp_returns_doc(
+    def _claim_returns_doc(
         refund_id: str, gross: float, gst_view: Dict[str, Any], cn_date: str,
         covered_by: Optional[str] = None,
-    ) -> None:
-        """Minimal returns doc stamped with the refund id so a FUTURE real refund
-        webhook for this same refund is recognised as already-credited."""
-        if returns_coll is None:
-            return
+    ) -> Optional[str]:
+        """THE claim of one Shopify refund, taken BEFORE anything is booked for
+        it: the returns doc stamped with the refund id -- the same claim a live
+        refund door takes (shopify_refund._post_locked), under the same
+        uniq_shopify_refund_id index, so exactly one of them holds the refund.
+        'new': inserted now. 'mine': this import's doc was already there (an
+        earlier or a concurrent run, or this insert's reply was lost).
+        'theirs': a live door's doc holds the refund -- it books it, the import
+        books nothing. None: no answer (not claimable, the write refused, the
+        read-back failed) -- nothing is booked; reported failed.
+
+        Decision D103(1): the claim is written UNFINISHED -- status PENDING,
+        credit_note_issued False, the state the live doors' own unfinished
+        rule reads (shopify_refund._unfinished_claim) -- and is stamped
+        finished (_finish_claim) only once the ledger row it stands for (its
+        own ref, or `covered_by`) is stored. Until then no reader takes it
+        for a credited refund (the P&L and the GST returns read COMPLETED
+        returns), a live door never re-claims it (it is the import's:
+        _claim_stale_refund_for_retry) and answers "held by the import", and
+        the next import run finishes it. Finished, it makes a FUTURE webhook
+        for this refund a duplicate."""
+        if not claimable:
+            return None
         try:
             doc = {
                 "return_id": f"RET-HIST-{refund_id}",
@@ -1716,17 +1851,73 @@ def _book_historical_refund_credit_notes(
                 "gross_refund": round(gross, 2),
                 "net_refund": round(gross, 2),
                 "gst_breakup": gst_view,
-                "credit_note_issued": True,
+                "credit_note_issued": False,
                 "settled_externally": True,
-                "status": "COMPLETED",
+                "status": "PENDING",
                 "historical": True,
                 "created_at": cn_date,
+                # Decision D119: a worker still running the code before
+                # this claim existed must not take it over as a dead run's
+                # (it is "old" by its historical date) -- see the marker.
+                "reprocessing_at": shopify_refund.IMPORT_CLAIM_MARKER,
             }
             if covered_by:
                 doc["covered_by_ref"] = covered_by
+            # Its own _id: one RET-HIST doc per refund across import runs (a
+            # racing heal, a lost reply).
+            doc["_id"] = doc["return_id"]
             returns_coll.insert_one(doc)
+            return "new"
         except Exception:  # noqa: BLE001
-            pass
+            # A lost reply, another import run's insert, or a live door's
+            # claim: whose doc holds the refund id decides. Never "landed"
+            # because SOME doc is there (PR #1423 review F-1423-G).
+            try:
+                held = returns_coll.find_one({"shopify_refund_id": refund_id}, {"_id": 0, "return_id": 1})
+            except Exception:  # noqa: BLE001
+                return None
+            if held is None:
+                return None
+            return "mine" if held.get("return_id") == f"RET-HIST-{refund_id}" else "theirs"
+
+    # The refund ids whose claim a run before this one left unfinished.
+    found_unfinished: set = set()
+
+    def _finish_claim(refund_id: str) -> bool:
+        """Stamp this import's claim of a refund FINISHED. Called only after
+        the ledger row the claim stands for is known to be stored (decision
+        D103(1)). False when the stamp could not be written: the claim stays
+        unfinished, the caller reports the refund failed, and the next run
+        stamps it (it books nothing: the row exists)."""
+        try:
+            res = returns_coll.update_one(
+                {"return_id": f"RET-HIST-{refund_id}", "source": "shopify_order_history"},
+                {"$set": {"credit_note_issued": True, "status": "COMPLETED"},
+                 "$unset": {"reprocessing_at": ""}})  # the D119 marker: finished
+            if getattr(res, "matched_count", 1) == 0:
+                raise RuntimeError("no record to stamp")
+        except Exception:  # noqa: BLE001
+            logger.warning("[SHOPIFY_INGEST] historical refund %s: its record could not be stamped "
+                           "finished -- reported failed, the next import run stamps it", refund_id)
+            return False
+        if refund_id in found_unfinished:
+            found_unfinished.discard(refund_id)
+            summary["unfinished_claims_finished"] += 1
+        return True
+
+    def _give_up_claims(refund_ids: List[str], cover_ref: str) -> None:
+        """Delete this import's claims of refunds a whole-order note was to
+        cover and never will: they stand for no note, and would only keep a
+        live door from handling those refunds (decision D103(2))."""
+        for rid in refund_ids:
+            try:
+                returns_coll.delete_one(
+                    {"return_id": f"RET-HIST-{rid}", "covered_by_ref": cover_ref})
+            except Exception:  # noqa: BLE001 -- the next run gives it up
+                logger.warning("[SHOPIFY_INGEST] claim of refund %s not given up", rid)
+            if rid in found_unfinished:  # never a booking: not one to finish
+                found_unfinished.discard(rid)
+                summary["unfinished_claims_found"] -= 1
 
     def _process(refund: Dict[str, Any]) -> str:
         """Book ONE refund's credit note. Returns 'booked' | 'duplicate' |
@@ -1738,8 +1929,48 @@ def _book_historical_refund_credit_notes(
 
         # Idempotency: the ONE "is this refund booked" rule (a re-run of the
         # import, a webhook, the status sweep or a queued review row booked it).
-        if shopify_refund._refund_already_processed(db, refund_id):
-            return "duplicate"
+        # Booked means its RET-HIST doc, FINISHED, and the ledger row the doc
+        # stands for. Anything less is this import's own unfinished booking
+        # and is finished here (heal), with no second ledger row:
+        #   * the doc (the claim) unfinished or with no ledger row -- a run
+        #     cut off after its claim (PR #1423 review F-1423-G: the claim is
+        #     taken first; decision D103(1): it is stamped finished last);
+        #   * a ledger row with no doc -- a run of an earlier version, which
+        #     wrote the row first (PR #1423 review D).
+        heal = has_row = False
+        try:
+            # strict: a read that fails is no answer -- never "not booked",
+            # which would book a second note over one an older run stored.
+            processed = shopify_refund._refund_already_processed(db, refund_id, strict=True)
+        except Exception:  # noqa: BLE001
+            logger.warning("[SHOPIFY_INGEST] historical refund %s: could not read whether it is "
+                           "booked -- reported failed, the next import run books it", refund_id)
+            return "skipped"
+        if processed:
+            try:
+                has_row = ledger.find_one({"ref": ref}, {"_id": 1}) is not None
+                held = (returns_coll.find_one({"shopify_refund_id": refund_id},
+                                              {"_id": 0, "return_id": 1, "covered_by_ref": 1,
+                                               "credit_note_issued": 1})
+                        if returns_coll is not None else None)
+                if held is not None and held.get("return_id") == f"RET-HIST-{refund_id}":
+                    stands_for = held.get("covered_by_ref") or ref
+                    unfinished = held.get("credit_note_issued") is not True
+                    heal = unfinished or (
+                        not has_row if stands_for == ref
+                        else ledger.find_one({"ref": stands_for}, {"_id": 1}) is None)
+                    if unfinished and refund_id not in found_unfinished:
+                        found_unfinished.add(refund_id)
+                        summary["unfinished_claims_found"] += 1
+                else:
+                    heal = (has_row and held is None and returns_coll is not None
+                            and db.get_collection(shopify_refund._REVIEW_COLLECTION).find_one(
+                                {"shopify_refund_id": refund_id,
+                                 "status": {"$nin": ["UNMATCHED", "unmatched"]}}, {"_id": 1}) is None)
+            except Exception:  # noqa: BLE001
+                return "skipped"  # cannot tell: reported failed, a later run heals it
+            if not heal:
+                return "duplicate"
 
         # Build return lines: ALL order lines for a whole-order full-refund reversal,
         # else the refund's own refund_line_items (reusing the live refund mapper).
@@ -1868,6 +2099,9 @@ def _book_historical_refund_credit_notes(
         cn_date = _refund_credit_note_date_iso(refund, payload)
         cn_tax = round(float(gst_view.get("tax") or 0.0), 2)
         entry = {
+            # Insert-once: one ledger row per refund with or without the
+            # uniq_hist_cn_ref index (PR #1423 review R2-A).
+            "_id": _hist_cn_ledger_id(refund_id),
             "entry_id": str(uuid.uuid4()),
             "customer_id": customer_id,
             "type": "ISSUED",
@@ -1916,38 +2150,92 @@ def _book_historical_refund_credit_notes(
                 # lines -- deliberately NOT reversed (no output tax to reverse);
                 # recorded for accountant reconciliation.
                 entry["unreconciled_excess"] = excess
+        # (1) THE claim, before anything is booked (PR #1423 review F-1423-G):
+        # this import and a live refund door (the webhook in AUTO mode, the
+        # accountant's Confirm) that both passed the "is it booked" read are
+        # made one by the returns doc's unique refund id. A live door's claim
+        # wins exactly as a webhook that arrived before the import does: it
+        # books the refund, the import books nothing.
+        claim = _claim_returns_doc(refund_id, gross, gst_view, cn_date)
+        if claim == "theirs":
+            logger.info(
+                "[SHOPIFY_INGEST] historical refund %s is held by a live refund door "
+                "-- it books it; the import books nothing", refund_id,
+            )
+            return "duplicate"
+        if claim is None:
+            logger.warning("[SHOPIFY_INGEST] historical refund %s could not be claimed -- nothing "
+                           "booked, reported failed, the next import run books it", refund_id)
+            return "skipped"
+
+        # (2) The goods, (3) the ledger row, then (4) the claim stamped
+        # finished LAST (decision D103(1)): a run cut off anywhere before
+        # that leaves an unfinished claim the next run finishes -- each step
+        # is insert-once or marked.
+        # D45(b): a refund of goods lines for their full billed value brought
+        # those goods back; one Shopify refunded LESS for (a partial or
+        # goodwill amount) is money only, and so is a line Shopify did not
+        # restock (no_restock: the customer kept it) and the whole-order note
+        # (amount-only refunds: no line says goods came back).
+        goods = [] if refund.get("_reverse_whole_order") or (reconciled and not clamped) else [
+            {"order_item_id": ln.get("order_item_id"), "product_id": ln.get("product_id"),
+             "return_qty": float(ln.get("return_qty") or 0), "unit_price": float(ln.get("unit_price") or 0)}
+            for ln in priced if ln.get("product_id") and ln.get("restock") is not False]
+        # D66: only the pieces booked back on their order lines (never one the
+        # counter already took back). PR #1423 review D: the booking stays --
+        # Shopify did take those pieces back -- and a note whose booking
+        # cannot be read or recorded is reported failed, never booked: the
+        # next run finishes it from the line's mark above. `goods_lines`: the
+        # goods this note refunded (read by the P&L only, for the cost it gives
+        # back -- decision D45(b), and by the returnable count,
+        # returns._already_returned_qty, so the counter never takes the same
+        # piece back again); kept off `items`, which the restock doors read.
         try:
-            ledger.insert_one(dict(entry))
-        except Exception as exc:  # noqa: BLE001
-            if shopify_refund._is_dup_key(exc):
-                # A concurrent run (create-branch booking vs duplicate-path
-                # heal, or two parallel heals) won the unique-index insert for
-                # this ref -- this is a DUPLICATE, not a failure: never counted
-                # as cn_failed, never told to 're-run to heal'.
+            goods = _book_import_goods(db, order_doc, refund_id, goods) if goods else []
+            if goods:
+                returns_coll.update_one({"return_id": f"RET-HIST-{refund_id}"},
+                                        {"$set": {"goods_lines": goods}})
+        except Exception:  # noqa: BLE001
+            logger.warning("[SHOPIFY_INGEST] historical refund %s goods not booked", refund_id,
+                           exc_info=True)
+            return "skipped"
+
+        new_row = False
+        if not has_row:
+            try:
+                ledger.insert_one(dict(entry))
+                new_row = True
+            except Exception as exc:  # noqa: BLE001
+                if not shopify_refund._is_dup_key(exc):
+                    logger.warning(
+                        "[SHOPIFY_INGEST] historical credit note insert failed for %s: %s",
+                        refund_id, exc,
+                    )
+                    return "skipped"
+                # Another import run (the create branch against the
+                # duplicate-path heal, or two heals) won the insert for this
+                # refund (its own _id; the ref index too where it exists) --
+                # a DUPLICATE, not a failure: never counted as cn_failed.
                 logger.info(
                     "[SHOPIFY_INGEST] historical credit note for %s already "
                     "inserted by a concurrent run -- treated as duplicate",
                     refund_id,
                 )
-                return "duplicate"
-            logger.warning(
-                "[SHOPIFY_INGEST] historical credit note insert failed for %s: %s",
-                refund_id, exc,
-            )
-            return "skipped"
-
-        _stamp_returns_doc(refund_id, gross, gst_view, cn_date)
+        # (4) The ledger row is stored (by this run, an earlier one or a
+        # concurrent one): the claim is finished. A stamp that cannot be
+        # written is reported failed -- the note is booked, its record still
+        # reads unfinished, and the next run stamps it.
+        if not _finish_claim(refund_id):
+            _record_failed(refund)
+        if not new_row:
+            if heal:
+                summary["healed"] = summary.get("healed", 0) + 1
+            return "duplicate"
 
         summary["credit_notes"] += 1
         summary["gross"] = round(summary["gross"] + gross, 2)
         summary["tax"] = round(summary["tax"] + cn_tax, 2)
         return "booked"
-
-    def _record_failed(refund: Dict[str, Any]) -> None:
-        summary["cn_failed"] += 1
-        rid = str(refund.get("id") or "?").strip() or "?"
-        if len(summary["cn_failed_refund_ids"]) < 20:
-            summary["cn_failed_refund_ids"].append(rid)
 
     for refund in refunds:
         if not isinstance(refund, dict):
@@ -1970,6 +2258,20 @@ def _book_historical_refund_credit_notes(
     # orderfull:<id> idempotency key as the missing-refunds[] branch), reconciled
     # against the TOTAL Shopify actually refunded. Without this the order stays
     # status=REFUNDED in GSTR-1 with the full sale as output tax and NO CDNR.
+    # A whole-order note an EARLIER run booked covers every refund this run
+    # still finds unmapped: that run's stamp of one of them did not land (a
+    # crash between the stamps). Its stamped siblings read as duplicates, so
+    # the heal-rerun guard below would leave the rest unstamped for good --
+    # let the fallback through to finish them (it books nothing: the note
+    # exists). An unreadable ledger is reported failed, never guessed.
+    whole_booked = False
+    if fin == "refunded" and unmapped_real_ids and summary["duplicate_refunds"]:
+        try:
+            whole_booked = ledger.find_one(
+                {"ref": shopify_refund._hist_refund_ref(f"orderfull:{payload.get('id')}")},
+                {"_id": 1}) is not None
+        except Exception:  # noqa: BLE001
+            _record_failed({"id": f"orderfull:{payload.get('id')}"})
     if (
         fin == "refunded"
         and summary["credit_notes"] == 0
@@ -1978,7 +2280,7 @@ def _book_historical_refund_credit_notes(
         # decision and residual policy stand -- firing the fallback here would
         # stack a whole-order CN on top of the existing per-refund CN(s),
         # reversing more than the original invoice (GST-illegal).
-        and summary["duplicate_refunds"] == 0
+        and (summary["duplicate_refunds"] == 0 or whole_booked)
         # FAILED-BOOKING GUARD (mirror of the heal-rerun guard above): a FAILED
         # per-refund booking (transient pricing/ledger error) is promised
         # heal-on-re-run -- the whole-order fallback must not pre-empt that in
@@ -2016,38 +2318,80 @@ def _book_historical_refund_credit_notes(
             # CDNR period = when the refund was ISSUED, not the sale date.
             synthetic["processed_at"] = latest_dt.isoformat()
         covered = list(unmapped_real_ids)
-        fb_status = _process(synthetic)
+        cover_ref = shopify_refund._hist_refund_ref(f"orderfull:{payload.get('id')}")
+        cn_date = _refund_credit_note_date_iso(synthetic, payload)
+        # PR #1423 review F-1423-G: every refund the whole-order note stands
+        # for is CLAIMED before the note is booked (the same claim as a
+        # per-refund note), so a live refund door can never credit one of them
+        # on top of it, and a future webhook redelivery dedupes. A claim with
+        # no answer does not stop the note (decision D80(1): that refund is
+        # reported failed and stamped by the next run).
+        claims = {
+            rid: _claim_returns_doc(rid, 0.0, {}, cn_date, covered_by=cover_ref)
+            for rid in covered
+        }
+        theirs = [rid for rid in covered if claims[rid] == "theirs"]
+        noted: Optional[bool] = whole_booked
+        if theirs and not noted:
+            try:
+                noted = ledger.find_one({"ref": cover_ref}, {"_id": 1}) is not None
+            except Exception:  # noqa: BLE001
+                noted = None
+        if not theirs or noted:
+            fb_status = _process(synthetic)
+            if fb_status == "unmapped":
+                # Decision D103(2): the whole-order note cannot be priced
+                # (order lines with no billed value, or Shopify shows no
+                # money refunded) and never will be on this payload. The
+                # claims taken for it are given up exactly as below: no
+                # claim stands for a note that will never exist, and a live
+                # door can still handle those refunds. Never while a
+                # whole-order note IS stored (they stand for it).
+                try:
+                    noted = ledger.find_one({"ref": cover_ref}, {"_id": 1}) is not None
+                except Exception:  # noqa: BLE001
+                    noted = None
+                if noted is False:
+                    _give_up_claims([rid for rid in covered if claims[rid] in ("new", "mine")],
+                                    cover_ref)
+                else:
+                    fb_status = "skipped" if noted is None else "duplicate"
+        elif noted is None:
+            fb_status = "skipped"  # cannot tell: reported failed, nothing booked
+        else:
+            # A live door holds one of these refunds and books it: the
+            # whole-order note (the total of ALL of them) would reverse its
+            # money a second time. Not booked -- exactly what a run after
+            # that webhook does (the heal-rerun guard above) -- and the
+            # claims taken for the others are given up: they stand for no
+            # note, and would only keep a later webhook from booking them.
+            fb_status = "theirs"
+            _give_up_claims([rid for rid in covered if claims[rid] in ("new", "mine")], cover_ref)
+            summary["duplicate_refunds"] += len(theirs)
+            summary["unmapped_refunds"] = max(0, summary["unmapped_refunds"] - len(theirs))
         if fb_status == "skipped":
             _record_failed(synthetic)
         if fb_status in ("booked", "duplicate"):
             # 'booked': fresh whole-order reversal. 'duplicate': a PRIOR run
-            # already booked the whole-order CN but its covered-stamps may have
-            # silently failed (fail-soft insert) -- re-running the stamp block
-            # here makes a stamp failure HEALABLE on re-run (the per-id
-            # existence pre-check keeps it idempotent). Either way the covered
-            # refunds are netted by a whole-order CN, so they are no longer an
-            # unreported residual.
+            # already booked the whole-order CN but a covered stamp of its had
+            # not landed -- claimed above, so a stamp failure is HEALABLE on
+            # re-run. Either way the covered refunds are netted by a
+            # whole-order CN, so they are no longer an unreported residual.
             if fb_status == "booked":
                 summary["whole_order_fallback"] = True
             summary["unmapped_refunds"] = max(
                 0, summary["unmapped_refunds"] - len(covered)
             )
-            # Stamp each real refund id so a future webhook redelivery dedupes
-            # instead of double-crediting on top of the whole-order reversal.
-            cn_date = _refund_credit_note_date_iso(synthetic, payload)
             for rid in covered:
-                try:
-                    if returns_coll is not None and (
-                        returns_coll.find_one({"shopify_refund_id": rid}) is not None
-                    ):
-                        continue
-                except Exception:  # noqa: BLE001
-                    pass
-                _stamp_returns_doc(
-                    rid, 0.0, {},
-                    cn_date,
-                    covered_by=f"SHOPIFY-HIST-REFUND-orderfull:{payload.get('id')}",
-                )
+                # The whole-order note is stored: the claims standing for it
+                # are finished (decision D103(1)). Not claimed, or the stamp
+                # not written: reported failed (never a run that reads
+                # complete); the next import run stamps it. A live door's
+                # claim is not this import's to finish.
+                if claims[rid] == "theirs":
+                    continue
+                if claims[rid] is None or not _finish_claim(rid):
+                    _record_failed({"id": rid})
 
     return summary
 
@@ -2183,8 +2527,15 @@ def ingest_shopify_order(
     try:
         existing = orders_coll.find_one({"shopify_order_id": shopify_order_id})
     except Exception as exc:  # noqa: BLE001
-        logger.warning("[SHOPIFY_INGEST] dedupe lookup failed: %s", exc)
-        existing = None
+        # Decision D104(1): a dedupe read that fails is NO answer -- never
+        # "not booked yet", which would build and insert a second order for
+        # one Shopify order wherever the unique index is missing. The order
+        # is reported failed: the import's next run (the inbox retry, on the
+        # live path) books it or finds it.
+        logger.warning("[SHOPIFY_INGEST] dedupe lookup failed -- order %s not booked this "
+                       "time: %s", shopify_order_id, exc)
+        return {"status": "error", "error": f"dedupe lookup failed: {exc}",
+                "shopify_order_id": shopify_order_id}
     if existing:
         result = {
             "status": "duplicate",
@@ -2203,6 +2554,22 @@ def ingest_shopify_order(
             if refund_cn is not None:
                 result["refund_credit_notes"] = refund_cn
         return result
+
+    # Decision D104(2): the order-history import never inserts an order on
+    # the strength of a fail-soft index. uniq_shopify_order_id is what makes
+    # two runs that both read "not booked" store ONE order; if it is missing
+    # and cannot be built, or cannot be confirmed, nothing is inserted and
+    # the order is reported failed with the reason (the D82 rule: a missing
+    # index must never be able to double revenue and output GST).
+    if historical:
+        try:
+            ensure_shopify_order_index(db, strict=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[SHOPIFY_INGEST] %s -- historical order %s not booked: %s",
+                         ORDER_INDEX_UNCONFIRMED, shopify_order_id, exc)
+            return {"status": "error", "reason": "order_index_unconfirmed",
+                    "error": f"{ORDER_INDEX_UNCONFIRMED}: {exc}",
+                    "shopify_order_id": shopify_order_id}
 
     # --- Build the IMS order ------------------------------------------------
     product_repo = None
@@ -2508,8 +2875,14 @@ def ingest_shopify_order(
             existing = None
             try:
                 existing = orders_coll.find_one({"shopify_order_id": shopify_order_id})
-            except Exception:  # noqa: BLE001
-                existing = None
+            except Exception as read_exc:  # noqa: BLE001
+                # Decision D104(1): the winner's order cannot be read -- no
+                # answer, never a "duplicate" naming an order id that was
+                # never stored (and, on an import, a refund heal skipped
+                # without a word). Reported failed; the next run finds it.
+                return {"status": "error",
+                        "error": f"order exists but could not be read back: {read_exc}",
+                        "shopify_order_id": shopify_order_id}
             result = {
                 "status": "duplicate",
                 "order_id": (existing or {}).get("order_id", order_id),
@@ -2667,16 +3040,29 @@ def ingest_shopify_order(
     }
 
 
-def ensure_shopify_order_index(db) -> None:
+ORDER_INDEX_UNCONFIRMED = (
+    "The unique index uniq_shopify_order_id on orders is missing and could not be "
+    "built, or could not be confirmed, so the order-history import books no order "
+    "(two runs could store one Shopify order twice)"
+)
+
+
+def ensure_shopify_order_index(db, strict: bool = False) -> None:
     """Best-effort UNIQUE partial index on `orders.shopify_order_id` so a
     double-create is physically impossible even under a race. Idempotent;
-    never raises. Only indexes docs that actually carry the field (legacy /
-    offline orders without it are unaffected)."""
+    never raises -- unless ``strict`` (the order-history import, decision
+    D104(2)): an index that cannot be built or confirmed RAISES, and the
+    import inserts nothing. Only indexes docs that actually carry the field
+    (legacy / offline orders without it are unaffected)."""
     if db is None:
+        if strict:
+            raise RuntimeError("no database")
         return
     try:
         coll = db.get_collection("orders")
         if coll is None:
+            if strict:
+                raise RuntimeError("no orders collection")
             return
         coll.create_index(
             "shopify_order_id",
@@ -2685,4 +3071,6 @@ def ensure_shopify_order_index(db) -> None:
             name="uniq_shopify_order_id",
         )
     except Exception:  # noqa: BLE001
+        if strict:
+            raise
         logger.debug("shopify_order_id index create skipped", exc_info=True)

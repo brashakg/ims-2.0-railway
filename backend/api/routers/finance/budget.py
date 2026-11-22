@@ -11,6 +11,7 @@ from typing import Optional
 from fastapi import Depends, Query
 from ..auth import get_current_user
 from ...services.salary_visibility import is_salary_admin
+from ...utils.expense_status import COMMITTED_EXPENSE_STATUS_MATCH
 from ._shared import _get_db, _require_finance_admin, router
 from .pnl import _is_payroll_shaped_expense
 from .survival import _build_survival_payload, _survival_scope
@@ -67,7 +68,7 @@ async def get_budget(
                             "$gte": start.date().isoformat(),
                             "$lt": end.date().isoformat(),
                         },
-                        "status": {"$in": ["APPROVED", "PAID", "approved", "paid"]},
+                        "status": {"$in": COMMITTED_EXPENSE_STATUS_MATCH},
                     }
                 },
                 {"$group": {"_id": "$category", "total": {"$sum": "$amount"}}},

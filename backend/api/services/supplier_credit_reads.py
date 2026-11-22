@@ -56,6 +56,22 @@ def confirmed_ap_rows(db, *, vendor_id=None, bill_id=None, store_id=None):
     return [{**row, "amount": row["amount_paise"] / 100} for row in groups.values()]
 
 
+def payments_on_bills(db, bill_ids):
+    """Every payment row naming one of these bills: the stored ones, and the
+    row of a part-application an advance LOGS that is not stored yet
+    (ap_engine.with_logged_applications) -- so what is left on a bill is the
+    same whether or not that second write has landed (PR #1423 review)."""
+    from . import ap_engine
+
+    ids = list(bill_ids)
+    coll = db.get_collection("vendor_payments")
+    rows = list(coll.find({"bill_id": {"$in": ids}}, {"_id": 0}))
+    have = {row.get("payment_id") for row in rows}
+    advances = [row for row in coll.find({"applications.bill_id": {"$in": ids}}, {"_id": 0})
+                if row.get("payment_id") not in have]
+    return [row for row in ap_engine.with_logged_applications(rows + advances) if row.get("bill_id") in ids]
+
+
 def payable_credit_rows(db, *, vendor_id=None, bill_id=None, store_id=None):
     """Preserve existing manual/scheme credits, add confirmed returns once."""
     query = {key: value for key, value in (("vendor_id", vendor_id), ("bill_id", bill_id), ("store_id", store_id))

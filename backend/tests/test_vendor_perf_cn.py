@@ -78,6 +78,17 @@ class _FakeColl:
     def update_one(self, *a, **k):
         return None
 
+    def find_one_and_update(self, query, update, **_k):
+        # The shared counters collection (purchase_numbering): a supplier
+        # credit is numbered from it, never by the clock (PR #1423).
+        doc = self.find_one(query)
+        if doc is None:
+            doc = dict(query)
+            self.docs.append(doc)
+        for key, by in update.get("$inc", {}).items():
+            doc[key] = doc.get(key, 0) + by
+        return doc
+
 
 class _FakeDB:
     def __init__(self, collections=None):
