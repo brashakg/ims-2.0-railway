@@ -965,21 +965,20 @@ def _expire_lot(
     next sweep resumes at the first step that is not stored yet, with the
     amount that was actually debited -- never a second debit, never a second
     row, and never a lot marked finished with one of the two missing.
-    The debit never takes the balance below ``keep_points`` (the unexpired
-    lots' share), so it may take less than ``expirable`` when a redemption
-    landed meanwhile; the EXPIRE row records what was actually taken.
+    The debit takes all of ``expirable`` or nothing: when the balance does not
+    hold it above ``keep_points`` (the unexpired lots' share), or the account
+    changed after the sweep read it, the lot waits. The EXPIRE row records
+    what was actually debited (a resumed lot keeps its first debit).
     """
     debited = accounts.expiry_debited_points(customer_id, lot_id)
     if debited is None and expirable > 0:
-        asked = accounts.debit_for_expiry(
+        accounts.debit_for_expiry(
             customer_id, lot_id, expirable, keep_points=keep_points, actor=actor,
             seen=seen,
         )
         debited = accounts.expiry_debited_points(customer_id, lot_id)
         if debited is None:
-            if asked:
-                raise RuntimeError(f"expiry debit not confirmed for {lot_id}")
-            debited = 0  # nothing above the valid lots' share left to expire
+            raise RuntimeError(f"expiry debit not confirmed for {lot_id}")
     if debited:
         expire_id = f"EXPIRE-{lot_id}"
         if txns.collection.find_one({"txn_id": expire_id}) is None:
@@ -1002,6 +1001,24 @@ def _expire_lot(
                 raise RuntimeError(f"expiry ledger row not confirmed for {lot_id}")
     marked_by_this_run = txns.mark_expired(lot_id, run_id)
     return int(debited or 0) if marked_by_this_run else 0
+
+
+def _pending_reversal_credits(ledger: List[Dict[str, Any]], seen: Dict[str, Any]) -> List[str]:
+    """Reversal markers that restore points but whose balance move has not
+    landed yet: written FIRST, healed later by _ensure_reversal_applied, and
+    their txn_id is not in the account's applied_reversals as read in
+    ``seen``. Their points are on the ledger but not on the balance. A marker
+    without this guard's fields predates it and its money moved (as there)."""
+    applied = set(seen.get("applied_reversals") or [])
+    return [
+        r.get("txn_id")
+        for r in ledger
+        if str(r.get("type") or "").upper() == "ADJUST"
+        and int(r.get("points") or 0) > 0
+        and _REVERSAL_ORDER_FIELD in r
+        and "reversed_earn_points" in r
+        and r.get("txn_id") not in applied
+    ]
 
 
 @router.post("/expire")
@@ -1069,7 +1086,9 @@ async def expire_sweep(
             incomplete.extend(r.get("txn_id") for r in rows)
             continue
         expirable_by_lot = expirable_points_by_lot(ledger, now)
-        keep_points = points_held_by_unexpired_lots(ledger, now)
+        keep_points = points_held_by_unexpired_lots(
+            ledger, now, not_in_balance=_pending_reversal_credits(ledger, seen),
+        )
 
         for row in rows:
             lot_id = row.get("txn_id")

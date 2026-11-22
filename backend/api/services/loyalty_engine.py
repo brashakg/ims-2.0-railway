@@ -369,16 +369,23 @@ def expirable_points_by_lot(
 def points_held_by_unexpired_lots(
     ledger: List[Dict[str, Any]],
     now: Optional[datetime] = None,
+    not_in_balance: Any = (),
 ) -> int:
     """Points the ledger says belong to lots that have NOT expired (no expiry,
     or expires_at > now). The expiry sweep never lets a debit take the balance
     below this, so a redemption that lands while the sweep works (its ledger
-    row not read yet) can never make the sweep expire a valid lot's points."""
+    row not read yet) can never make the sweep expire a valid lot's points.
+
+    ``not_in_balance``: txn_ids of credit rows whose balance write is known not
+    to have landed yet (a reversal marker still pending). Their points are not
+    on the balance, so they are left out of the share the balance must keep."""
     now = now or utc_now_naive()
+    skip = set(not_in_balance or ())
     return sum(
         int(lot["remaining"])
         for lot in _fifo_lots(ledger)
         if lot["remaining"] > 0
+        and lot["txn_id"] not in skip
         and (lot["expires_at"] is None or lot["expires_at"] > now)
     )
 

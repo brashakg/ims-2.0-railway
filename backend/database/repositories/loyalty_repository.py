@@ -112,7 +112,11 @@ class LoyaltyAccountRepository(BaseRepository):
         failure: a failed read must never look like "not debited yet".
         """
         doc = self.collection.find_one({"customer_id": customer_id}) or {}
-        key = self._expiry_key(lot_id)
+        return self._debited_in(doc, lot_id)
+
+    @classmethod
+    def _debited_in(cls, doc: Dict[str, Any], lot_id: str) -> Optional[int]:
+        key = cls._expiry_key(lot_id)
         for entry in doc.get("money_ledger") or []:
             if entry.get("idempotency_key") == key:
                 return abs(int(entry.get("delta") or 0))
@@ -128,14 +132,14 @@ class LoyaltyAccountRepository(BaseRepository):
         seen: Optional[Dict[str, Any]] = None,
     ) -> int:
         """Take an expired lot's unspent points off the balance, once per lot,
-        and return how many points this call ASKED to take (0 = nothing to take).
+        and return how many points this call ASKED to take (all of ``points``).
 
         Keyed on the lot, so a retry, a lost reply or a second sweep running at
         the same moment cannot debit twice. ``keep_points`` (what the ledger
         says the customer's unexpired lots hold) is a floor IN the guarded
-        write: a redemption that lands while the sweep works lowers the
-        balance, and the expiry then takes only what is left above the valid
-        lots -- never a valid lot's points. The caller reads
+        write: when the balance does not hold ``points`` above it, this RAISES
+        and the lot waits (never a partial take, never a valid lot's points).
+        The caller reads
         expiry_debited_points: the stored marker, not this call's reply, says
         whether the debit landed. RAISES on a read failure.
 
@@ -153,10 +157,20 @@ class LoyaltyAccountRepository(BaseRepository):
         from api.services import money_guard
 
         keep = max(int(keep_points or 0), 0)
+        take = int(points)
         doc = self.collection.find_one({"customer_id": customer_id}) or {}
-        take = min(int(points), int(doc.get("balance_points") or 0) - keep)
-        if take <= 0:
-            return 0
+        if self._debited_in(doc, lot_id) is not None:
+            return take  # another run already debited this lot (its marker says so)
+        if int(doc.get("balance_points") or 0) - keep < take:
+            # The balance does not hold this lot's unspent points on top of
+            # the valid lots' share: a write is in flight (a redeem whose row
+            # is not written yet, an earn or a reversal whose balance move has
+            # not landed) or the account and its ledger disagree. Taking less
+            # and marking the lot finished would leave expired points spendable
+            # for good, so the lot WAITS for a sweep that sees them agree.
+            raise RuntimeError(
+                f"balance does not cover lot {lot_id} above the valid lots' share"
+            )
         now = utc_now_naive()
         now = now.replace(microsecond=now.microsecond // 1000 * 1000)  # BSON keeps ms
         guard: Dict[str, Any] = {"balance_points": {"$gte": take + keep}}
@@ -176,9 +190,13 @@ class LoyaltyAccountRepository(BaseRepository):
     def expiry_account_version(self, customer_id: str) -> Dict[str, Any]:
         """The account's last-write stamp, read BEFORE the expiry sweep reads
         the ledger (every balance writer sets updated_at). RAISES on a read
-        failure."""
+        failure. Also returns applied_reversals (the reversals whose balance
+        move has landed), read in the same document."""
         doc = self.collection.find_one({"customer_id": customer_id}) or {}
-        return {"updated_at": doc.get("updated_at")}
+        return {
+            "updated_at": doc.get("updated_at"),
+            "applied_reversals": list(doc.get("applied_reversals") or []),
+        }
 
     def try_debit(
         self,
