@@ -65,6 +65,13 @@ function drawerCash(s: { variance_status?: VarianceStatus }, paisa?: number | nu
   return s.variance_status === 'COMPARISON_UNAVAILABLE' ? 'Not available' : paisaToInr(paisa);
 }
 
+// The row says why nothing was compared (D136(3)).
+function comparisonUnavailableText(reason?: string | null): string {
+  return reason === 'EARLIER_CLOSE_DRAWER_UNKNOWN'
+    ? 'Comparison not available: an earlier Cash Register close today could not be placed on one drawer, so nothing is shown as short or over.'
+    : 'Comparison not available: an earlier drawer was recorded by an older version.';
+}
+
 function varianceTone(status: VarianceStatus): string {
   if (status === 'BALANCED') return 'text-emerald-700';
   return 'text-red-700';
@@ -503,7 +510,7 @@ export default function BlindEodTallyPage() {
                 {s.variance_status === 'COMPARISON_UNAVAILABLE' && (
                   <div className="mt-2 rounded-lg px-3 py-2 bg-gray-50 border border-gray-200 text-gray-700 text-xs flex items-start gap-2">
                     <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
-                    <span>Comparison not available: an earlier drawer was recorded by an older version.</span>
+                    <span>{comparisonUnavailableText(s.comparison_withheld_reason)}</span>
                   </div>
                 )}
                 {s.variance_status === 'NEGATIVE_EXPECTED' && (
@@ -576,7 +583,7 @@ export default function BlindEodTallyPage() {
                 {s.variance_status === 'COMPARISON_UNAVAILABLE' && (
                   <div className="mt-2 rounded-lg px-3 py-2 bg-gray-50 border border-gray-200 text-gray-700 text-xs flex items-start gap-2">
                     <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
-                    <span>Comparison not available: an earlier drawer was recorded by an older version.</span>
+                    <span>{comparisonUnavailableText(s.comparison_withheld_reason)}</span>
                   </div>
                 )}
                 {s.variance_status === 'NEGATIVE_EXPECTED' && (

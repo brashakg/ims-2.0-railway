@@ -8015,3 +8015,166 @@ def test_r25_the_counts_task_on_real_mongo(monkeypatch):
     finally:
         client.drop_database(name)
         client.close()
+
+
+# ===========================================================================
+# Round 26 -- the lead's ruling D136(3) on head 6741af72.
+# ``banked_before_count`` applies the SAME spanning test (``_open_across``)
+# that ``drawer_counts`` applies after a count: a close whose till link failed
+# while ANOTHER drawer opened during its session cannot be placed, so the
+# drawer counted next is not compared (variance empty, the row says why), with
+# no note and no alert: never a shortage IMS cannot prove.
+# ===========================================================================
+
+
+def _failed_close_across_b_then_b_counted(db, fail_reads, *, at=None, till_db=None, pieces=4):
+    """The reviewer's sequence: CR-R26-1 opens on drawer A at 04:00; Rs 1,000
+    is taken; A is counted Rs 1,000 and LOCKED; drawer B opens at 07:00 WHILE
+    CR-R26-1 is still open; Rs 3,000 is taken; CR-R26-1 closes at 10:00, its
+    till read fails, Rs 1,000 banked. B is then counted on the Blind EOD Tally
+    at 11:00 at ``pieces`` x Rs 500 (Rs 2,000: the deposit left B)."""
+    at = at or (lambda clock: f"{DATE}T{clock}")
+    tdb = till_db if till_db is not None else db
+    a = _open(tdb)
+    _set_opened(tdb, a, "03:30:00")
+    _opened_on(tdb, "CR-R26-1", a, opened="04:00:00", opening=0.0)
+    _cash_sale(tdb, 1000, at("05:00:00"))
+    _count_on_blind_eod(tdb, a, 2, "06:00:00")
+    assert till.lock_session(tdb, a, actor=MANAGER)["ok"]
+    b = till.open_session(tdb, store_id=STORE, session_date=DATE, opening_float_paisa=0,
+                          shift="PM", actor=CASHIER)["session"]["session_id"]
+    _set_opened(tdb, b, "07:00:00")
+    _cash_sale(tdb, 3000, at("08:00:00"))
+    with fail_reads() as m:
+        s1 = _register(db, m, "CR-R26-1", opened="04:00:00", closed="10:00:00", pieces=4,
+                       bank=1000.0, insert=False)
+    assert (s1["till_link_ok"], s1["till_session_id"]) == (False, a)
+    assert _till(tdb, b)["status"] == till.STATUS_OPEN
+    if pieces is not None:
+        _count_on_blind_eod(tdb, b, pieces, "11:00:00")
+    return a, b
+
+
+def _uncompared_unplaced(row):
+    return (row["expected_cash_paisa"], row["variance_paisa"], row["variance_status"],
+            row.get("comparison_withheld_reason"))
+
+
+_UNPLACED = (None, None, "COMPARISON_UNAVAILABLE", till.EARLIER_CLOSE_DRAWER_UNKNOWN)
+
+
+class TestR26D136TheCountBeforeAnUnplacedDepositIsNotCompared:
+    def test_d136_3_b_counted_after_a_failed_close_open_across_it_is_not_compared(
+        self, db, monkeypatch
+    ):
+        """B read Rs 1,000 SHORT (a note at its lock and an alert) for a
+        deposit IMS cannot place on A or B."""
+        alerts = _alerts(monkeypatch)
+        _a, b = _failed_close_across_b_then_b_counted(db, _FailDayReads(db, monkeypatch))
+        row = _till(db, b)
+        assert _uncompared_unplaced(row) == _UNPLACED
+        assert row["blind_count_paisa"] == 200000
+        # The count is kept; the deposit IMS cannot place is not on B's row.
+        assert row["bank_deposit_paisa"] == 0
+        # The row says why, on the Z-Read too.
+        zr = till.build_zread(db, b)
+        assert zr["comparison_unavailable_message"] == till.EARLIER_CLOSE_DRAWER_UNKNOWN_MESSAGE
+        # No note at the lock, no alert, no check-by-hand task owed.
+        def _owed_kinds():
+            owed = (_till(db, b).get(till.FOLLOWUP_FIELD) or {}).get("tasks") or []
+            return {t.get("kind") for t in owed if t}
+
+        assert _owed_kinds() & {"uncompared", "variance", "count_variance"} == set()
+        locked = till.lock_session(db, b, actor=MANAGER)
+        assert locked["ok"], locked
+        assert alerts == []
+        assert _owed_kinds() & {"uncompared", "variance", "count_variance"} == set()
+        # A cashier never learns the count was not compared.
+        assert "comparison_withheld_reason" not in till.redact_for_cashier(_till(db, b))
+
+    def test_control_the_same_close_over_before_b_opened_leaves_b_compared(self, db, monkeypatch):
+        """CR-R26-C closes at 06:30 (before B opens): its deposit is A's, B's
+        count balances on its own cash."""
+        alerts = _alerts(monkeypatch)
+        a = _open(db)
+        _set_opened(db, a, "03:30:00")
+        _opened_on(db, "CR-R26-C", a, opened="04:00:00", opening=0.0)
+        _cash_sale(db, 1000, f"{DATE}T05:00:00")
+        _count_on_blind_eod(db, a, 2, "06:00:00")
+        assert till.lock_session(db, a, actor=MANAGER)["ok"]
+        with _FailDayReads(db, monkeypatch)() as m:
+            _register(db, m, "CR-R26-C", opened="04:00:00", closed="06:30:00", pieces=0,
+                      bank=1000.0, insert=False)
+        b = till.open_session(db, store_id=STORE, session_date=DATE, opening_float_paisa=0,
+                              shift="PM", actor=CASHIER)["session"]["session_id"]
+        _set_opened(db, b, "07:00:00")
+        _cash_sale(db, 3000, f"{DATE}T08:00:00")
+        _count_on_blind_eod(db, b, 6, "11:00:00")
+        row = _till(db, b)
+        assert (row["variance_paisa"], row["variance_status"], row.get("comparison_withheld_reason")) == (
+            0, "BALANCED", None)
+        assert alerts == []
+
+    def test_d136_3_unreadable_day_drawers_refuse_the_count_never_read_as_none(
+        self, db, monkeypatch
+    ):
+        """Placing the failed close needs the shop-day's drawers: unreadable,
+        the count is refused (503) and B stays OPEN for the same count."""
+        _alerts(monkeypatch)
+        _a, b = _failed_close_across_b_then_b_counted(db, _FailDayReads(db, monkeypatch), pieces=None)
+        restore = _fail_till_reads(db.get_collection("till_sessions"), counted_only=False)
+        try:
+            res = till.blind_submit(db, b, blind_denominations=[
+                {"face": 500, "kind": "note", "pieces": 4}], actor=CASHIER)
+        finally:
+            restore()
+        assert (res["ok"], res["http"]) == (False, 503), res
+        assert _till(db, b)["status"] == till.STATUS_OPEN
+        # Recovered, the same count lands, not compared.
+        _count_on_blind_eod(db, b, 4, "11:00:00")
+        assert _uncompared_unplaced(_till(db, b)) == _UNPLACED
+
+
+def test_r26_d136_3_on_real_mongo(monkeypatch):
+    """Native PyMongo with the real till indexes, the real close handler, the
+    real lock and the real TaskRepository: the reviewer's sequence."""
+    client, real_db, name = _real_till_db()
+    try:
+        till.ensure_till_indexes(real_db)
+        tasks = _real_task_repo(monkeypatch, real_db)
+        ndb = _NativeDB(real_db)
+
+        def _at(clock):
+            return datetime.fromisoformat(f"{DATE}T{clock}")
+
+        class _Native:
+            def __call__(self):
+                return self
+
+            def __enter__(self):
+                self.ctx = monkeypatch.context()
+                m = self.ctx.__enter__()
+                _native_fail_day_reads(m, name)
+                return m
+
+            def __exit__(self, *exc):
+                return self.ctx.__exit__(*exc)
+
+        _a, b = _failed_close_across_b_then_b_counted(ndb, _Native(), at=_at, till_db=real_db)
+        row = real_db.till_sessions.find_one({"_id": b})
+        assert _uncompared_unplaced(row) == _UNPLACED
+        assert (row["blind_count_paisa"], row["bank_deposit_paisa"]) == (200000, 0)
+        # An identical resend of the count changes nothing.
+        again = till.blind_submit(real_db, b, blind_denominations=[
+            {"face": 500, "kind": "note", "pieces": 4}], actor=CASHIER)
+        assert again["ok"] is False and again["http"] == 409
+        assert real_db.till_sessions.find_one({"_id": b})["variance_paisa"] is None
+        locked = till.lock_session(real_db, b, actor=MANAGER)
+        assert locked["ok"], locked
+        till.settle_drawers(ndb, [b])
+        # Only the failed-link close's own "count it on the Blind EOD Tally"
+        # task (D88): no variance alert, no check-by-hand task for B.
+        assert sorted(t["source_ref"] for t in tasks.find({})) == [f"till_uncounted:{STORE}:{DATE}"]
+    finally:
+        client.drop_database(name)
+        client.close()

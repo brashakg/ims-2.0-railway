@@ -57,6 +57,8 @@ export interface TillSession {
   negative_expected_advisory?: boolean | null;
   variance_paisa?: number | null;
   variance_status?: VarianceStatus;
+  // Why COMPARISON_UNAVAILABLE, when it is not the older-version case (D136(3)).
+  comparison_withheld_reason?: string | null;
   // The mandatory written explanation for an out-of-band variance (owner
   // ruling 2026-08-25); null when the day balanced.
   variance_note?: string | null;

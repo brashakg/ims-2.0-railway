@@ -22,7 +22,9 @@ export default function TillDrawerList({
           {d.variance_paisa != null
             ? `, variance ${d.variance_paisa > 0 ? '+' : d.variance_paisa < 0 ? '-' : ''}${rupees(Math.abs(d.variance_paisa))}`
             : d.variance_status === 'COMPARISON_UNAVAILABLE'
-              ? ', comparison not available (an earlier drawer was recorded by an older version)'
+              ? d.comparison_withheld_reason === 'EARLIER_CLOSE_DRAWER_UNKNOWN'
+                ? ', comparison not available (an earlier Cash Register close could not be placed on one drawer)'
+                : ', comparison not available (an earlier drawer was recorded by an older version)'
               : d.counted_paisa != null && d.status !== 'LOCKED'
                 ? ', variance shown once a manager locks it'
                 : ''}

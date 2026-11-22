@@ -763,7 +763,7 @@ function VarianceChip({ status, variance }: { status: ReconStatus; variance: num
   if (status === 'COMPARISON_UNAVAILABLE') {
     return (
       <span
-        title="No comparison is made for this drawer: the day's drawers could not be read, or an earlier drawer was recorded by an older version."
+        title="No comparison is made for this drawer: the day's drawers could not be read, an earlier Cash Register close could not be placed on one drawer, or an earlier drawer was recorded by an older version."
         className={`inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs font-medium ${STATUS_CHIP.COMPARISON_UNAVAILABLE}`}
       >
         Comparison not available

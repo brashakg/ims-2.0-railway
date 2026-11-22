@@ -34,6 +34,7 @@ export interface TillDrawerSummary {
   counted_paisa: number | null;
   variance_paisa?: number | null;
   variance_status?: string | null;
+  comparison_withheld_reason?: string | null;
 }
 
 export interface DayEndClose {
