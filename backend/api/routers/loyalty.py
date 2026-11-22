@@ -951,6 +951,7 @@ def _expire_lot(
     actor: Optional[str],
     run_id: str,
     keep_points: int = 0,
+    seen: Optional[Dict[str, Any]] = None,
 ) -> int:
     """Expire ONE lot as a resumable operation; return the points THIS run
     finished expiring (0 = nothing left to shed, or another run finished it).
@@ -971,7 +972,8 @@ def _expire_lot(
     debited = accounts.expiry_debited_points(customer_id, lot_id)
     if debited is None and expirable > 0:
         asked = accounts.debit_for_expiry(
-            customer_id, lot_id, expirable, keep_points=keep_points, actor=actor
+            customer_id, lot_id, expirable, keep_points=keep_points, actor=actor,
+            seen=seen,
         )
         debited = accounts.expiry_debited_points(customer_id, lot_id)
         if debited is None:
@@ -1057,6 +1059,10 @@ async def expire_sweep(
         # each expired lot may shed (its unspent remainder), so we never expire
         # points that were already redeemed or belong to a newer, valid lot.
         try:
+            # Read the account's last-write stamp BEFORE the ledger: the debit
+            # refuses if the account changed after this point (see
+            # debit_for_expiry), so a stale ledger can never price it.
+            seen = accounts.expiry_account_version(customer_id)
             ledger = txns.ledger_for_expiry(customer_id)
         except Exception:  # noqa: BLE001
             logger.exception("[LOYALTY] expiry: ledger unreadable for %s", customer_id)
@@ -1073,7 +1079,7 @@ async def expire_sweep(
                 points = _expire_lot(
                     txns, accounts, customer_id, lot_id,
                     int(expirable_by_lot.get(lot_id, 0)), actor, run_id,
-                    keep_points=keep_points,
+                    keep_points=keep_points, seen=seen,
                 )
             except Exception:  # noqa: BLE001
                 logger.exception("[LOYALTY] expiry not finished for lot %s", lot_id)

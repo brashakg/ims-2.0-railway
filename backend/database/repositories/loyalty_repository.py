@@ -125,6 +125,7 @@ class LoyaltyAccountRepository(BaseRepository):
         points: int,
         keep_points: int = 0,
         actor: Optional[str] = None,
+        seen: Optional[Dict[str, Any]] = None,
     ) -> int:
         """Take an expired lot's unspent points off the balance, once per lot,
         and return how many points this call ASKED to take (0 = nothing to take).
@@ -137,6 +138,14 @@ class LoyaltyAccountRepository(BaseRepository):
         lots -- never a valid lot's points. The caller reads
         expiry_debited_points: the stored marker, not this call's reply, says
         whether the debit landed. RAISES on a read failure.
+
+        ``seen`` ({"updated_at": ...}, from expiry_account_version taken BEFORE
+        the sweep read the ledger) adds "the account has not changed since" to
+        the guard: a redeem plus an earn landing in between can leave the
+        balance high enough for the floor while the ledger the sweep read is
+        stale, and the debit would take the fresh lot's points. On success it
+        is moved to the value this debit wrote, so the customer's next due lot
+        in the same sweep is not refused by the sweep's own write.
         """
         # ponytail: one small marker per expired lot stays on the account
         # document (money_ledger); archive old markers if a customer ever
@@ -149,14 +158,27 @@ class LoyaltyAccountRepository(BaseRepository):
         if take <= 0:
             return 0
         now = utc_now_naive()
-        money_guard.debit(
+        now = now.replace(microsecond=now.microsecond // 1000 * 1000)  # BSON keeps ms
+        guard: Dict[str, Any] = {"balance_points": {"$gte": take + keep}}
+        if seen is not None:
+            guard["updated_at"] = seen.get("updated_at")
+        res = money_guard.debit(
             self.collection, "LOYALTY", customer_id, take,
             reason="expire", ref=lot_id, actor=actor,
             idempotency_key=self._expiry_key(lot_id),
-            guard_extra={"balance_points": {"$gte": take + keep}},
+            guard_extra=guard,
             set_extra={"last_activity_at": now, "updated_at": now},
         )
+        if seen is not None and res.ok and res.reason != "duplicate":
+            seen["updated_at"] = now
         return take
+
+    def expiry_account_version(self, customer_id: str) -> Dict[str, Any]:
+        """The account's last-write stamp, read BEFORE the expiry sweep reads
+        the ledger (every balance writer sets updated_at). RAISES on a read
+        failure."""
+        doc = self.collection.find_one({"customer_id": customer_id}) or {}
+        return {"updated_at": doc.get("updated_at")}
 
     def try_debit(
         self,
