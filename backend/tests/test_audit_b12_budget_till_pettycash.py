@@ -8135,6 +8135,26 @@ class TestR26D136TheCountBeforeAnUnplacedDepositIsNotCompared:
         assert _uncompared_unplaced(_till(db, b)) == _UNPLACED
 
 
+    def test_d136_3_a_register_close_that_counts_b_next_is_not_compared_either(
+        self, db, monkeypatch
+    ):
+        """The other door: CR-R26-2 opened on B at 07:30 counts B (Rs 2,000)
+        after the unplaced close. The till's count is not compared and the
+        close asks no note (several drawers, D53: it judges the drawer's own
+        count, which has no variance)."""
+        alerts = _alerts(monkeypatch)
+        _a, b = _failed_close_across_b_then_b_counted(db, _FailDayReads(db, monkeypatch), pieces=None)
+        _opened_on(db, "CR-R26-2", b, opened="07:30:00", opening=0.0)
+        out = _register(db, monkeypatch, "CR-R26-2", opened="07:30:00", closed="11:00:00", pieces=4,
+                        insert=False)
+        assert (out["till_link_ok"], out["till_session_id"], out["variance"]) == (True, b, None)
+        row = _till(db, b)
+        assert _uncompared_unplaced(row) == _UNPLACED
+        assert row["blind_count_origin"] == "CR-R26-2"
+        assert till.lock_session(db, b, actor=MANAGER)["ok"]
+        assert alerts == []
+
+
 def test_r26_d136_3_on_real_mongo(monkeypatch):
     """Native PyMongo with the real till indexes, the real close handler, the
     real lock and the real TaskRepository: the reviewer's sequence."""
