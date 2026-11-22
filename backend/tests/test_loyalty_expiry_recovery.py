@@ -339,7 +339,11 @@ def test_redeem_landing_after_the_sweep_read_the_ledger_never_takes_a_valid_lots
     first = client.post(URL, headers=auth_headers)
     monkeypatch.setattr(env.t_repo, "ledger_for_expiry", real)
 
-    assert first.status_code == 200 and first.json() == {"expired_txns": 1, "points_expired": 40}
+    # The account changed after the ledger read, so the lot waits (nothing
+    # moved) and the next sweep, reading the REDEEM row, sheds A's real 40.
+    assert first.status_code == 503 and first.json()["detail"]["incomplete_lots"] == ["A14"]
+    assert env.balance("c14") == 100 and env.expire_rows("c14") == []
+    assert client.post(URL, headers=auth_headers).json() == {"expired_txns": 1, "points_expired": 40}
     assert client.post(URL, headers=auth_headers).json() == {"expired_txns": 0, "points_expired": 0}
     assert env.balance("c14") == 60
     assert [(r["source_earn_txn_id"], r["points"]) for r in env.expire_rows("c14")] == [("A14", 40)]
@@ -377,6 +381,50 @@ def test_redeem_landing_between_the_balance_read_and_the_debit_makes_the_lot_wai
     assert client.post(URL, headers=auth_headers).json() == {"expired_txns": 1, "points_expired": 40}
     assert env.balance("c15") == 60
     assert [(r["source_earn_txn_id"], r["points"]) for r in env.expire_rows("c15")] == [("A15", 40)]
+
+
+def test_redeem_and_earn_landing_after_the_ledger_read_never_take_the_new_lots_points(
+    client, auth_headers, env, monkeypatch
+):
+    """Due lot A (100), balance 100. After the sweep read the ledger the
+    customer redeems 60 (FIFO: from A, which now holds 40) and earns a fresh
+    lot N (100). The balance is 140 and the valid-lots floor the sweep read
+    is 0, so the floor alone let it take its stale 100 -- 60 of them N's.
+    The account changed after the ledger read, so the debit must refuse; the
+    lot waits and the next sweep sheds A's real 40."""
+    env.seed("c16", _earn("A16", 100, "c16"))
+    real = env.t_repo.ledger_for_expiry
+
+    def ledger_then_redeem_and_earn(customer_id):
+        rows = real(customer_id)
+        _redeem(env, "c16", "R16", 60, T0 + timedelta(days=10))
+        env.txns.insert_one(_earn("N16", 100, "c16", created=T0 + timedelta(days=20),
+                                  expires=datetime(2099, 1, 1)))
+        env.a_repo.adjust_balance("c16", 100, delta_lifetime_earned=100)
+        return rows
+
+    monkeypatch.setattr(env.t_repo, "ledger_for_expiry", ledger_then_redeem_and_earn)
+    first = client.post(URL, headers=auth_headers)
+    monkeypatch.setattr(env.t_repo, "ledger_for_expiry", real)
+
+    assert env.balance("c16") >= 100, "the fresh lot's points were expired"
+    if first.status_code == 503:
+        assert first.json()["detail"]["incomplete_lots"] == ["A16"]
+        assert env.marked("A16") is False and env.expire_rows("c16") == []
+        assert client.post(URL, headers=auth_headers).json() == {
+            "expired_txns": 1, "points_expired": 40}
+    assert env.balance("c16") == 100
+    assert [(r["source_earn_txn_id"], r["points"]) for r in env.expire_rows("c16")] == [("A16", 40)]
+    assert env.marked("A16") is True and env.marked("N16") is False
+
+
+def test_two_due_lots_of_one_customer_both_finish_in_one_healthy_sweep(client, auth_headers, env):
+    """The sweep's own first debit changes the account; that must not make the
+    customer's second due lot wait."""
+    env.seed("c17", _earn("A17", 100, "c17"),
+             _earn("B17", 50, "c17", created=T0 + timedelta(days=1)))
+    assert client.post(URL, headers=auth_headers).json() == {"expired_txns": 2, "points_expired": 150}
+    _assert_reconciled(env, "c17", {"A17": 100, "B17": 50})
 
 
 # ---------------------------------------------------------------------------
