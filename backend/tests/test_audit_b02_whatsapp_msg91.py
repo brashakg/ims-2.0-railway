@@ -773,6 +773,96 @@ def test_without_its_unique_index_a_booking_is_not_applied_and_is_retried(client
     _assert_applied_once(wa, "BOOK", wa_id)
 
 
+# ---------------------------------------------------------------------------
+# Codex round 3 (PR-1416-round3.md, R3-A): with the inbox unique index missing
+# (it is ensured fail-soft), two simultaneous first deliveries of one message
+# each stored a row and each replied. Reproduced here without threads: both
+# requests' "is it stored yet?" lookups answer absent (as both did under
+# Codex's barrier), then both insert. Insert-once must hold on the row's own
+# deterministic _id, which no index failure can remove.
+# ---------------------------------------------------------------------------
+
+_INBOX_UNIQUE = ("uniq_webhook_event_id", "uniq_webhook_body_fingerprint")
+
+
+@contextmanager
+def _inbox_unique_indexes_missing_and_two_blind_lookups(db, vendor):
+    coll_cls = type(db.get_collection("webhook_inbox"))
+    real_create, real_find = coll_cls.create_index, coll_cls.find_one
+    for name in _INBOX_UNIQUE:
+        try:
+            db.webhook_inbox.drop_index(name)
+        except Exception:  # noqa: BLE001 - not built yet on this database
+            pass
+    blind = {"left": 2}
+
+    def no_unique(self, keys, *a, **kw):
+        if self.name == "webhook_inbox" and kw.get("name") in _INBOX_UNIQUE:
+            raise pymongo.errors.OperationFailure("synthetic index unavailable")
+        return real_create(self, keys, *a, **kw)
+
+    def absent_twice(self, q=None, *a, **kw):
+        if (self.name == "webhook_inbox" and isinstance(q, dict) and q.get("vendor") == vendor
+                and ("event_id" in q or "body_fingerprint" in q) and blind["left"] > 0):
+            # the two first lookups (one per request) both ran before any insert
+            if vendor != "whatsapp" and "event_id" in q:
+                return None
+            blind["left"] -= 1
+            return None
+        return real_find(self, q, *a, **kw)
+
+    with patch.object(coll_cls, "create_index", no_unique), \
+            patch.object(coll_cls, "find_one", absent_twice):
+        yield
+    assert not [i for i in db.webhook_inbox.list_indexes() if i["name"] in _INBOX_UNIQUE]
+
+
+def test_without_the_inbox_unique_index_two_first_deliveries_reply_once(client, wa, monkeypatch):
+    monkeypatch.setattr(whatsapp_intents, "auto_reply_allowed", lambda _s: (True, "test"))
+    sent = AsyncMock(return_value=MagicMock(ok=True, status="SIMULATED"))
+    wa_id = "wamid.ZZ-NOINBOXIDX"
+    body = _meta_body("book an eye test", wa_id=wa_id)
+    with patch.object(providers, "send_whatsapp", new=sent), \
+            _inbox_unique_indexes_missing_and_two_blind_lookups(wa, "whatsapp"):
+        first = _post_inbound(client, body)
+        second = _post_inbound(client, body)
+    assert first.status_code == 200 and second.status_code == 200
+    assert first.json()["results"][0]["reply_sent"] is True
+    assert second.json()["results"][0]["duplicate"] is True  # main/round 3: a second BOOK + reply
+    assert sent.await_count == 1
+    _assert_applied_once(wa, "BOOK", wa_id)  # exactly one inbox row
+
+
+def test_without_the_inbox_unique_indexes_the_other_doors_store_and_run_once(client, wa):
+    """The same insert-once rule on the MSG91 channel door (inline handler)
+    and the shared vendor ingest (Razorpay here: one NEXUS dispatch)."""
+    secret = "zz_b02_door_secret"
+    handler = MagicMock(return_value={"events": 0})
+    m_raw = json.dumps({"request_id": "REQ-ZZ-NOIDX", "status": "delivered"}).encode()
+    r_raw = json.dumps({"event": "payment.authorized",
+                        "payload": {"payment": {"entity": {"id": "pay_zz_noidx"}}}}).encode()
+    r_headers = {"content-type": "application/json",
+                 "X-Razorpay-Signature": hmac.new(secret.encode(), r_raw, hashlib.sha256).hexdigest(),
+                 "x-razorpay-event-id": "evt_zz_noidx"}
+    dispatch = AsyncMock(return_value=True)
+    with patch.object(webhooks, "_load_secret", return_value=(secret, True)), \
+            patch.object(webhooks, "_process_msg91_events", new=handler), \
+            patch.object(webhooks, "_dispatch_webhook_received", new=dispatch):
+        with _inbox_unique_indexes_missing_and_two_blind_lookups(wa, "msg91"):
+            m = [client.post(f"{MSG91}/sms", content=m_raw,
+                             headers={"content-type": "application/json", "x-msg91-token": secret})
+                 for _ in range(2)]
+        with _inbox_unique_indexes_missing_and_two_blind_lookups(wa, "razorpay"):
+            r = [client.post("/api/v1/webhooks/razorpay", content=r_raw, headers=r_headers)
+                 for _ in range(2)]
+    assert [x.status_code for x in m + r] == [200] * 4
+    assert m[1].json()["status"] == "duplicate" and r[1].json()["status"] == "duplicate"
+    assert handler.call_count == 1  # main: 2
+    assert dispatch.await_count == 1  # main: 2
+    assert wa.webhook_inbox.count_documents({"vendor": "msg91"}) == 1
+    assert wa.webhook_inbox.count_documents({"vendor": "razorpay"}) == 1
+
+
 
 # ===========================================================================
 # L1-F24 -- the WhatsApp inbox is shop-scoped

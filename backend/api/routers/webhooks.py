@@ -1198,6 +1198,11 @@ async def _ingest(
         "body_fingerprint": fingerprint,
         "signature_verified": True,
     }
+    # R3-A: insert-once on the signed bytes even if the unique indexes could
+    # not be ensured.
+    identity = _identity_id(vendor, fingerprint)
+    if identity:
+        inbox_doc["_id"] = identity
 
     try:
         coll.insert_one(dict(inbox_doc))
@@ -1601,6 +1606,22 @@ def _process_msg91_events(channel: str, payload: Any) -> Dict[str, int]:
     return counts
 
 
+def _identity_id(vendor: str, key: Optional[str]) -> Optional[str]:
+    """The inbox row's `_id`, derived from the delivery's own identity.
+
+    1416 R3-A: the unique (vendor, event_id) / (vendor, body_fingerprint)
+    indexes are ensured fail-soft (_ensure_index logs and carries on), so they
+    can be missing -- and then two simultaneous first deliveries each stored a
+    row and each ran the handler (two WhatsApp replies). The `_id` index can
+    never be missing, so a deterministic `_id` makes "insert once" hold on its
+    own; the named indexes stay as the second net. None (no identity) keeps
+    the driver's random ObjectId.
+    """
+    if not key:
+        return None
+    return "%s:%s" % (vendor, hashlib.sha256(key.encode("utf-8")).hexdigest())
+
+
 def _insert_claimed_row(coll, row: Dict[str, Any]) -> Optional[str]:
     """Store a verified delivery's inbox row ALREADY HELD by this request,
     exactly as a NEXUS drain would hold it (status=processing + claim): a fast
@@ -1614,9 +1635,13 @@ def _insert_claimed_row(coll, row: Dict[str, Any]) -> Optional[str]:
     """
     now = datetime.now(timezone.utc)
     claim = uuid.uuid4().hex
+    identity = _identity_id(
+        row.get("vendor") or "", row.get("event_id") or row.get("body_fingerprint")
+    )
     try:
         coll.insert_one(
             {
+                **({"_id": identity} if identity else {}),
                 "received_at": now,
                 "processed": False,
                 "processed_at": None,
