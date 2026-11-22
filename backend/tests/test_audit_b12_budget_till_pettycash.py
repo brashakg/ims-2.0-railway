@@ -7512,3 +7512,345 @@ def test_r23_on_real_mongo(monkeypatch):
     finally:
         client.drop_database(name)
         client.close()
+
+
+# ===========================================================================
+# Round 24 -- the lead's ruling D135 on head 3bcf37d9.
+# (1) The Z-Read lock takes a register close's note ONLY when that close's own
+#     judged figure was the drawer's count and was beyond the band.
+# (2) One task per count, showing the LOCKED figure: the lock restates the
+#     count's existing task (one write), never a second task.
+# (3) A bank deposit counts only against its own drawer: a close whose till
+#     link failed while ANOTHER drawer opened during its session cannot be
+#     placed, so the next close is not compared (no note, no alert).
+# ===========================================================================
+
+
+def _morning_sale_then_a_late_register(db, at=None):
+    """Rs 500 cash taken at 03:00 BEFORE the register opens at 04:00, Rs 3,000
+    at 05:00. The register's window holds Rs 3,000, the drawer's day Rs 3,500:
+    a close that counts the drawer judges one figure, the till's count
+    another."""
+    at = at or (lambda clock: f"{DATE}T{clock}")
+    sid = _open(db)
+    _cash_sale(db, 500, at("03:00:00"))
+    _cash_sale(db, 3000, at("05:00:00"))
+    return sid
+
+
+def _set_opened(db, sid, clock):
+    db.get_collection("till_sessions").update_one(
+        {"_id": sid}, {"$set": {"opened_at": datetime.fromisoformat(f"{DATE}T{clock}")}})
+
+
+def _failed_close_open_across_b(db, fail_reads, *, at=None, till_db=None):
+    """CR-R24-1 opens on drawer A at 04:00; Rs 1,000 is taken; A is counted
+    Rs 1,000 on the Blind EOD Tally and LOCKED; drawer B opens at 07:00 WHILE
+    CR-R24-1 is still open; Rs 3,000 is taken; B is counted Rs 3,000 on the
+    Blind EOD Tally at 09:00. CR-R24-1 then closes at 10:00, its till read
+    fails, Rs 3,000 on its sheet, Rs 1,000 banked: IMS cannot tell whether
+    that deposit left A's cash or B's."""
+    at = at or (lambda clock: f"{DATE}T{clock}")
+    tdb = till_db if till_db is not None else db
+    a = _open(tdb)
+    _set_opened(tdb, a, "03:30:00")
+    _opened_on(tdb, "CR-R24-1", a, opened="04:00:00", opening=0.0)
+    _cash_sale(tdb, 1000, at("05:00:00"))
+    _count_on_blind_eod(tdb, a, 2, "06:00:00")
+    assert till.lock_session(tdb, a, actor=MANAGER)["ok"]
+    b = till.open_session(tdb, store_id=STORE, session_date=DATE, opening_float_paisa=0,
+                          shift="PM", actor=CASHIER)["session"]["session_id"]
+    _set_opened(tdb, b, "07:00:00")
+    _cash_sale(tdb, 3000, at("08:00:00"))
+    _count_on_blind_eod(tdb, b, 6, "09:00:00")
+    with fail_reads() as m:
+        s1 = _register(db, m, "CR-R24-1", opened="04:00:00", closed="10:00:00", pieces=6,
+                       bank=1000.0, insert=False)
+    assert (s1["till_link_ok"], s1["till_session_id"]) == (False, a)
+    return a, b
+
+
+class _FailDayReads:
+    """In-memory: every read of the shop-day's drawers fails for the close."""
+
+    def __init__(self, db, monkeypatch):
+        self.db, self.mp = db, monkeypatch
+
+    def __call__(self):
+        return self
+
+    def __enter__(self):
+        self.restore = _fail_till_reads(self.db.get_collection("till_sessions"), counted_only=False)
+        return self.mp
+
+    def __exit__(self, *exc):
+        self.restore()
+        return False
+
+
+class TestR24D135TheLockTakesOnlyTheNoteOfItsOwnCount:
+    def test_d135_1_an_optional_note_at_an_in_band_close_does_not_stand_in(self, db, monkeypatch):
+        """The register balances on its window (Rs 3,000) with an optional
+        note; the drawer's count is Rs 500 short on its day. The lock took
+        the optional note as the mandatory explanation and locked silently."""
+        _raised(monkeypatch)
+        sid = _morning_sale_then_a_late_register(db)
+        out = _register(db, monkeypatch, "CR-R24-N1", opened="04:00:00", closed="12:00:00",
+                        pieces=6, note="all fine")
+        assert _judged(out) == _balanced(3000.0)
+        assert (_till(db, sid)["variance_paisa"], _till(db, sid)["blind_count_origin"]) == (
+            -50000, "CR-R24-N1")
+        assert till.lock_session(db, sid, actor=MANAGER)["error"] == "variance_note_required"
+        res = till.lock_session(db, sid, actor=MANAGER, variance_note="Rs 500 of the morning missing")
+        assert res["ok"] and res["session"]["variance_note"] == "Rs 500 of the morning missing"
+
+    def test_d135_1_a_note_for_another_figure_does_not_stand_in(self, db, monkeypatch):
+        """The close judged Rs 500 short on its window and was noted; the
+        drawer's count is Rs 1,000 short. That note explained another figure."""
+        _raised(monkeypatch)
+        sid = _morning_sale_then_a_late_register(db)
+        with pytest.raises(HTTPException) as exc:
+            _register(db, monkeypatch, "CR-R24-N2", opened="04:00:00", closed="12:00:00", pieces=5)
+        assert _refused_for_the_note(exc)
+        out = _register(db, monkeypatch, "CR-R24-N2", opened="04:00:00", closed="12:00:00",
+                        pieces=5, note="Rs 500 short", insert=False)
+        assert out["variance"] == -500.0
+        assert _till(db, sid)["variance_paisa"] == -100000
+        assert till.lock_session(db, sid, actor=MANAGER)["error"] == "variance_note_required"
+
+    def test_control_the_note_of_the_close_whose_figure_is_the_count_is_taken(self, db, monkeypatch):
+        """One window, one figure (the close's judged -Rs 500 IS the count):
+        the lock takes the close's note (D128(1), DECISION 19 as narrowed)."""
+        _raised(monkeypatch)
+        sid = _open(db)
+        _cash_sale(db, 3000)
+        with pytest.raises(HTTPException):
+            _register(db, monkeypatch, "CR-R24-N3", opened="04:00:00", closed="12:00:00", pieces=5)
+        out = _register(db, monkeypatch, "CR-R24-N3", opened="04:00:00", closed="12:00:00", pieces=5,
+                        note="Rs 500 given as change", insert=False)
+        assert out["count_note_for"] == {"till_session_id": sid, "variance_paisa": -50000}
+        res = till.lock_session(db, sid, actor=MANAGER)
+        assert res["ok"] and res["session"]["variance_note"] == "Rs 500 given as change"
+
+
+class TestR24D135OneTaskPerCountShowsTheLockedFigure:
+    def _repo(self, monkeypatch):
+        import api.dependencies as deps
+
+        repo = TestR11OneOwedTaskIsStoredOnce._Repo()
+        monkeypatch.setattr(deps, "get_task_repository", lambda: repo)
+        monkeypatch.setattr("api.services.task_triggers._person_holding", lambda role, store_id: "u-mgr")
+        return repo
+
+    def _noted_register_close(self, db, monkeypatch):
+        """The register close's own figure is Rs 500 short (noted); it made
+        the drawer's count, whose figure is Rs 1,000 short."""
+        sid = _morning_sale_then_a_late_register(db)
+        with pytest.raises(HTTPException):
+            _register(db, monkeypatch, "CR-R24-T", opened="04:00:00", closed="12:00:00", pieces=5)
+        _register(db, monkeypatch, "CR-R24-T", opened="04:00:00", closed="12:00:00", pieces=5,
+                  note="Rs 500 short", insert=False)
+        return sid
+
+    def test_d135_2_the_lock_restates_the_counts_task(self, db, monkeypatch):
+        """The register close raised the count's task on ITS figure (Rs 500
+        short); the lock locks Rs 1,000 short under the same id. The task
+        kept showing Rs 500."""
+        repo = self._repo(monkeypatch)
+        sid = self._noted_register_close(db, monkeypatch)
+        assert [(t["_id"], t["payload"]["variance_paisa"]) for t in repo.collection.docs] == [
+            (till.count_task_id(sid), -50000)]
+        assert till.lock_session(db, sid, actor=MANAGER, variance_note="Rs 1,000 short in all")["ok"]
+        (task,) = repo.collection.docs
+        assert (task["_id"], task["payload"]["variance_paisa"]) == (till.count_task_id(sid), -100000)
+        assert "SHORT by Rs 1000.00" in task["title"] and "Rs 1,000 short in all" in task["description"]
+        # The same follow-up raised again (a retry) rewrites nothing, adds nothing.
+        before = dict(task)
+        assert till.raise_variance_task(
+            store_id=STORE, session_date=DATE, variance_paisa=-100000, tolerance_paisa=10000,
+            source="blind EOD Z-Read lock", session_id=sid, task_id=till.count_task_id(sid),
+            restate=True)
+        assert repo.collection.docs == [before]
+
+    def test_d135_2_a_completed_task_is_restated_not_doubled(self, db, monkeypatch):
+        repo = self._repo(monkeypatch)
+        sid = self._noted_register_close(db, monkeypatch)
+        repo.collection.docs[0]["status"] = "COMPLETED"
+        assert till.lock_session(db, sid, actor=MANAGER, variance_note="Rs 1,000 short in all")["ok"]
+        (task,) = repo.collection.docs
+        assert (task["status"], task["payload"]["variance_paisa"]) == ("COMPLETED", -100000)
+
+    def test_control_the_same_figure_is_not_rewritten(self, db, monkeypatch):
+        repo = self._repo(monkeypatch)
+        sid = _open(db)
+        _cash_sale(db, 3000)
+        with pytest.raises(HTTPException):
+            _register(db, monkeypatch, "CR-R24-T", opened="04:00:00", closed="12:00:00", pieces=5)
+        _register(db, monkeypatch, "CR-R24-T", opened="04:00:00", closed="12:00:00", pieces=5,
+                  note="Rs 500 short", insert=False)
+        first = dict(repo.collection.docs[0])
+        assert till.lock_session(db, sid, actor=MANAGER)["ok"]
+        assert repo.collection.docs == [first]
+
+
+class TestR24D135ADepositCountsOnlyAgainstItsOwnDrawer:
+    def test_d135_3_a_failed_close_open_across_a_new_drawer_leaves_the_next_uncompared(
+        self, db, monkeypatch
+    ):
+        """CR-R24-3 opens on B (counted Rs 3,000), takes Rs 500 and counts
+        Rs 2,500. It read Rs 1,000 SHORT (400, a note, an alert) because the
+        failed close's Rs 1,000 deposit, which may have left B, was not
+        known on B: a shortage IMS cannot prove."""
+        alerts = _alerts(monkeypatch)
+        a, b = _failed_close_open_across_b(db, _FailDayReads(db, monkeypatch))
+        assert _till(db, b)["variance_paisa"] == 0
+        _opened_on(db, "CR-R24-3", b, opened="10:30:00", opening=2000.0)
+        _cash_sale(db, 500, f"{DATE}T11:00:00")
+        out = _register(db, monkeypatch, "CR-R24-3", opened="10:30:00", closed="12:00:00", pieces=5,
+                        insert=False)
+        assert (out["variance"], out["variance_status"], out["comparison_withheld_reason"]) == (
+            None, "COMPARISON_UNAVAILABLE", till.EARLIER_CLOSE_DRAWER_UNKNOWN)
+        assert alerts == []
+        # Its deposit is not taken off A either (it may have left B).
+        counts = till.drawer_counts(db, _till(db, a))
+        assert ([c["session_id"] for c in counts["unknown"]], counts["banked"]) == (["CR-R24-1"], [])
+
+    def test_d135_3_the_close_after_the_uncompared_one_is_compared_again(self, db, monkeypatch):
+        alerts = _alerts(monkeypatch)
+        _a, b = _failed_close_open_across_b(db, _FailDayReads(db, monkeypatch))
+        _opened_on(db, "CR-R24-3", b, opened="10:30:00", opening=2000.0)
+        _cash_sale(db, 500, f"{DATE}T11:00:00")
+        _register(db, monkeypatch, "CR-R24-3", opened="10:30:00", closed="12:00:00", pieces=5,
+                  insert=False)
+        _opened_on(db, "CR-R24-4", b, opened="12:10:00", opening=2500.0)
+        _cash_sale(db, 500, f"{DATE}T12:30:00")
+        with pytest.raises(HTTPException) as exc:
+            _register(db, monkeypatch, "CR-R24-4", opened="12:10:00", closed="13:00:00", pieces=5,
+                      insert=False)
+        assert _refused_for_the_note(exc)
+        assert alerts == []
+
+    def test_control_grey5_a_failed_close_over_before_a_locks_is_never_carried_to_b(
+        self, db, monkeypatch
+    ):
+        """GREY-5 as the builder left it: the failed close on A is over
+        before A is counted and locked; B opens later. Its deposit is taken
+        off A's count only; B's count and the session after it balance."""
+        alerts = _alerts(monkeypatch)
+        a = _open(db)
+        _set_opened(db, a, "03:30:00")
+        _opened_on(db, "CR-R24-G", a, opened="04:00:00", opening=0.0)
+        _cash_sale(db, 1000, f"{DATE}T05:00:00")
+        _close_that_cannot_read_the_till(db, monkeypatch, "CR-R24-G", opened="04:00:00",
+                                         closed="05:30:00", pieces=1, bank=500.0, insert=False)
+        _count_on_blind_eod(db, a, 1, "06:00:00")
+        assert (_till(db, a)["variance_paisa"], _till(db, a)["bank_deposit_paisa"]) == (0, 50000)
+        assert till.lock_session(db, a, actor=MANAGER)["ok"]
+        b = till.open_session(db, store_id=STORE, session_date=DATE, opening_float_paisa=0,
+                              shift="PM", actor=CASHIER)["session"]["session_id"]
+        _set_opened(db, b, "07:00:00")
+        _cash_sale(db, 3000, f"{DATE}T08:00:00")
+        _count_on_blind_eod(db, b, 6, "09:00:00")
+        assert (_till(db, b)["variance_paisa"], _till(db, b)["bank_deposit_paisa"]) == (0, 0)
+        _opened_on(db, "CR-R24-G2", b, opened="10:30:00", opening=3000.0)
+        _cash_sale(db, 500, f"{DATE}T11:00:00")
+        out = _register(db, monkeypatch, "CR-R24-G2", opened="10:30:00", closed="12:00:00", pieces=7,
+                        insert=False)
+        assert _judged(out) == _balanced(3500.0) and alerts == []
+
+
+def test_r24_d135_on_real_mongo(monkeypatch):
+    """Native PyMongo with the real till indexes, the real close handler and
+    the real TaskRepository: D135(1), (2) and (3) as above."""
+    client, real_db, name = _real_till_db()
+    try:
+        till.ensure_till_indexes(real_db)
+        tasks = _real_task_repo(monkeypatch, real_db)
+        ndb = _NativeDB(real_db)
+
+        def _at(clock):
+            return datetime.fromisoformat(f"{DATE}T{clock}")
+
+        def _reset():
+            for coll in ("till_sessions", "cash_register_sessions", "orders", "tasks"):
+                real_db[coll].delete_many({})
+
+        def _variance_tasks():
+            return sorted((t["_id"], t["payload"]["variance_paisa"], t["status"]) for t in tasks.find({})
+                          if t["source_ref"].startswith("till_variance:"))
+
+        # (1) an optional note at an in-band close does not stand in.
+        _reset()
+        sid = _morning_sale_then_a_late_register(real_db, at=_at)
+        out = _register(ndb, monkeypatch, "CR-R24-N1", opened="04:00:00", closed="12:00:00",
+                        pieces=6, note="all fine")
+        assert _judged(out) == _balanced(3000.0)
+        assert real_db.till_sessions.find_one({"_id": sid})["variance_paisa"] == -50000
+        assert till.lock_session(real_db, sid, actor=MANAGER)["error"] == "variance_note_required"
+        assert till.lock_session(real_db, sid, actor=MANAGER, variance_note="morning Rs 500")["ok"]
+        assert _variance_tasks() == [(till.count_task_id(sid), -50000, "OPEN")]
+
+        # (1)+(2) a note for another figure; the lock restates the one task,
+        # also after the manager completed it.
+        _reset()
+        sid = _morning_sale_then_a_late_register(real_db, at=_at)
+        with pytest.raises(HTTPException):
+            _register(ndb, monkeypatch, "CR-R24-T", opened="04:00:00", closed="12:00:00", pieces=5)
+        _register(ndb, monkeypatch, "CR-R24-T", opened="04:00:00", closed="12:00:00", pieces=5,
+                  note="Rs 500 short", insert=False)
+        assert _variance_tasks() == [(till.count_task_id(sid), -50000, "OPEN")]
+        real_db.tasks.update_one({"_id": till.count_task_id(sid)}, {"$set": {"status": "COMPLETED"}})
+        assert till.lock_session(real_db, sid, actor=MANAGER)["error"] == "variance_note_required"
+        assert till.lock_session(real_db, sid, actor=MANAGER, variance_note="Rs 1,000 in all")["ok"]
+        assert _variance_tasks() == [(till.count_task_id(sid), -100000, "COMPLETED")]
+        task = real_db.tasks.find_one({"_id": till.count_task_id(sid)})
+        assert "SHORT by Rs 1000.00" in task["title"] and "Rs 1,000 in all" in task["description"]
+        assert real_db.till_sessions.find_one({"_id": sid})["manager_followup"]["pending"] is False
+        till.settle_drawers(ndb, [sid])
+        assert real_db.tasks.count_documents({}) == 1
+
+        # (3) a failed close open across B's opening: the next close on B is
+        # not compared; no note, no alert.
+        _reset()
+
+        class _Native:
+            def __call__(self):
+                return self
+
+            def __enter__(self):
+                self.ctx = monkeypatch.context()
+                m = self.ctx.__enter__()
+                _native_fail_day_reads(m, name)
+                return m
+
+            def __exit__(self, *exc):
+                return self.ctx.__exit__(*exc)
+
+        _a, b = _failed_close_open_across_b(ndb, _Native(), at=_at, till_db=real_db)
+        _opened_on(real_db, "CR-R24-3", b, opened="10:30:00", opening=2000.0)
+        _cash_sale(real_db, 500, _at("11:00:00"))
+        out = _register(ndb, monkeypatch, "CR-R24-3", opened="10:30:00", closed="12:00:00", pieces=5,
+                        insert=False)
+        assert (out["variance"], out["comparison_withheld_reason"]) == (
+            None, till.EARLIER_CLOSE_DRAWER_UNKNOWN)
+        assert _variance_tasks() == []
+        stored = real_db.cash_register_sessions.find_one({"session_id": "CR-R24-3"})
+        assert (stored["variance"], stored["variance_status"]) == (None, "COMPARISON_UNAVAILABLE")
+    finally:
+        client.drop_database(name)
+        client.close()
+
+
+def test_d135_3_the_day_drawers_unreadable_is_refused_never_read_as_none(db, monkeypatch):
+    """Placing a failed close needs the shop-day's other drawers: unreadable
+    raises (the callers answer 503, the close or count stays OPEN), never
+    'no other drawer' (which would carry its deposit to A)."""
+    _alerts(monkeypatch)
+    a, _b = _failed_close_open_across_b(db, _FailDayReads(db, monkeypatch))
+    drawer = _till(db, a)
+    restore = _fail_till_reads(db.get_collection("till_sessions"), counted_only=False)
+    try:
+        with pytest.raises(AutoReconnect):
+            till.drawer_counts(db, drawer)
+    finally:
+        restore()

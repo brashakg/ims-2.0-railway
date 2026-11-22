@@ -738,6 +738,16 @@ async def close_cash_register(
     # and id, so an alert for the earlier count does not swallow it.
     drawer_id = till_link.get("session_id")
     judged_the_drawers_count = standing is None and not resheeted and bool(drawer_id)
+    # D135(1): the note this close took explains the drawer's count -- and
+    # the Z-Read lock may take it -- ONLY when the figure judged here was that
+    # count and was beyond the band. Stored with the figure, so the lock can
+    # see the count it locks is the one this note explained. An optional note
+    # typed at an in-band close, or a note for another figure, never stands in.
+    update["count_note_for"] = (
+        {"till_session_id": drawer_id, "variance_paisa": judged_variance_paisa}
+        if judged_the_drawers_count and variance_out_of_band and close_note
+        else None
+    )
     own_alert_key = drawer_id if judged_the_drawers_count else (
         body.session_id if standing is not None or resheeted else drawer_id
     )

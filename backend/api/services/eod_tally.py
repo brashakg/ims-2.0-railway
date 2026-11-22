@@ -228,6 +228,7 @@ def raise_variance_task(
     source: str = "day-end close",
     session_id: Optional[str] = None,
     task_id: Optional[str] = None,
+    restate: bool = False,
 ) -> bool:
     """A SYSTEM task on the store manager's worklist for an out-of-band
     day-end cash variance (owner ruling 2026-08-25: manager alert above the
@@ -244,7 +245,13 @@ def raise_variance_task(
     Returns True when the task is KNOWN to be on the worklist (or there is
     nothing to raise); False when it could not be stored, so a caller that
     owes it (``settle_followup``) keeps owing it. ``task_id`` is the fixed id
-    of that one owed task, so raising it twice stores it once."""
+    of that one owed task, so raising it twice stores it once.
+
+    ``restate`` (the Z-Read lock, D135(2)): the count's task keeps its one
+    id, and when it already exists showing ANOTHER figure (raised earlier by
+    a Cash Register close on its own window's figure), its figure and text
+    are rewritten to the locked figure in ONE write -- never a second task,
+    never a stale figure. Its status is left as the manager set it."""
     try:
         v = int(variance_paisa or 0)
     except (TypeError, ValueError):
@@ -266,41 +273,66 @@ def raise_variance_task(
             if session_id
             else f"till_variance:{store_id}:{day}"
         )
+        title = f"Cash drawer {direction} by Rs {rupees:.2f} at {store_id} ({day})"
+        description = (
+            f"The {day} day-end cash count at store {store_id} is "
+            f"{direction} by Rs {rupees:.2f} - beyond the allowed band of "
+            f"Rs {band_rupees:.2f}. Recorded at the {source}. "
+            + (f"Drawer {session_id}. " if session_id else "")
+            + (
+                f"Explanation given: {str(note).strip()}"
+                if str(note or "").strip()
+                else "No explanation was recorded."
+            )
+        )
+        payload = {
+            "store_id": store_id,
+            "session_date": day,
+            "session_id": session_id,
+            "variance_paisa": v,
+            "tolerance_paisa": int(tolerance_paisa or 0),
+        }
         created = create_system_task(
             repo,
             task_id=task_id,
-            title=(
-                f"Cash drawer {direction} by Rs {rupees:.2f} at "
-                f"{store_id} ({day})"
-            ),
-            description=(
-                f"The {day} day-end cash count at store {store_id} is "
-                f"{direction} by Rs {rupees:.2f} - beyond the allowed band of "
-                f"Rs {band_rupees:.2f}. Recorded at the {source}. "
-                + (f"Drawer {session_id}. " if session_id else "")
-                + (
-                    f"Explanation given: {str(note).strip()}"
-                    if str(note or "").strip()
-                    else "No explanation was recorded."
-                )
-            ),
+            title=title,
+            description=description,
             priority="P2",
             category="Finance",
             store_id=store_id,
             assigned_to="STORE_MANAGER",
             dedupe_ref=dedupe_ref,
-            extra={
-                "link": "/finance/cash-register",
-                "payload": {
-                    "store_id": store_id,
-                    "session_date": day,
-                    "session_id": session_id,
-                    "variance_paisa": v,
-                    "tolerance_paisa": int(tolerance_paisa or 0),
-                },
-            },
+            extra={"link": "/finance/cash-register", "payload": payload},
         )
-        return task_on_worklist(repo, created, dedupe_ref, task_id)
+        on_list = task_on_worklist(repo, created, dedupe_ref, task_id)
+        if on_list and restate and task_id and not created:
+            # D135(2): the one task of this count shows the locked figure.
+            # Guarded on the figure, so a retry rewrites nothing. A failed
+            # write answers False below: the lock keeps owing it.
+            coll = getattr(repo, "collection", None)
+            if coll is not None:
+                now = datetime.now()
+                coll.update_one(
+                    {"task_id": task_id, "payload.variance_paisa": {"$ne": v}},
+                    {
+                        "$set": {
+                            "title": title,
+                            "description": description,
+                            "payload": payload,
+                            "updated_at": now,
+                        },
+                        "$push": {
+                            "history": {
+                                "action": "figure_restated",
+                                "to": v,
+                                "by": "system",
+                                "at": now,
+                                "notes": f"Figure restated at the {source}",
+                            }
+                        },
+                    },
+                )
+        return on_list
     except Exception:  # noqa: BLE001
         return False
 
@@ -826,7 +858,9 @@ def count_task_id(drawer_id: Any) -> str:
     return followup_task_id("variance", "count", drawer_id)
 
 
-def close_as_count(close: Dict[str, Any], drawer: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+def close_as_count(
+    close: Dict[str, Any], drawer: Optional[Dict[str, Any]], spans_another: bool = False
+) -> Optional[Dict[str, Any]]:
     """D127: one CLOSED Cash Register close read as a LATER count of the till
     drawer ``drawer`` (closed after the drawer's own count), or None when it
     is not one: the close that made the drawer's count, a close before that
@@ -845,7 +879,12 @@ def close_as_count(close: Dict[str, Any], drawer: Optional[Dict[str, Any]]) -> O
     * ``UNKNOWN``: IMS cannot tell which drawer its cash or deposit was on --
       no drawer at all, or a several-drawer close (D53) that was open while
       this drawer was counted and began before it opened. D127(2): the next
-      close is then not compared; never a shortage IMS cannot prove."""
+      close is then not compared; never a shortage IMS cannot prove.
+      ``spans_another`` (D135(3)): a close whose till link FAILED and whose
+      session was open while ANOTHER drawer of the shop-day opened (see
+      ``drawer_counts``): its cash and deposit may be on either drawer, so it
+      is UNKNOWN, never BANKED -- a deposit counts only against its own
+      drawer, and IMS cannot tell which one that was."""
     d = drawer or {}
     at = _instant(close.get("closed_at"))
     if at is None or d.get("blind_count_paisa") is None:
@@ -891,10 +930,20 @@ def close_as_count(close: Dict[str, Any], drawer: Optional[Dict[str, Any]]) -> O
             }
         return {**entry, "kind": LATER_BANKED}
     if close.get("till_link_ok") is False:
-        return {**entry, "kind": LATER_BANKED}
+        return {**entry, "kind": LATER_UNKNOWN if spans_another else LATER_BANKED}
     if status == "SEVERAL_DRAWERS":
         return {**entry, "kind": LATER_UNKNOWN}
     return None
+
+
+def _open_across(close: Dict[str, Any], drawer: Dict[str, Any]) -> bool:
+    """The register session ``close`` was open when ``drawer`` opened (both
+    instants naive UTC). A drawer or session with no instant cannot be
+    placed and is not this case."""
+    began = _instant(close.get("opened_at"))
+    ended = _instant(close.get("closed_at"))
+    opened = _instant(drawer.get("opened_at"))
+    return bool(began and ended and opened and began < opened < ended)
 
 
 def drawer_counts(db, drawer: Dict[str, Any], own: Optional[str] = None) -> Dict[str, Any]:
@@ -911,19 +960,53 @@ def drawer_counts(db, drawer: Dict[str, Any], own: Optional[str] = None) -> Dict
 
     coll = db.get_collection(_REGISTER_SESSIONS)
     did = drawer.get("session_id") or drawer.get("_id")
+    day = drawer.get("session_date")
+
+    def _on_day(c: Dict[str, Any]) -> bool:
+        return ist_date_str(_instant(c.get("closed_at"))) == day
+
     closes = list(coll.find({"till_session_id": did, "status": "CLOSED"}))
     closes += [
         c
         for c in coll.find(
             {"store_id": drawer.get("store_id"), "status": "CLOSED", "till_session_id": None}
         )
-        if ist_date_str(_instant(c.get("closed_at"))) == drawer.get("session_date")
+        if _on_day(c)
     ]
+    # D135(3): a close whose till link FAILED keeps the drawer it opened on
+    # (D127(2)). When ANOTHER drawer of the shop-day opened while it was open,
+    # its cash and its bank deposit may be on either one: it is UNKNOWN for
+    # both -- for its own drawer (its deposit is not taken off it) and for
+    # the drawer that opened inside it (found here, though it names the
+    # other). The next close on either is not compared.
+    failed = [
+        c
+        for c in coll.find(
+            {"store_id": drawer.get("store_id"), "status": "CLOSED", "till_link_ok": False}
+        )
+        if _on_day(c) and c.get("till_session_id") is not None
+    ]
+    spanning = {c.get("session_id") for c in failed if c.get("till_session_id") != did and _open_across(c, drawer)}
+    closes += [c for c in failed if c.get("session_id") in spanning]
+    if any(c.get("till_session_id") == did for c in failed):
+        tills = _sessions_coll(db)
+        if tills is None:
+            raise RuntimeError("till sessions unavailable")
+        others = [
+            s
+            for s in tills.find({"store_id": drawer.get("store_id"), "session_date": day})
+            if (s.get("_id") or s.get("session_id")) != did
+        ]
+        spanning |= {
+            c.get("session_id")
+            for c in failed
+            if c.get("till_session_id") == did and any(_open_across(c, o) for o in others)
+        }
     out: Dict[str, Any] = {"sheets": [], "banked": [], "unknown": [], "count_noted": False}
     for c in closes:
         if c.get("session_id") == own:
             continue
-        later = close_as_count(c, drawer)
+        later = close_as_count(c, drawer, spans_another=c.get("session_id") in spanning)
         if later is None:
             continue
         out["count_noted"] = out["count_noted"] or c.get("till_count_variance") is not None
@@ -2139,10 +2222,19 @@ def count_awaiting_its_note(
 # ---------------------------------------------------------------------------
 
 
-def _register_close_note(db, origin: Any) -> str:
-    """The note stored by the CLOSED Cash Register session ``origin`` that
-    made a drawer's count, or "" (not a register's count, no note, or the
-    read failed)."""
+def _register_close_note(db, drawer: Dict[str, Any]) -> str:
+    """The note stored by the CLOSED Cash Register session that made the
+    drawer's count, or "" -- the lock then asks its own (owner 2026-08-25:
+    an explanation is mandatory above the band).
+
+    D135(1): only when that close's own judged figure WAS this count and was
+    itself beyond the band (the close stored ``count_note_for`` naming this
+    drawer and this very variance): the note was the required explanation of
+    the count being locked. An optional note typed at an in-band close, a
+    note for a different figure (the register's window was not the drawer's
+    day), a close stored by the previous version, a count by another door or
+    an unreadable close: "" (asked at the lock)."""
+    origin = drawer.get("blind_count_origin")
     if origin in (None, COUNT_ORIGIN_TILL, COUNT_ORIGIN_DAY_END):
         return ""
     try:
@@ -2151,6 +2243,13 @@ def _register_close_note(db, origin: Any) -> str:
         )
     except Exception:  # noqa: BLE001
         logger.exception("Register close unreadable before locking (count by %s)", origin)
+        return ""
+    explained = (close or {}).get("count_note_for") or {}
+    if (
+        explained.get("till_session_id") != (drawer.get("_id") or drawer.get("session_id"))
+        or explained.get("variance_paisa") is None
+        or explained.get("variance_paisa") != drawer.get("variance_paisa")
+    ):
         return ""
     return str((close or {}).get("closing_note") or "").strip()
 
@@ -2210,11 +2309,10 @@ def lock_session(
     out_of_band = needs_variance_note(variance_paisa, tolerance_paisa)
     if out_of_band and not clean_note:
         # D128(1): a count's difference is explained ONCE, by the door that
-        # owns the count. A count MADE by a Cash Register close beyond the
-        # band was noted (and alerted, under this count's id) at that close;
-        # its note is the lock's, never asked a second time. Unreadable, or
-        # a close that took no note, asks it here as before.
-        clean_note = _register_close_note(db, session.get("blind_count_origin"))
+        # owns the count. A count MADE by a Cash Register close whose own
+        # judged figure was this count, beyond the band, was noted at that
+        # close; its note is the lock's (D135(1)). Anything else asks here.
+        clean_note = _register_close_note(db, session)
     if out_of_band and not clean_note:
         return {
             "ok": False,
@@ -2287,6 +2385,9 @@ def lock_session(
                             "source": "blind EOD Z-Read lock",
                             "session_id": session_id,
                             "task_id": count_task_id(session_id),
+                            # D135(2): one task per count, showing the
+                            # figure this lock locks.
+                            "restate": True,
                         }
                         if out_of_band
                         else None,
