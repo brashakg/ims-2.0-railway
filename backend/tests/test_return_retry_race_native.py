@@ -340,7 +340,10 @@ def test_a_shopify_retry_stopped_mid_loop_keeps_the_booking_of_the_unit_it_lande
             f"{RID}|back|{PID}|0", f"{RID}|back|{PID}|1"]
     else:
         assert native.stock_units.count_documents({"status": "AVAILABLE"}) == 1
-        assert float(line["restocked_refunds"]["RF-1"]) == 1, "the landed piece was un-booked"
+        # The booking names both slots: it stays whole (slot 0 held -> landed,
+        # slot 1 free -> the next run places it there), never taken back by
+        # a per-product count (review of 22f53ec0).
+        assert float(line["restocked_refunds"]["RF-1"]) == 2, "the booking was taken back"
         assert doc["restock_applied"] is False and doc["restock_in_progress"] is False
         again = R._retry_restock(RID, USER, STORE)
         assert again["restock_applied"] is True
@@ -553,7 +556,13 @@ def test_a_taker_that_saves_between_the_stale_retrys_two_reopen_writes_still_reo
     its reopen runs its FIRST write while B is still running; B then saves
     'applied' on the booking and checks for a release; only then does A run
     its SECOND write. Whatever the order, the record must reopen: U1 is SOLD
-    and no longer booked, so the Retry stock step must stay (D7)."""
+    and no longer booked, so the Retry stock step must stay (D7).
+
+    Since the review of 22f53ec0 a booking that names its slots is never
+    taken back once a unit write was tried, so A never un-books and never
+    runs that reopen at all: B waits for A to finish instead, A writes
+    nothing to the record outside its own claim, and the end state is the
+    same -- the piece back once, booked once, the record applied."""
     import threading
 
     a_between, b_done = threading.Event(), threading.Event()
@@ -561,11 +570,11 @@ def test_a_taker_that_saves_between_the_stale_retrys_two_reopen_writes_still_reo
     monkeypatch.setattr(R, "_returns_coll", lambda: _PausingReturns(real_coll(), a_between, b_done))
     box = {}
     thread_a, run_b, go = _late_booking(
-        native, monkeypatch,
-        lambda: (box["go"].set(), a_between.wait(30) or pytest.fail("A never reached its reopen")))
-    box["go"] = go
+        native, monkeypatch, lambda: (box["go"].set(), box["a"].join(30)))
+    box["go"], box["a"] = go, thread_a
     try:
-        run_b()  # B: its save lands between A's two writes
+        run_b()  # B: saves after A has finished
+        assert not a_between.is_set(), "A took its slot-named booking back and reopened the record"
     finally:
         b_done.set()
         thread_a.join(30)
