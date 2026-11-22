@@ -7,14 +7,15 @@
 // accountant clears the queue. Per row: e-way flag, an overdue/age reminder, a
 // free-text attention note, and a "Mark done in Tally" action.
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import {
   Loader2, ClipboardList, CheckCircle2, AlertTriangle, Clock, StickyNote,
 } from 'lucide-react';
-import { financeApi, type B2BInvoice, type B2BInvoiceSummary } from '../../services/api/finance';
+import { financeApi, type B2BInvoice } from '../../services/api/finance';
 import { useToast } from '../../context/ToastContext';
 import {
   inr, currentMonthRange, TALLY_STATUS_STYLE, TALLY_STATUS_LABEL,
+  B2B_LOAD_FAILED, useB2BInvoiceList,
 } from './b2bTallyShared';
 
 type ViewFilter = 'PENDING' | 'ALL';
@@ -25,37 +26,19 @@ export default function B2BTallyWorklist() {
   const [fromDate, setFromDate] = useState(def.from);
   const [toDate, setToDate] = useState(def.to);
   const [view, setView] = useState<ViewFilter>('PENDING'); // default = reminder backlog
-  const [invoices, setInvoices] = useState<B2BInvoice[]>([]);
-  const [summary, setSummary] = useState<B2BInvoiceSummary | null>(null);
-  const [reminderDays, setReminderDays] = useState(3);
-  const [loading, setLoading] = useState(false);
+  const { invoices: listed, summary, reminderDays, loading, failed, load } = useB2BInvoiceList({
+    from_date: fromDate || undefined,
+    to_date: toDate || undefined,
+    tally_status: view === 'PENDING' ? 'PENDING' : undefined,
+  });
+  // Oldest-first so the backlog is cleared from the top (PENDING reminder).
+  const invoices = useMemo(
+    () => [...listed].sort((a, b) => (b.age_days ?? 0) - (a.age_days ?? 0)),
+    [listed],
+  );
   const [rowBusy, setRowBusy] = useState<string | null>(null);
   const [noteDraft, setNoteDraft] = useState<Record<string, string>>({});
   const [editingNote, setEditingNote] = useState<string | null>(null);
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const r = await financeApi.listB2BInvoices({
-        from_date: fromDate || undefined,
-        to_date: toDate || undefined,
-        tally_status: view === 'PENDING' ? 'PENDING' : undefined,
-      });
-      // Oldest-first so the backlog is cleared from the top (PENDING reminder).
-      const rows = [...r.invoices].sort((a, b) => (b.age_days ?? 0) - (a.age_days ?? 0));
-      setInvoices(rows);
-      setSummary(r.summary);
-      setReminderDays(r.pending_reminder_days);
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Failed to load worklist');
-    } finally {
-      setLoading(false);
-    }
-  }, [fromDate, toDate, view, toast]);
-
-  useEffect(() => {
-    load();
-  }, [load]);
 
   const markDone = async (inv: B2BInvoice) => {
     setRowBusy(inv.order_id);
@@ -151,6 +134,11 @@ export default function B2BTallyWorklist() {
             {loading ? (
               <tr><td colSpan={9} className="px-4 py-6 text-center text-gray-400">
                 <Loader2 className="w-4 h-4 animate-spin inline mr-1" /> Loading...
+              </td></tr>
+            ) : failed ? (
+              <tr><td colSpan={9} role="alert" className="px-4 py-6 text-center text-red-700">
+                {B2B_LOAD_FAILED}.{' '}
+                <button type="button" onClick={load} className="font-medium underline">Retry</button>
               </td></tr>
             ) : invoices.length === 0 ? (
               <tr><td colSpan={9} className="px-4 py-6 text-center text-gray-400">

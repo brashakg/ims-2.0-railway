@@ -11,6 +11,7 @@ from ...utils.ist import ist_date_str, ist_today
 from typing import Optional, List, Dict, NamedTuple
 from pydantic import BaseModel, Field
 from ...services.salary_visibility import is_payroll_shaped_expense
+from ...utils.expense_status import is_committed_expense
 from ...services import cash_denominations as cash_denom
 from ._shared import logger
 
@@ -192,7 +193,9 @@ def _naive_utc_iso_bound(v) -> Optional[str]:
     return dt.isoformat()
 
 
-def _cash_sales_for_window(db, store_id: str, start_iso: str, end_iso: Optional[str]):
+def _cash_sales_for_window(
+    db, store_id: str, start_iso: str, end_iso: Optional[str], *, strict: bool = False
+):
     """Net POS CASH collected for a store between start and end (ISO strings).
 
     Sums order.payments[] where method == 'CASH' (the canonical tender field;
@@ -218,7 +221,10 @@ def _cash_sales_for_window(db, store_id: str, start_iso: str, end_iso: Optional[
     refund was cut from CASH -> negative drawer). A return that carries NO
     refund_tenders is UNKNOWN to the drawer and netted NOWHERE (staff keep the
     manual "cash paid out" workaround; the drawer never sees a fabricated number).
-    Returns (cash_sales, cash_refunds) as positive magnitudes."""
+    Returns (cash_sales, cash_refunds) as positive magnitudes.
+
+    ``strict=True`` (a close that STORES a variance) raises when the orders or
+    returns read fails, instead of answering zero sales / zero refunds."""
     if db is None:
         return 0.0, 0.0
     # BUG-031: orders.created_at is a BSON Date, so an ISO-STRING $gte/$lte never
@@ -254,6 +260,8 @@ def _cash_sales_for_window(db, store_id: str, start_iso: str, end_iso: Optional[
                 else:
                     cash_refunds += -amt
     except Exception:
+        if strict:
+            raise
         return 0.0, 0.0
 
     # Returns-collection netting (see docstring). created_at on returns docs is
@@ -337,6 +345,8 @@ def _cash_sales_for_window(db, store_id: str, start_iso: str, end_iso: Optional[
         cash_refunds += add_cash_refunds
         cash_sales += add_cash_sales
     except Exception:
+        if strict:
+            raise
         logger.warning(
             "[CASH-DRAWER] returns netting skipped (fail-soft)", exc_info=True
         )
@@ -420,15 +430,18 @@ class _CashExpenseWindow(NamedTuple):
 
 
 def _cash_expenses_for_window(
-    db, store_id: str, start_iso: str, end_iso: Optional[str]
+    db, store_id: str, start_iso: str, end_iso: Optional[str], *, strict: bool = False
 ) -> _CashExpenseWindow:
     """Cash payouts from the drawer for a store in the window.
 
     Expenses use `expense_date` (ISO date) and `payment_mode`. Only CASH-mode
     expenses come out of the physical drawer; UPI/CARD/BANK don't. Counts
-    APPROVED / PAID / SENT_TO_ACCOUNTANT spends (anything that represents money
-    actually disbursed). Payroll-shaped heads are excluded outright -- see the
-    block above. Fail-soft to (0.0, 0)."""
+    committed spends (utils/expense_status: APPROVED, SENT_TO_ACCOUNTANT,
+    ENTERED, PAID -- anything that represents money actually disbursed).
+    Payroll-shaped heads are excluded outright -- see the block above.
+    Fail-soft to (0.0, 0); ``strict=True`` (a count or close that STORES a
+    variance) raises instead, so a failed read is never a day with no
+    payouts."""
     if db is None:
         return _CashExpenseWindow(0.0, 0)
     # BUG-104. `expense_date` is an operator-typed IST CALENDAR DATE, so BOTH
@@ -463,7 +476,7 @@ def _cash_expenses_for_window(
             if mode and mode != "CASH":
                 continue  # unknown mode counts as cash (conservative)
             status = str(e.get("status") or "").upper()
-            if status not in ("APPROVED", "PAID", "SENT_TO_ACCOUNTANT", "REIMBURSED"):
+            if not is_committed_expense(status):
                 continue
             # Salaries, advances and PF/ESI never come out of a shop till
             # (owner, 2026-08-14). Same matcher as /pnl and /budgets, imported
@@ -476,6 +489,8 @@ def _cash_expenses_for_window(
             except (TypeError, ValueError):
                 pass
     except Exception:
+        if strict:
+            raise
         return _CashExpenseWindow(0.0, 0)
     return _CashExpenseWindow(round(total, 2), excluded)
 
@@ -591,7 +606,7 @@ def _refund_double_entry_advisory(
             if mode and mode != "CASH":
                 continue
             status = str(e.get("status") or "").upper()
-            if status not in ("APPROVED", "PAID", "SENT_TO_ACCOUNTANT", "REIMBURSED"):
+            if not is_committed_expense(status):
                 continue
             try:
                 amt = round(float(e.get("amount", 0) or 0), 2)

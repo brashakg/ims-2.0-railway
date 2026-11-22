@@ -33,6 +33,8 @@ import {
   type ZRead,
   type VarianceStatus,
 } from '../../services/api/till';
+import { ApiError } from '../../services/api/client';
+import { getErrorStatus } from '../../utils/errorHandler';
 import DenomGrid from '../../components/cash/DenominationGrid';
 import FaceTallyTable from '../../components/cash/FaceTallyTable';
 import {
@@ -55,6 +57,19 @@ function MANAGER_PLUS(roles: string[]): boolean {
 }
 function CAN_LOCK(roles: string[]): boolean {
   return roles.some((r) => ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'].includes(r));
+}
+
+// D86(3): a drawer with no comparison has no cash figures of its own (the
+// server stores them as not available), never the whole day's.
+function drawerCash(s: { variance_status?: VarianceStatus }, paisa?: number | null): string {
+  return s.variance_status === 'COMPARISON_UNAVAILABLE' ? 'Not available' : paisaToInr(paisa);
+}
+
+// The row says why nothing was compared (D136(3)).
+function comparisonUnavailableText(reason?: string | null): string {
+  return reason === 'EARLIER_CLOSE_DRAWER_UNKNOWN'
+    ? 'Comparison not available: an earlier Cash Register close today could not be placed on one drawer, so nothing is shown as short or over.'
+    : 'Comparison not available: an earlier drawer was recorded by an older version.';
 }
 
 function varianceTone(status: VarianceStatus): string {
@@ -84,6 +99,7 @@ export default function BlindEodTallyPage() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [sessions, setSessions] = useState<TillSession[]>([]);
+  const [loadFailed, setLoadFailed] = useState(false);
   // Per-face tallies, fetched on demand per locked Z-Read. `null` means the
   // fetch failed -- shown as such, never as a clean tally.
   const [ledgers, setLedgers] = useState<Record<string, ZRead | null>>({});
@@ -120,8 +136,13 @@ export default function BlindEodTallyPage() {
       // Submit Count panel unreachable by the very people who count.
       const rows = await tillApi.list({ store_id: storeId, limit: 30 });
       setSessions(rows);
-    } catch {
-      setSessions([]);
+      setLoadFailed(false);
+    } catch (e) {
+      // Unreadable is not "no drawer today": an empty list here offered to
+      // open a drawer that was already open. A refusal on permissions keeps
+      // its old empty view.
+      if (getErrorStatus(e) === 403) setSessions([]);
+      else setLoadFailed(true);
     } finally {
       setLoading(false);
     }
@@ -188,6 +209,9 @@ export default function BlindEodTallyPage() {
       await load();
     } catch (e: any) {
       toast.error('Could not submit count');
+      // The till may hold a write whose reply was lost: show what it holds
+      // now, not the screen from before the press.
+      await load();
     } finally {
       setBusy(false);
     }
@@ -209,6 +233,9 @@ export default function BlindEodTallyPage() {
       await load();
     } catch {
       toast.error('Could not lock');
+      // The till may hold a write whose reply was lost: show what it holds
+      // now, not the screen from before the press.
+      await load();
     } finally {
       setBusy(false);
     }
@@ -225,8 +252,14 @@ export default function BlindEodTallyPage() {
       toast.success('Z-Read reopened');
       setReopenReason('');
       await load();
-    } catch {
-      toast.error('Could not reopen');
+    } catch (err) {
+      // A refusal the server explains (it carries a code and a sentence for
+      // staff, e.g. another drawer is still open for the day) is shown as
+      // written; anything else keeps the plain fallback (audit L3-28).
+      toast.error(err instanceof ApiError && err.code ? err.message : 'Could not reopen');
+      // The till may hold a write whose reply was lost: show what it holds
+      // now, not the screen from before the press.
+      await load();
     } finally {
       setBusy(false);
     }
@@ -258,6 +291,33 @@ export default function BlindEodTallyPage() {
               there is no drawer to count or Z-Read to lock. Switch to a
               physical store from the header dropdown to run its blind EOD.
             </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (loadFailed) {
+    return (
+      <div className="max-w-5xl mx-auto p-6">
+        <div
+          data-testid="till-load-failed"
+          className="bg-amber-50 border border-amber-200 rounded-lg p-5 flex items-start gap-3"
+        >
+          <AlertTriangle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
+          <div className="text-sm text-amber-900">
+            <p className="font-semibold mb-1">The till could not be loaded.</p>
+            <p className="mb-3">
+              Nothing is shown because it could not be read. This does not mean no drawer
+              is open today.
+            </p>
+            <button
+              type="button"
+              onClick={() => void load()}
+              className="inline-flex items-center min-h-[44px] px-4 text-sm font-medium text-white bg-bv hover:bg-bv-600 rounded-lg"
+            >
+              Try again
+            </button>
           </div>
         </div>
       </div>
@@ -425,25 +485,34 @@ export default function BlindEodTallyPage() {
                   </div>
                 )}
                 {/* Z-Read identity, visible so a manager can foot it by eye:
-                    opening + cash sales - cash refunds - cash paid out = expected.
+                    opening + cash sales - cash refunds - cash paid out - bank deposit = expected.
                     cash_sales_paisa is GROSS; recorded customer cash refunds are
                     their OWN line, never merged into the manual payout figure. */}
                 <div className="grid grid-cols-3 tablet:grid-cols-6 gap-3 mt-3 text-sm">
                   <Figure label="Opening float" value={paisaToInr(s.opening_float_paisa)} />
-                  <Figure label="Cash sales (gross)" value={paisaToInr(s.cash_sales_paisa)} />
-                  <Figure label="Cash refunds (recorded)" value={paisaToInr(s.cash_refunds_paisa)} />
-                  <Figure label="Cash payouts (auto)" value={paisaToInr(s.cash_payouts_paisa)} />
-                  <Figure label="Expected" value={paisaToInr(s.expected_cash_paisa)} />
+                  <Figure label="Cash sales (gross)" value={drawerCash(s, s.cash_sales_paisa)} />
+                  <Figure label="Cash refunds (recorded)" value={drawerCash(s, s.cash_refunds_paisa)} />
+                  <Figure label="Cash payouts (auto)" value={drawerCash(s, s.cash_payouts_paisa)} />
+                  {(s.bank_deposit_paisa ?? 0) > 0 && (
+                    <Figure label="Bank deposit" value={paisaToInr(s.bank_deposit_paisa ?? 0)} />
+                  )}
+                  <Figure label="Expected" value={s.expected_cash_paisa == null ? '—' : paisaToInr(s.expected_cash_paisa)} />
                   <Figure label="Counted" value={paisaToInr(s.blind_count_paisa)} />
                 </div>
                 <div className="grid grid-cols-1 gap-3 mt-3 text-sm">
                   <Figure
                     label="Variance"
-                    value={paisaToInr(s.variance_paisa)}
+                    value={s.variance_paisa == null ? '—' : paisaToInr(s.variance_paisa)}
                     tone={varianceTone(s.variance_status ?? null)}
                     badge={s.variance_status ?? undefined}
                   />
                 </div>
+                {s.variance_status === 'COMPARISON_UNAVAILABLE' && (
+                  <div className="mt-2 rounded-lg px-3 py-2 bg-gray-50 border border-gray-200 text-gray-700 text-xs flex items-start gap-2">
+                    <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                    <span>{comparisonUnavailableText(s.comparison_withheld_reason)}</span>
+                  </div>
+                )}
                 {s.variance_status === 'NEGATIVE_EXPECTED' && (
                   <div className="mt-2 rounded-lg px-3 py-2 bg-amber-50 border border-amber-200 text-amber-800 text-xs flex items-start gap-2">
                     <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
@@ -489,25 +558,34 @@ export default function BlindEodTallyPage() {
                   </span>
                 </div>
                 {/* Z-Read identity, visible so a manager can foot it by eye:
-                    opening + cash sales - cash refunds - cash paid out = expected.
+                    opening + cash sales - cash refunds - cash paid out - bank deposit = expected.
                     cash_sales_paisa is GROSS; recorded customer cash refunds are
                     their OWN line, never merged into the manual payout figure. */}
                 <div className="grid grid-cols-3 tablet:grid-cols-6 gap-3 mt-3 text-sm">
                   <Figure label="Opening float" value={paisaToInr(s.opening_float_paisa)} />
-                  <Figure label="Cash sales (gross)" value={paisaToInr(s.cash_sales_paisa)} />
-                  <Figure label="Cash refunds (recorded)" value={paisaToInr(s.cash_refunds_paisa)} />
-                  <Figure label="Cash payouts (auto)" value={paisaToInr(s.cash_payouts_paisa)} />
-                  <Figure label="Expected" value={paisaToInr(s.expected_cash_paisa)} />
+                  <Figure label="Cash sales (gross)" value={drawerCash(s, s.cash_sales_paisa)} />
+                  <Figure label="Cash refunds (recorded)" value={drawerCash(s, s.cash_refunds_paisa)} />
+                  <Figure label="Cash payouts (auto)" value={drawerCash(s, s.cash_payouts_paisa)} />
+                  {(s.bank_deposit_paisa ?? 0) > 0 && (
+                    <Figure label="Bank deposit" value={paisaToInr(s.bank_deposit_paisa ?? 0)} />
+                  )}
+                  <Figure label="Expected" value={s.expected_cash_paisa == null ? '—' : paisaToInr(s.expected_cash_paisa)} />
                   <Figure label="Counted" value={paisaToInr(s.blind_count_paisa)} />
                 </div>
                 <div className="grid grid-cols-1 gap-3 mt-3 text-sm">
                   <Figure
                     label="Variance"
-                    value={paisaToInr(s.variance_paisa)}
+                    value={s.variance_paisa == null ? '—' : paisaToInr(s.variance_paisa)}
                     tone={varianceTone(s.variance_status ?? null)}
                     badge={s.variance_status ?? undefined}
                   />
                 </div>
+                {s.variance_status === 'COMPARISON_UNAVAILABLE' && (
+                  <div className="mt-2 rounded-lg px-3 py-2 bg-gray-50 border border-gray-200 text-gray-700 text-xs flex items-start gap-2">
+                    <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                    <span>{comparisonUnavailableText(s.comparison_withheld_reason)}</span>
+                  </div>
+                )}
                 {s.variance_status === 'NEGATIVE_EXPECTED' && (
                   <div className="mt-2 rounded-lg px-3 py-2 bg-amber-50 border border-amber-200 text-amber-800 text-xs flex items-start gap-2">
                     <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />

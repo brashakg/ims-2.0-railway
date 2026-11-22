@@ -108,6 +108,30 @@ class TestEinvoiceStoreScope:
         assert r.status_code == 200
         assert r.json()["signed_qr"] == "QR-SECRET"
 
+    def test_an_order_that_cannot_be_read_is_503_not_404(self, monkeypatch):
+        """Audit 1409 round 3: a failed read was swallowed and answered 404
+        'not found' -- a database fault told as a missing order."""
+        c = _einv_client(monkeypatch, _user(["ADMIN"], [STORE_A]))
+
+        class _Down:
+            def get_collection(self, name):
+                raise ConnectionError("synthetic: the database is unreachable")
+
+        monkeypatch.setattr(einvoice_router, "_get_db", lambda: _Down())
+        r = c.post("/finance/einvoice/ord-B1")
+        assert r.status_code == 503 and "could not be read" in r.json()["detail"]
+        assert "synthetic" not in r.text
+
+    def test_an_order_that_does_not_exist_is_still_404(self, monkeypatch):
+        c = _einv_client(monkeypatch, _user(["ADMIN"], [STORE_A]))
+
+        class _Empty:
+            def get_collection(self, name):
+                return _FakeColl(None)
+
+        monkeypatch.setattr(einvoice_router, "_get_db", lambda: _Empty())
+        assert c.post("/finance/einvoice/ord-B1").status_code == 404
+
 
 # ============================================================================
 # L2-CLIN-F01 -- Rx print + sibling redo doors

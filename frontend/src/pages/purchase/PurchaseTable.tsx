@@ -19,7 +19,7 @@ import { useAuth } from '../../context/AuthContext';
 import { COST_ROLES } from '../../components/common/CostCell';
 import { RECEIVABLE_PO_STATUSES, RECEIVING_MANAGER_ROLES } from './purchaseTypes';
 import type { PurchaseOrder } from './purchaseTypes';
-import { PRICE_NEEDED, poMoney } from './purchaseMappers';
+import { PRICE_NEEDED, poDay, poMoney } from './purchaseMappers';
 
 interface PurchaseTableProps {
   purchaseOrders: PurchaseOrder[];
@@ -47,8 +47,8 @@ function downloadPO(po: PurchaseOrder, showPrices: boolean) {
   lines.push('==============');
   lines.push(`PO Number : ${po.poNumber}`);
   lines.push(`Supplier  : ${po.supplierName}`);
-  lines.push(`Date      : ${new Date(po.date).toLocaleDateString()}`);
-  lines.push(`Delivery  : ${new Date(po.expectedDelivery).toLocaleDateString()}`);
+  lines.push(`Date      : ${poDay(po.date)}`);
+  lines.push(`Delivery  : ${poDay(po.expectedDelivery)}`);
   lines.push(`Status    : ${po.status}`);
   lines.push('');
   lines.push('ITEMS');
@@ -176,11 +176,11 @@ export function PurchaseTable({ purchaseOrders, onViewPO }: PurchaseTableProps) 
           <div className="grid grid-cols-2 tablet:grid-cols-4 gap-4 mb-4">
             <div>
               <p className="text-xs text-gray-600 mb-1">Order Date</p>
-              <p className="text-sm font-medium text-gray-900">{new Date(po.date).toLocaleDateString()}</p>
+              <p className="text-sm font-medium text-gray-900">{poDay(po.date)}</p>
             </div>
             <div>
               <p className="text-xs text-gray-600 mb-1">Expected Delivery</p>
-              <p className="text-sm font-medium text-gray-900">{new Date(po.expectedDelivery).toLocaleDateString()}</p>
+              <p className="text-sm font-medium text-gray-900">{poDay(po.expectedDelivery)}</p>
             </div>
             <div>
               <p className="text-xs text-gray-600 mb-1">Items</p>

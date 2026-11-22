@@ -164,7 +164,13 @@ class BankReconciliationEngine:
                 }
             )
             out: List[Dict[str, Any]] = []
-            for s in cur:
+            rows = list(cur)
+            # D110: every reader of till drawers pays the audit row or manager
+            # task one still owes (never raises; nothing owed, nothing written).
+            from . import eod_tally
+
+            eod_tally.settle_drawers(self.db, [r.get("_id") or r.get("session_id") for r in rows])
+            for s in rows:
                 counted = s.get("blind_count_paisa")
                 if counted is None:
                     counted = s.get("counted_cash_paisa", s.get("expected_cash_paisa", 0))

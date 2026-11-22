@@ -19,7 +19,7 @@ import {
   type StoreLike,
 } from './legalPrimitives';
 
-interface JobCardPrintData {
+export interface JobCardPrintData {
   jobNumber: string;
   orderNumber: string;
   customerName: string;
@@ -34,6 +34,9 @@ interface JobCardPrintData {
   priority: string;
   dueDate: string;
   assignedTechnician?: string;
+  /** Sale-line fitting instructions and the order's special notes. */
+  fittingInstructions?: string | null;
+  notes?: string | null;
   status: string;
   createdDate: string;
 }
@@ -106,6 +109,7 @@ export function WorkshopJobCardPrint({
     window.print();
   };
 
+  const priority = (job.priority || 'NORMAL').toUpperCase();
   const effectiveEntity: EntityLike = entity || { name: store.storeName };
   const effectiveStore: StoreLike = {
     name: store.storeName,
@@ -122,9 +126,11 @@ export function WorkshopJobCardPrint({
     docDate: job.createdDate,
     overrides,
     extraMeta: [
-      ['Order', job.orderNumber],
-      ['Priority', job.priority.toUpperCase()],
-      ['Due', formatDate(job.dueDate)],
+      // L2-WS-F02: a job with no order / due date on file prints that it is
+      // missing; priority is defaulted above -- the card never crashes.
+      ['Order', job.orderNumber || 'Not on file'],
+      ['Priority', priority],
+      ['Due', formatDate(job.dueDate) || 'Not on file'],
     ],
   });
 
@@ -171,13 +177,13 @@ export function WorkshopJobCardPrint({
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
               <div>
                 <div style={{ fontSize: 9, color: '#4a4a45', textTransform: 'uppercase', letterSpacing: '.1em', fontWeight: 500 }}>Customer</div>
-                <div style={{ fontSize: 11.5, fontWeight: 600, marginTop: 2 }}>{job.customerName}</div>
+                <div style={{ fontSize: 11.5, fontWeight: 600, marginTop: 2 }}>{job.customerName || 'Not on file'}</div>
                 <div style={{ fontSize: 10, color: '#4a4a45', marginTop: 1 }}>{job.customerPhone}</div>
               </div>
               <div>
                 <div style={{ fontSize: 9, color: '#4a4a45', textTransform: 'uppercase', letterSpacing: '.1em', fontWeight: 500 }}>Priority</div>
-                <div style={{ fontSize: 11, fontWeight: 700, color: getPriorityColor(job.priority), marginTop: 2, textTransform: 'uppercase' }}>
-                  {job.priority.toUpperCase()}
+                <div style={{ fontSize: 11, fontWeight: 700, color: getPriorityColor(priority), marginTop: 2, textTransform: 'uppercase' }}>
+                  {priority}
                 </div>
                 <div style={{ fontSize: 10, color: '#4a4a45', marginTop: 1 }}>Status: {job.status}</div>
               </div>
@@ -200,6 +206,23 @@ export function WorkshopJobCardPrint({
               {job.lensTint && <div style={{ fontSize: 10, color: '#4a4a45', marginTop: 1 }}>Tint: {job.lensTint}</div>}
             </div>
           </div>
+
+          {(job.fittingInstructions || job.notes) && (
+            <div style={{ padding: '8px 14px', borderTop: '1px solid #aaa9a3', fontSize: 10.5 }}>
+              {job.fittingInstructions && (
+                <div>
+                  <div style={{ color: '#4a4a45', textTransform: 'uppercase', letterSpacing: '.08em', fontSize: 9 }}>Fitting Instructions</div>
+                  <div style={{ color: '#1a1a19', fontWeight: 600, marginTop: 2, whiteSpace: 'pre-line' }}>{job.fittingInstructions}</div>
+                </div>
+              )}
+              {job.notes && (
+                <div style={{ marginTop: job.fittingInstructions ? 6 : 0 }}>
+                  <div style={{ color: '#4a4a45', textTransform: 'uppercase', letterSpacing: '.08em', fontSize: 9 }}>Notes</div>
+                  <div style={{ color: '#1a1a19', marginTop: 2, whiteSpace: 'pre-line' }}>{job.notes}</div>
+                </div>
+              )}
+            </div>
+          )}
 
           {job.assignedTechnician && (
             <div style={{ padding: '8px 14px', borderTop: '1px solid #aaa9a3', fontSize: 10.5 }}>

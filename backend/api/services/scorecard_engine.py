@@ -420,10 +420,9 @@ def get_incentive_for_payroll(
     """
     if snapshot_repo is None:
         return {}
-    try:
-        snap = snapshot_repo.find_locked(store_id, year, month)
-    except Exception:  # noqa: BLE001
-        snap = None
+    # A read failure raises to the payroll run (which then saves nothing):
+    # an unreadable snapshot must never become "no incentive".
+    snap = snapshot_repo.find_locked(store_id, year, month, strict=True)
     if not snap:
         return {}
     return incentive_map_from_snapshot(snap)

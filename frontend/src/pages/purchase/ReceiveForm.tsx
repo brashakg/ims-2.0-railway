@@ -10,7 +10,7 @@
 // also drafts the bill and runs the 3-way match for accounts); anything else
 // is created and accepted in two calls -- the rules live in receiveLines.ts.
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { AlertCircle, Camera, CheckCircle2, Loader2, Package, Printer, ScanLine, Trash2, X } from 'lucide-react';
 import clsx from 'clsx';
@@ -119,6 +119,35 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
   const [notes, setNotes] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
+  // THE shop-change rule for every receipt (an order, bought without PO, a
+  // challan). The server books a receipt at the shop signed in to (only a
+  // standard receipt follows its order's delivery shop), so a form opened for
+  // shop A and still open under shop B would be posted to B. When the shop
+  // signed in to changes -- or the Shop filter moves off the order's delivery
+  // shop -- a form not yet sent is closed and says so. A receipt already sent
+  // keeps its screen: its answer is the old shop's. One whose send failed
+  // comes back to the form, and is closed then -- but a send whose answer was
+  // lost (no reply, a 5xx) may have been saved, so it never says "nothing was
+  // saved": it points at the receipts still waiting in the shop left.
+  const openedFor = useRef({ storeId, ownStoreId });
+  const unsent = stage.kind === 'form' && !submitting;
+  // Sticky: one uncertain send is enough, whatever a later retry answers.
+  const [maybeSaved, setMaybeSaved] = useState(false);
+  useEffect(() => {
+    const was = openedFor.current;
+    const orderLeftTheFilter =
+      was.storeId !== storeId && !!po?.delivery_store_id && !!storeId && po.delivery_store_id !== storeId;
+    if (!unsent || (was.ownStoreId === ownStoreId && !orderLeftTheFilter)) return;
+    toast.warning(
+      maybeSaved
+        ? 'The shop changed, so this receipt was closed. It was sent but no answer came back, so it may already be saved in the shop you switched from: switch back and check "Receipts still waiting" before receiving this box again.'
+        : 'The shop changed, so this receipt was closed and nothing was saved. Start it again for the new shop.',
+      12000,
+    );
+    onClose();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [storeId, ownStoreId, unsent]);
+
   // Lines: product search (no order), scan box, batch rows opened by hand.
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<Array<Record<string, unknown>>>([]);
@@ -194,6 +223,8 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
     setSearchFailed(false);
     if (po || q.length < 2) {
       setResults([]);
+      // The search just cancelled never reaches its own finally (SP-04).
+      setSearching(false);
       return;
     }
     let cancelled = false;
@@ -503,6 +534,10 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
         },
       });
     } catch (err) {
+      // Only a plain "no" from the server (a 4xx other than timeout/conflict)
+      // proves nothing was saved; no answer or a 5xx proves nothing.
+      const st = err instanceof ApiError ? err.status ?? 0 : 0;
+      if (!(st >= 400 && st < 500 && st !== 408 && st !== 409)) setMaybeSaved(true);
       failed(err);
     } finally {
       setSubmitting(false);

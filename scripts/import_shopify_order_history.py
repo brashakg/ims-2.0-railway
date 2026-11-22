@@ -286,17 +286,47 @@ def _simulate_refund_credit_notes(
     return out
 
 
-def _existing_order(db, shopify_order_id: str):
+def _existing_order(db, shopify_order_id: str, strict: bool = False):
     """The IMS order doc already carrying this Shopify order id, or None.
     Returned (not a bool) so the caller can DISTINGUISH a genuinely-booked online
-    order from a pre-IMS bvi_import shadow doc that would silently dedupe it."""
+    order from a pre-IMS bvi_import shadow doc that would silently dedupe it.
+    ``strict`` (the apply loop, decision D104(1)): a read that fails RAISES --
+    no answer is never "not there"."""
     try:
         coll = db.get_collection("orders")
         if coll is None:
             return None
         return coll.find_one({"shopify_order_id": shopify_order_id})
     except Exception:  # noqa: BLE001
+        if strict:
+            raise
         return None
+
+
+def unfinished_import_refunds(db) -> Optional[int]:
+    """How many refunds an earlier --apply run claimed and did not finish (it
+    stopped between its claim and the "finished" stamp; decision D103(1)).
+    None when it cannot be read -- never 0. A run that was killed reports
+    nothing itself, so every run, dry or not, shows this count."""
+    try:
+        return int(db.get_collection("returns").count_documents(
+            {"source": "shopify_order_history", "status": "PENDING",
+             "credit_note_issued": {"$ne": True}}))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def apply_refusal(db) -> Optional[str]:
+    """Why an --apply run must not start, or None (decision D104(2)): the
+    run books no order unless the unique index that keeps one Shopify order
+    ONE order exists (it is built here when missing and buildable)."""
+    from api.services.shopify_ingest import ORDER_INDEX_UNCONFIRMED, ensure_shopify_order_index
+
+    try:
+        ensure_shopify_order_index(db, strict=True)
+    except Exception as exc:  # noqa: BLE001
+        return f"{ORDER_INDEX_UNCONFIRMED}: {exc}"
+    return None
 
 
 def _is_bvi_shadow(doc: Optional[Dict[str, Any]]) -> bool:
@@ -562,6 +592,14 @@ def run(
         "applied": apply,
     }
 
+    unfinished = unfinished_import_refunds(dbh)
+    summary["unfinished_import_refunds"] = unfinished
+    if unfinished is None:
+        print("  ! refunds an earlier run left unfinished: COULD NOT BE READ")
+    elif unfinished:
+        print(f"  ! refunds an earlier run left unfinished: {unfinished}  "
+              f"(an --apply run finishes them; nothing else books them)")
+
     if not apply:
         if would_insert:
             print(
@@ -571,6 +609,17 @@ def run(
         return summary
 
     # ------------------------------------------------------------------- apply
+    refused = apply_refusal(dbh)
+    if refused:
+        print("")
+        print("=" * 68)
+        print(f"[APPLY] REFUSED -- nothing was booked. {refused}")
+        print("        Fix the orders collection (two orders must not share one")
+        print("        shopify_order_id), then run again.")
+        print("=" * 68)
+        summary.update({"applied": False, "refused": refused})
+        return summary
+
     from api.services.online_order_mapper import map_shopify_order
 
     created = 0
@@ -587,8 +636,11 @@ def run(
     cn_unmapped = 0
     cn_whole_order_fallbacks = 0
     cn_failed = 0
+    cn_unfinished_found = 0
+    cn_unfinished_finished = 0
     unmapped_refund_order_ids: List[str] = []
     cn_failed_order_ids: List[str] = []
+    error_order_ids: List[str] = []
     for o in real:
         oid = str(o.get("id") or o.get("order_id") or "").strip()
         if not oid:
@@ -597,7 +649,14 @@ def run(
         # P2: never let a pre-IMS bvi_import shadow doc silently swallow a real
         # order as a 'duplicate'. Skip-and-LIST it explicitly (the owner decides
         # upgrade-in-place vs skip out-of-band) so the count is honest.
-        existing = _existing_order(dbh, oid)
+        try:
+            existing = _existing_order(dbh, oid, strict=True)
+        except Exception as exc:  # noqa: BLE001 -- no answer: not booked, reported
+            errors += 1
+            if len(error_order_ids) < 50:
+                error_order_ids.append(oid)
+            print(f"[APPLY] order {oid} NOT BOOKED: it could not be read whether it exists ({exc})")
+            continue
         if existing is not None and _is_bvi_shadow(existing):
             shadow_skipped += 1
             print(f"[APPLY] order {oid} SHADOWED by bvi_import doc -- skipped (not booked)")
@@ -611,6 +670,8 @@ def run(
             )
         except Exception as exc:  # noqa: BLE001 -- one bad order must not stop the run
             errors += 1
+            if len(error_order_ids) < 50:
+                error_order_ids.append(oid)
             print(f"[APPLY] order {oid} FAILED: {exc}")
             continue
         st = (res or {}).get("status")
@@ -618,6 +679,14 @@ def run(
             created += 1
         elif st in ("duplicate", "replayed"):
             duplicate += 1
+        elif st == "error":
+            # A failure the ingest REPORTED (a dedupe read that failed, the
+            # unique order index gone mid-run): not booked, counted and named
+            # -- never folded into "skipped" (decision D104(1)).
+            errors += 1
+            if len(error_order_ids) < 50:
+                error_order_ids.append(oid)
+            print(f"[APPLY] order {oid} NOT BOOKED: {(res or {}).get('error')}")
         else:
             skipped += 1
         rcn = (res or {}).get("refund_credit_notes") or {}
@@ -632,6 +701,8 @@ def run(
                 cn_unmapped += um
                 if len(unmapped_refund_order_ids) < 50:
                     unmapped_refund_order_ids.append(oid)
+            cn_unfinished_found += int(rcn.get("unfinished_claims_found") or 0)
+            cn_unfinished_finished += int(rcn.get("unfinished_claims_finished") or 0)
             cf = int(rcn.get("cn_failed") or 0)
             if cf > 0:
                 cn_failed += cf
@@ -651,7 +722,9 @@ def run(
     print(f"  duplicate ............. {duplicate}")
     print(f"  shadowed (skipped) .... {shadow_skipped}")
     print(f"  skipped ............... {skipped}")
-    print(f"  errors ................ {errors}")
+    print(f"  errors ................ {errors}  (NOT booked -- re-run to book them)")
+    if error_order_ids:
+        print("  ! shopify order ids NOT booked: " + ", ".join(error_order_ids))
     print("  -- refund credit notes (CDNR) --")
     print(f"  credit notes booked ... {cn_count}  "
           f"(gross Rs {cn_gross:,.2f}, tax Rs {cn_tax:,.2f})")
@@ -670,6 +743,8 @@ def run(
             "  ! shopify order ids with a FAILED credit-note booking: "
             + ", ".join(cn_failed_order_ids)
         )
+    print(f"  unfinished refunds .... {cn_unfinished_found} found from an earlier run that "
+          f"stopped part way, {cn_unfinished_finished} finished now")
     print("=" * 68)
 
     summary.update(
@@ -685,6 +760,9 @@ def run(
             "credit_notes_whole_order_fallbacks": cn_whole_order_fallbacks,
             "credit_notes_unmapped_refunds": cn_unmapped,
             "credit_notes_failed": cn_failed,
+            "credit_notes_unfinished_found": cn_unfinished_found,
+            "credit_notes_unfinished_finished": cn_unfinished_finished,
+            "error_order_ids": error_order_ids,
             "cn_failed_order_ids": cn_failed_order_ids,
             "unmapped_refund_order_ids": unmapped_refund_order_ids,
         }

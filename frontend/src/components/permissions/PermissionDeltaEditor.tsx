@@ -41,6 +41,19 @@ export interface PermissionOptions {
   discount_cap_field: string;
   role_deltas: Record<string, { defaults: string[]; commonOverrides: DeltaRow[] }>;
   grantable: string[];
+  /** Role standard discount per role (server role_caps table). */
+  role_discount_caps?: Record<string, number>;
+}
+
+/** The role standard discount for a SET of roles: the highest of their
+ *  standards (the server's role_baseline_cap). null when not known yet. */
+export function roleStandardCap(
+  roles: readonly string[],
+  options: PermissionOptions | null | undefined,
+): number | null {
+  const caps = options?.role_discount_caps;
+  if (!caps || roles.length === 0) return null;
+  return Math.max(0, ...roles.map((r) => caps[r] ?? 0));
 }
 
 export type CapabilityOverride = {
@@ -103,8 +116,25 @@ export function PermissionDeltaEditor({
     (a, b) => (ROLE_HIERARCHY[b] || 0) - (ROLE_HIERARCHY[a] || 0),
   )[0];
   const discountField = options?.discount_cap_field || '__discount_cap__';
-  const rows: DeltaRow[] =
+  const roleRows: DeltaRow[] =
     (highestRole && options?.role_deltas[highestRole]?.commonOverrides) || [];
+  // The discount box is offered for roles that carry discount authority. A role
+  // without it (Accountant, Cashier...) still shows the box when an override is
+  // ALREADY on record, so an old value can be seen and set back to 0 (L1-F03).
+  const rows: DeltaRow[] =
+    discountCap != null && highestRole && !roleRows.some((r) => r.key === discountField)
+      ? [...roleRows, {
+          key: discountField,
+          label: 'Maximum discount this person can give',
+          type: 'number',
+          default: 0,
+          hard_floor_note: null,
+        }]
+      : roleRows;
+
+  // The standard comes from ALL the person's roles (an Accountant who is also
+  // Sales Staff has 10), never from the highest role's preset row.
+  const standard = roleStandardCap(roles, options);
 
   const grants = permissions.grant || {};
   const denies = permissions.deny || {};
@@ -179,12 +209,20 @@ export function PermissionDeltaEditor({
                   key={row.key}
                   className="flex items-center gap-2 p-2 bg-gray-50 border border-gray-200 rounded"
                 >
-                  <span className="text-sm text-gray-700 flex-1">{row.label}</span>
+                  <span className="text-sm text-gray-700 flex-1">
+                    {row.label}
+                    {standard != null && (
+                      <span className="block text-xs text-gray-400">
+                        Role standard: {standard}%. A lower number does not reduce it.
+                      </span>
+                    )}
+                  </span>
                   <input
                     type="number"
                     min={0}
                     max={100}
-                    value={discountCap ?? (row.default as number) ?? 0}
+                    aria-label={row.label}
+                    value={discountCap ?? standard ?? (row.default as number) ?? 0}
                     onChange={(e) =>
                       onDiscountCapChange(parseInt(e.target.value || '0', 10))
                     }

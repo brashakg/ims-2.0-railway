@@ -31,6 +31,9 @@ interface HistoryRow {
   timestamp?: string;
   created_at?: string;
   note?: string;
+  // The server marks a logged change that never landed (it lost a race or the
+  // write failed): shown as such, never offered for Revert.
+  not_applied?: boolean;
   [k: string]: unknown;
 }
 
@@ -41,6 +44,9 @@ function formatWhen(raw?: string): string {
   return d.toLocaleString();
 }
 
+// The trail row saying a logged change never landed (no Revert offered).
+const ABORTED = 'PERMISSIONS_UPDATE_ABORTED';
+
 function actionLabel(action?: string): string {
   switch (action) {
     case 'PERMISSIONS_CREATE':
@@ -49,6 +55,8 @@ function actionLabel(action?: string): string {
       return 'Permissions changed';
     case 'PERMISSIONS_REVERT':
       return 'Reverted to a prior state';
+    case ABORTED:
+      return 'Change refused - nothing was applied';
     default:
       return action ? action.replace(/_/g, ' ') : 'Permission change';
   }
@@ -70,6 +78,7 @@ export function UserPermissionsPanel({
 
   const [permissions, setPermissions] = useState<CapabilityOverride>({});
   const [discountCap, setDiscountCap] = useState<number | undefined>(undefined);
+  const [loadedCap, setLoadedCap] = useState<number | undefined>(undefined);
   const [moduleAccess, setModuleAccess] = useState<Record<string, boolean>>({});
   const [history, setHistory] = useState<HistoryRow[]>([]);
 
@@ -79,6 +88,7 @@ export function UserPermissionsPanel({
       const data = await adminUserApi.getUserPermissions(userId);
       setPermissions(data.permissions || {});
       setDiscountCap(data.discount_cap == null ? undefined : data.discount_cap);
+      setLoadedCap(data.discount_cap == null ? undefined : data.discount_cap);
       setModuleAccess(data.module_access || {});
       setHistory(Array.isArray(data.history) ? (data.history as HistoryRow[]) : []);
     } catch {
@@ -98,7 +108,11 @@ export function UserPermissionsPanel({
       // Send only the override-bearing fields. The backend escalation-guards +
       // audits each (PUT /users/{id} with exclude_unset on the server side).
       await adminUserApi.updateUser(userId, {
-        discountCap,
+        // Only a changed cap: re-sending the loaded one would make a
+        // role-standard cap look typed and stop it following the role (D70).
+        discountCap: discountCap !== loadedCap ? discountCap : undefined,
+        // D93: held to the roles on screen (409 if someone changed them).
+        expectedRoles: roles,
         moduleAccess,
         permissions,
       });
@@ -118,7 +132,7 @@ export function UserPermissionsPanel({
     }
     setRevertingId(logId);
     try {
-      await adminUserApi.revertUserPermissions(userId, logId);
+      await adminUserApi.revertUserPermissions(userId, logId, roles);
       toast.success('Reverted to the selected state.');
       await load();
     } catch (err) {
@@ -190,7 +204,10 @@ export function UserPermissionsPanel({
                   className="flex items-start justify-between gap-3 p-3 bg-gray-50 border border-gray-200 rounded-lg"
                 >
                   <div className="min-w-0">
-                    <p className="text-sm text-gray-800">{actionLabel(h.action)}</p>
+                    <p className="text-sm text-gray-800">
+                      {actionLabel(h.action)}
+                      {h.not_applied ? ' (not applied)' : ''}
+                    </p>
                     <p className="text-xs text-gray-500">
                       {who}
                       {when ? ` · ${formatWhen(when)}` : ''}
@@ -199,7 +216,7 @@ export function UserPermissionsPanel({
                       <p className="text-xs text-gray-400 mt-0.5">{String(h.note)}</p>
                     ) : null}
                   </div>
-                  {logId && (
+                  {logId && !h.not_applied && h.action !== ABORTED && (
                     <button
                       type="button"
                       onClick={() => handleRevert(logId)}

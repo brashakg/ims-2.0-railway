@@ -90,4 +90,19 @@ function Labeled({ label, children }: { label: string; children: React.ReactNode
   );
 }
 
-export { StatusPill, ExpenseTable, Card, Row, Labeled };
+// The float could not be READ. This is NOT the "no float is open" card: that
+// is a statement about the business, and a failed read has not checked it. A
+// float holding money was shown as none open, with an Open float button beside
+// it (audit L3-10). Unreadable says so and offers the read again.
+function FloatUnavailable({ onRetry }: { onRetry: () => void }) {
+  return (
+    <div role="alert" className="bg-amber-50 rounded-lg border border-amber-200 p-8 text-center">
+      <div className="text-sm text-amber-900 mb-4">
+        Could not load the petty-cash float. Nothing has changed. Please try again.
+      </div>
+      <button type="button" className="btn sm" onClick={onRetry}>Try again</button>
+    </div>
+  );
+}
+
+export { StatusPill, ExpenseTable, Card, Row, Labeled, FloatUnavailable };

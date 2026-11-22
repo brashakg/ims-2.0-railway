@@ -184,6 +184,36 @@ def test_budget_empty_state_has_no_budget_set_flag():
         ), f"category {cat} has fabricated budget {vals['budget']}"
 
 
+class _RepoOver:
+    """find_many over a StrictDB collection: the one method the budget actuals
+    reader uses on the real ExpenseRepository."""
+
+    def __init__(self, coll):
+        self._coll = coll
+
+    def find_many(self, flt=None, limit=0, **_kw):
+        return list(self._coll.find(flt or {}))
+
+
+def _wire_budget_reader(monkeypatch, db):
+    """GET /finance/budget reads the plan through budgets.plan_and_actuals
+    (audit L3-15: one budget, one reader). Point THAT read at the fake."""
+    from api.routers import budgets as budgets_mod
+
+    monkeypatch.setattr(
+        budgets_mod, "_budgets_collection", lambda: db.get_collection("budgets")
+    )
+    monkeypatch.setattr(
+        budgets_mod,
+        "get_expense_repository",
+        lambda: _RepoOver(db.get_collection("expenses")),
+    )
+    # An empty orders collection; None would mean "no database" (-> 503).
+    monkeypatch.setattr(
+        budgets_mod, "get_order_repository", lambda: _RepoOver(db.get_collection("orders"))
+    )
+
+
 def test_budget_endpoint_returns_zeroes_when_none_configured(
     client, auth_headers, monkeypatch
 ):
@@ -200,6 +230,7 @@ def test_budget_endpoint_returns_zeroes_when_none_configured(
 
     db = StrictDB()
     monkeypatch.setattr(fin_mod, "_get_db", lambda: db)
+    _wire_budget_reader(monkeypatch, db)
 
     resp = client.get("/api/v1/finance/budget?month=6&year=2026", headers=auth_headers)
     assert resp.status_code == 200, resp.text
@@ -220,18 +251,21 @@ def test_budget_endpoint_uses_a_configured_budget_when_present(
     from strict_fakes import StrictDB
 
     db = StrictDB()
+    # The shape Budgeting's upsert writes -- the only shape there is.
     db.seed(
         "budgets",
         [
             {
-                "month": 6,
-                "year": 2026,
-                "mode": "full",
-                "categories": {"rent": {"budget": 40000, "actual": 0}},
+                "budget_id": "b1",
+                "store_id": "S1",
+                "period": "2026-06",
+                "head": "rent",
+                "planned_amount": 40000,
             }
         ],
     )
     monkeypatch.setattr(fin_mod, "_get_db", lambda: db)
+    _wire_budget_reader(monkeypatch, db)
 
     body = client.get(
         "/api/v1/finance/budget?month=6&year=2026", headers=auth_headers
@@ -241,7 +275,7 @@ def test_budget_endpoint_uses_a_configured_budget_when_present(
 
 
 def test_budget_actuals_come_from_recorded_expenses(client, auth_headers, monkeypatch):
-    """Actuals are read from APPROVED/PAID expenses dated in the period."""
+    """Actuals are read from APPROVED expenses dated in the period."""
     from api.routers import finance as fin_mod
     from strict_fakes import StrictDB
 
@@ -260,6 +294,7 @@ def test_budget_actuals_come_from_recorded_expenses(client, auth_headers, monkey
         ],
     )
     monkeypatch.setattr(fin_mod, "_get_db", lambda: db)
+    _wire_budget_reader(monkeypatch, db)
 
     body = client.get(
         "/api/v1/finance/budget?month=6&year=2026", headers=auth_headers
