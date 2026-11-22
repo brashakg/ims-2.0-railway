@@ -64,6 +64,7 @@ export default function JournalEntriesPanel() {
   const [pin, setPin] = useState('');
   const [rejectNote, setRejectNote] = useState('');
   const [acting, setActing] = useState(false);
+  const [listError, setListError] = useState<string | null>(null);
 
   const load = async () => {
     setLoading(true);
@@ -72,7 +73,16 @@ export default function JournalEntriesPanel() {
         financeApi.listJournalEntries(statusFilter === 'ALL' ? undefined : { status: statusFilter }),
         financeApi.getChartOfAccounts({ manual_only: true }),
       ]);
-      setEntries(list.status === 'fulfilled' ? (list.value?.journal_entries || []) : []);
+      // A list that could not be read is an error, not "No journal entries":
+      // keep the rows already shown and say so (D84).
+      if (list.status === 'fulfilled') {
+        setEntries(list.value?.journal_entries || []);
+        setListError(null);
+      } else {
+        const msg = getErrorMessage(list.reason, 'Journal entries could not be read just now - please try again');
+        setListError(msg);
+        toast.error(msg);
+      }
       setAccounts(coa.status === 'fulfilled' ? (coa.value?.accounts || []) : []);
     } catch {
       toast.error('Failed to load journal entries');
@@ -158,6 +168,17 @@ export default function JournalEntriesPanel() {
     }
   };
 
+  // Re-read the open entry and the list after a refused action, so the buttons
+  // follow the server's state instead of a stale local copy.
+  const refreshSelected = async (je: JournalEntry) => {
+    try {
+      setSelected(await financeApi.getJournalEntry(je.je_id));
+    } catch {
+      // Keep the open entry; the list reload below still refreshes the rows.
+    }
+    load();
+  };
+
   const doApprove = async (je: JournalEntry) => {
     if (pin.length < 4) { toast.error('Enter your approval PIN'); return; }
     setActing(true);
@@ -169,6 +190,7 @@ export default function JournalEntriesPanel() {
       load();
     } catch (e: any) {
       toast.error(getErrorMessage(e, 'Approve failed'));
+      await refreshSelected(je);
     } finally {
       setActing(false);
     }
@@ -201,6 +223,11 @@ export default function JournalEntriesPanel() {
       load();
     } catch (e: any) {
       toast.error(getErrorMessage(e, 'Post failed'));
+      // Show the entry as the server now sees it (D54). Its needs_reapproval
+      // says whether a checker must approve again (lapsed or spent approval) or
+      // whether pressing Post again finishes the posting (a Post whose journal
+      // write was lost keeps its approval). Never guess it from the refusal.
+      await refreshSelected(je);
     } finally {
       setActing(false);
     }
@@ -215,6 +242,9 @@ export default function JournalEntriesPanel() {
       load();
     } catch (e: any) {
       toast.error(getErrorMessage(e, 'Reverse failed'));
+      // Show the entry as the server now sees it: a reversal whose voucher was
+      // not written is marked reversal_unfinished and keeps the button.
+      await refreshSelected(je);
     } finally {
       setActing(false);
     }
@@ -276,7 +306,10 @@ export default function JournalEntriesPanel() {
             </tr>
           </thead>
           <tbody>
-            {entries.length === 0 && (
+            {listError && (
+              <tr><td colSpan={6} role="alert" className="px-3 py-3 text-center text-red-700">{listError}</td></tr>
+            )}
+            {entries.length === 0 && !listError && (
               <tr><td colSpan={6} className="px-3 py-8 text-center text-gray-400">No journal entries.</td></tr>
             )}
             {entries.map((je) => (
@@ -293,6 +326,12 @@ export default function JournalEntriesPanel() {
                   <span className={clsx('inline-block px-2 py-0.5 rounded text-xs font-medium', STATUS_STYLE[je.status])}>
                     {je.status}
                   </span>
+                  {/* D113: marked reversed, voucher never saved -- the books still carry it */}
+                  {je.reversal_unfinished && (
+                    <span className="inline-block ml-2 px-2 py-0.5 rounded text-xs font-medium bg-amber-50 text-amber-700 border border-amber-200">
+                      Reversal not finished
+                    </span>
+                  )}
                 </td>
                 <td className="px-3 py-2 text-gray-600">{je.maker_name || je.maker_id}</td>
               </tr>
@@ -467,11 +506,33 @@ export default function JournalEntriesPanel() {
                 )
               )}
 
-              {/* Checker: post an APPROVED entry */}
-              {selected.status === 'APPROVED' && isChecker && (
+              {/* Checker: post an APPROVED entry -- or approve it again first
+                  when its approval lapsed or can no longer be used (D54) */}
+              {selected.status === 'APPROVED' && isChecker && !selected.needs_reapproval && (
                 <button onClick={() => doPost(selected)} disabled={acting} className="btn-primary text-sm disabled:opacity-50">
                   Post to ledger
                 </button>
+              )}
+              {selected.status === 'APPROVED' && isChecker && selected.needs_reapproval && (
+                <div className="space-y-3 border-t border-gray-200 pt-3">
+                  <div className="text-amber-700 bg-amber-50 border border-amber-200 rounded px-3 py-2">
+                    This entry's approval has lapsed or can no longer be used. It must be approved again before it can be posted.
+                    {isOwnEntry(selected) && ' You drafted this entry, so a different checker must approve it.'}
+                  </div>
+                  {!isOwnEntry(selected) && (
+                    <>
+                      <label className="block">
+                        <span className="block text-gray-600 mb-1">Approval PIN</span>
+                        <input type="password" inputMode="numeric" value={pin} maxLength={6}
+                          onChange={(e) => setPin(e.target.value.replace(/\D/g, ''))}
+                          className="w-40 border border-gray-200 rounded px-3 py-2 text-sm focus:outline-none focus:border-bv-red-400" />
+                      </label>
+                      <button onClick={() => doApprove(selected)} disabled={acting} className="btn-primary text-sm disabled:opacity-50">
+                        Approve again
+                      </button>
+                    </>
+                  )}
+                </div>
               )}
 
               {/* Checker: reverse a POSTED entry */}
@@ -479,6 +540,21 @@ export default function JournalEntriesPanel() {
                 <button onClick={() => doReverse(selected)} disabled={acting} className="btn-secondary text-sm disabled:opacity-50">
                   Reverse this entry
                 </button>
+              )}
+
+              {/* A reversal whose voucher was never written: the same press finishes it */}
+              {selected.reversal_unfinished && (
+                <div className="space-y-3 border-t border-gray-200 pt-3">
+                  <div className="text-amber-700 bg-amber-50 border border-amber-200 rounded px-3 py-2">
+                    This entry is marked reversed, but its reversal voucher was not saved, so the books still carry it.
+                    {isChecker ? ' Press Finish the reversal to save the voucher.' : ' An admin must finish the reversal.'}
+                  </div>
+                  {isChecker && (
+                    <button onClick={() => doReverse(selected)} disabled={acting} className="btn-secondary text-sm disabled:opacity-50">
+                      Finish the reversal
+                    </button>
+                  )}
+                </div>
               )}
             </div>
           </div>
