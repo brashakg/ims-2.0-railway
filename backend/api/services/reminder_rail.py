@@ -812,11 +812,15 @@ async def send_pool_redemption_otp(
             phone = ""
 
     # Queue the OTP message on the transactional path (DISPATCH_MODE-gated).
+    # D91 / D98: the door says "issued" only when the message is STORED; no
+    # mobile, no approved wording or an unsaved row -> the code could not be
+    # sent (the hashed code is cancelled so it can never be used).
+    from api.services import notification_service as ns
+
+    res = None
     if phone:
         try:
-            from api.services.notification_service import send_notification
-
-            await send_notification(
+            res = await ns.send_notification(
                 store_id="",
                 customer_id=primary_customer_id,
                 customer_phone=phone,
@@ -831,6 +835,16 @@ async def send_pool_redemption_otp(
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("OTP send failed: %s", exc)
+    why = ns.not_sent_reason(res) if phone else "the primary member has no mobile number"
+    if why is not None:
+        try:
+            db.get_collection("pool_otp").update_one(
+                {"otp_id": otp_id, "status": "PENDING"},
+                {"$set": {"status": "NOT_SENT", "not_sent_reason": why}},
+            )
+        except Exception as exc:  # noqa: BLE001 - nobody holds the code anyway
+            logger.warning("pool_otp %s NOT_SENT mark failed: %s", otp_id, exc)
+        return {"ok": False, "reason": f"The code could not be sent: {why}."}
 
     return {"ok": True, "otp_id": otp_id, "expires_at": doc["expires_at"]}
 

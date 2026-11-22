@@ -41,6 +41,7 @@ from api.services import notification_service as ns  # noqa: E402
 from api.services import notification_templates as nt  # noqa: E402
 from api.services import reminder_rail as rail  # noqa: E402
 from api.services import whatsapp_intents as wi  # noqa: E402
+from database.repositories.customer_repository import CustomerRepository  # noqa: E402
 
 MONGO_HOST = os.getenv("MONGO_HOST", "127.0.0.1")
 MONGO_PORT = int(os.getenv("MONGO_PORT", "27017"))
@@ -763,7 +764,7 @@ def test_d91_repair_ready_message_stored_answers_sent(db, monkeypatch):
     assert db.notification_logs.count_documents({"related_entity_id": jid}) == 1
 
 
-def _otp(db, monkeypatch, sms_status="SIMULATED"):
+def _otp(db, monkeypatch, sms_status="SIMULATED", phone=PHONE):
     import agents.providers as providers
     from api import dependencies as deps
     from api.routers import portal
@@ -777,9 +778,10 @@ def _otp(db, monkeypatch, sms_status="SIMULATED"):
     monkeypatch.setattr(providers, "send_sms", _sms)
     monkeypatch.setattr(portal, "_get_db", lambda: db)
     monkeypatch.setattr(portal, "_check_rate", lambda *_a, **_k: None)
-    monkeypatch.setattr(deps, "get_customer_repository", lambda: SimpleNamespace(
-        find_by_mobile=lambda m: db.customers.find_one({"mobile": m[-10:]}, {"_id": 0})))
-    return asyncio.run(portal.request_rx_otp(portal.RxOtpRequest(phone=PHONE), None)), sent
+    # The REAL customer repository on the native collection (Codex R2-A: a
+    # substituted find_by_mobile hid the repository swallowing a read error).
+    monkeypatch.setattr(deps, "get_customer_repository", lambda: CustomerRepository(db.customers))
+    return asyncio.run(portal.request_rx_otp(portal.RxOtpRequest(phone=phone), None)), sent
 
 
 def test_d91_portal_otp_not_stored_is_not_sent(db, monkeypatch):
@@ -825,6 +827,268 @@ def test_d91_portal_otp_unknown_number_stays_generic(db, monkeypatch):
 
     monkeypatch.setattr(portal, "_get_db", lambda: db)
     monkeypatch.setattr(portal, "_check_rate", lambda *_a, **_k: None)
-    monkeypatch.setattr(deps, "get_customer_repository", lambda: SimpleNamespace(find_by_mobile=lambda m: None))
+    monkeypatch.setattr(deps, "get_customer_repository", lambda: CustomerRepository(db.customers))
     out = asyncio.run(portal.request_rx_otp(portal.RxOtpRequest(phone="9988776655"), None))
     assert out["ok"] is True and db.notification_logs.count_documents({}) == 0
+
+
+def _fail_customer_reads(monkeypatch, db):
+    from pymongo.collection import Collection
+    from pymongo.errors import AutoReconnect
+
+    real = Collection.find_one
+
+    def _find_one(self, *a, **k):
+        if self.database.name == db.name and self.name == "customers":
+            raise AutoReconnect("injected: customers read outage")
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(Collection, "find_one", _find_one)
+
+
+@pytest.mark.parametrize("phone", [PHONE, "9988776655"])
+def test_r2a_portal_otp_customer_read_outage_is_not_sent_for_any_number(db, monkeypatch, phone):
+    """Codex 1419 R2-A: the real CustomerRepository swallowed a native read
+    error as "no such customer", so the door answered 200 "a code has been
+    sent" during an outage. Registered and unknown numbers both get the
+    honest 503 (no enumeration), and nothing is stored."""
+    from fastapi import HTTPException
+
+    _fail_customer_reads(monkeypatch, db)
+    with pytest.raises(HTTPException) as exc:
+        _otp(db, monkeypatch, phone=phone)
+    assert exc.value.status_code == 503
+    assert exc.value.detail == "The code could not be sent. Try again or ask the shop"
+    assert db.notification_logs.count_documents({}) == 0 and db.otp_codes.count_documents({}) == 0
+
+
+def test_r2a_strict_customer_lookup_raises_but_the_default_stays_fail_soft(db, monkeypatch):
+    repo = CustomerRepository(db.customers)
+    assert repo.find_by_mobile(PHONE, strict=True)["customer_id"] == CID
+    assert repo.find_by_mobile("9988776655", strict=True) is None  # a genuine miss
+    _fail_customer_reads(monkeypatch, db)
+    with pytest.raises(Exception):
+        repo.find_by_mobile(PHONE, strict=True)
+    assert repo.find_by_mobile(PHONE) is None  # every other caller unchanged
+
+
+# ---------------------------------------------------------------------------
+# Codex 1419 R2-B: a failed status write never leaves a phantom "sent" survey
+# ---------------------------------------------------------------------------
+
+
+def _fail_nps_updates(monkeypatch, only_status=None):
+    from pymongo.collection import Collection
+    from pymongo.errors import AutoReconnect
+
+    real = Collection.update_one
+
+    def _update(self, q, u, *a, **k):
+        if self.name == "nps_responses" and (
+            only_status is None or (u.get("$set") or {}).get("status") == only_status
+        ):
+            raise AutoReconnect("injected: nps status write lost")
+        return real(self, q, u, *a, **k)
+
+    monkeypatch.setattr(Collection, "update_one", _update)
+
+
+def _dashboard_total():
+    return asyncio.run(mkt_mod.get_nps_dashboard(store_id="ZZ-S1", current_user=dict(USER)))["total_surveys"]
+
+
+def _auto_nps(oid):
+    from api.services import nps_trigger
+
+    asyncio.run(nps_trigger.trigger_nps_on_delivery(
+        {"order_id": oid, "customer_id": CID, "store_id": "ZZ-S1"}, dict(USER)))
+
+
+@pytest.mark.parametrize("fault", ["refused", "storage"])
+def test_r2b_nps_not_stored_and_not_sent_mark_lost_is_no_phantom(db, monkeypatch, fault):
+    """Queue refused / insert failed AND the NOT_SENT write failed: the answer
+    is 'not sent', the survey row is PENDING_SEND (never SENT), the NPS screen
+    does not count it and the customer's next delivery still gets a survey."""
+    from fastapi import HTTPException
+
+    from api.services import nps_trigger
+
+    monkeypatch.setattr(nps_trigger, "_get_db", lambda: db)
+    oid = _nps_order(db)
+    with monkeypatch.context() as m:
+        _fault(m, fault, "NPS_SURVEY")
+        _fail_nps_updates(m, only_status="NOT_SENT")
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(mkt_mod.send_nps_survey(oid, current_user=dict(USER)))
+    assert exc.value.status_code in (422, 503) and exc.value.detail.startswith("Message not sent")
+    assert [r["status"] for r in db.nps_responses.find({"order_id": oid})] == ["PENDING_SEND"]
+    assert db.notification_logs.count_documents({}) == 0
+    assert _dashboard_total() == 0
+    _auto_nps("ZZ-ORD-NEXT")
+    assert [r["status"] for r in db.nps_responses.find({"order_id": "ZZ-ORD-NEXT"})] == ["SENT"]
+    assert _dashboard_total() == 1
+
+
+def test_r2b_nps_stored_but_sent_mark_lost_still_counts_once(db, monkeypatch):
+    """The message IS stored but the SENT write is lost: the door says sent,
+    the queue holds one message tied to the survey, the screen counts it once
+    and the 30-day window still protects the customer from a second survey."""
+    from api.services import nps_trigger
+
+    monkeypatch.setattr(nps_trigger, "_get_db", lambda: db)
+    oid = _nps_order(db)
+    with monkeypatch.context() as m:
+        _fail_nps_updates(m)
+        out = asyncio.run(mkt_mod.send_nps_survey(oid, current_user=dict(USER)))
+    assert out["message"] == "NPS survey sent"
+    assert [r["status"] for r in db.nps_responses.find({"order_id": oid})] == ["PENDING_SEND"]
+    assert db.notification_logs.count_documents({"dedupe_ref": "nps:" + out["nps_id"]}) == 1
+    assert _dashboard_total() == 1
+    _auto_nps("ZZ-ORD-NEXT")
+    assert db.nps_responses.count_documents({"order_id": "ZZ-ORD-NEXT"}) == 0
+
+
+def test_r2b_nps_crash_after_the_survey_row_is_not_counted(db, monkeypatch):
+    """A survey row with no stored message (process died before queueing) is
+    not a sent survey anywhere."""
+    from api.services import nps_trigger
+
+    monkeypatch.setattr(nps_trigger, "_get_db", lambda: db)
+    db.nps_responses.insert_one({"nps_id": "ZZ-NPS-CRASH", "store_id": "ZZ-S1", "customer_id": CID,
+                                 "order_id": "ZZ-ORD-CRASH", "status": "PENDING_SEND",
+                                 "survey_sent_at": "2099-01-01T00:00:00+00:00", "created_at": "2099-01-01"})
+    assert _dashboard_total() == 0
+    _auto_nps("ZZ-ORD-NEXT")
+    assert [r["status"] for r in db.nps_responses.find({"order_id": "ZZ-ORD-NEXT"})] == ["SENT"]
+
+
+def test_r2b_nps_survey_row_not_saved_queues_nothing(db, monkeypatch):
+    from fastapi import HTTPException
+    from pymongo.collection import Collection
+    from pymongo.errors import AutoReconnect
+
+    oid = _nps_order(db)
+    real = Collection.insert_one
+
+    def _insert(self, doc, *a, **k):
+        if self.name == "nps_responses":
+            raise AutoReconnect("injected: survey row write failed")
+        return real(self, doc, *a, **k)
+
+    monkeypatch.setattr(Collection, "insert_one", _insert)
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(mkt_mod.send_nps_survey(oid, current_user=dict(USER)))
+    assert exc.value.status_code == 503
+    assert db.notification_logs.count_documents({}) == 0
+
+
+def test_r2b_nps_queue_read_failure_is_an_error_not_a_false_count(db, monkeypatch):
+    from pymongo.collection import Collection
+    from pymongo.errors import AutoReconnect
+
+    db.nps_responses.insert_one({"nps_id": "ZZ-NPS-P", "store_id": "ZZ-S1", "customer_id": CID,
+                                 "order_id": "ZZ-ORD-P", "status": "PENDING_SEND", "created_at": "2099-01-01"})
+    real = Collection.find
+
+    def _find(self, *a, **k):
+        if self.name == "notification_logs":
+            raise AutoReconnect("injected: queue read outage")
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(Collection, "find", _find)
+    with pytest.raises(AutoReconnect):
+        _dashboard_total()
+
+
+def test_nps_dashboard_without_a_database_is_503_not_zeros(monkeypatch):
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(mkt_mod, "_get_db", lambda: None)
+    monkeypatch.setattr(mkt_mod, "validate_store_access", lambda *_a, **_k: "ZZ-S1")
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(mkt_mod.get_nps_dashboard(store_id="ZZ-S1", current_user=dict(USER)))
+    assert exc.value.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# D98: wording that is not set up is refused, never a placeholder, never sent
+# ---------------------------------------------------------------------------
+
+
+def test_d98_repair_ready_without_wording_moves_to_ready_but_is_not_sent(db, monkeypatch):
+    assert "repair_ready" not in ns.TEMPLATES  # the real state: no wording set up
+    jid, out = _repair_ready(db, monkeypatch)
+    assert out["status"] == "READY"
+    assert out["ready_message"] == {
+        "sent": False,
+        "error": "The ready message was not sent: No approved wording is set up for "
+        "the repair ready message. Tell the customer another way.",
+    }
+    assert db.notification_logs.count_documents({}) == 0
+
+
+def test_d98_cl_reorder_reminder_without_wording_is_422(db, monkeypatch):
+    from fastapi import HTTPException
+
+    from api.routers import analytics_v2 as av2
+
+    monkeypatch.setattr(av2, "_get_db", lambda: db)
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(av2.cl_subscription_reminder(CID, current_user=dict(USER)))
+    assert exc.value.status_code == 422
+    assert exc.value.detail == (
+        "Message not sent: No approved wording is set up for the contact lens reorder reminder."
+    )
+    assert db.notification_logs.count_documents({}) == 0
+
+
+def test_d98_pool_otp_without_wording_could_not_be_sent_and_the_code_is_dead(db):
+    out = asyncio.run(rail.send_pool_redemption_otp(
+        db, primary_customer_id=CID, household_id="ZZ-H", amount=100, requested_by="ZZ-MGR"))
+    assert out == {
+        "ok": False,
+        "reason": "The code could not be sent: No approved wording is set up for "
+        "the family wallet redemption code.",
+    }
+    assert db.notification_logs.count_documents({}) == 0
+    assert [r["status"] for r in db.pool_otp.find({})] == ["NOT_SENT"]
+
+
+def test_d98_pool_otp_with_wording_is_issued(db, monkeypatch):
+    monkeypatch.setitem(ns.TEMPLATES, "POOL_REDEEM_OTP", "Code {otp} for {amount} points")
+    out = asyncio.run(rail.send_pool_redemption_otp(
+        db, primary_customer_id=CID, household_id="ZZ-H", amount=100, requested_by="ZZ-MGR"))
+    assert out["ok"] is True
+    assert [r["status"] for r in db.pool_otp.find({})] == ["PENDING"]
+    assert db.notification_logs.count_documents({"template_id": "POOL_REDEEM_OTP"}) == 1
+
+
+def test_d98_single_send_door_refuses_a_template_with_no_wording(db):
+    from fastapi import HTTPException
+
+    res = asyncio.run(ns.send_notification(
+        store_id="ZZ-S1", customer_id=CID, customer_phone=PHONE, customer_name="Zz",
+        template_id="ZZ_NO_SUCH_TEMPLATE", category="SERVICE"))
+    assert res["status"] == "REFUSED" and res["refused_reason"] == "no_wording"
+    with pytest.raises(HTTPException) as exc:
+        mkt_mod._queued_or_raise(res)
+    assert exc.value.status_code == 422
+    assert exc.value.detail == "Message not sent: No approved wording is set up for ZZ_NO_SUCH_TEMPLATE."
+    assert db.notification_logs.count_documents({}) == 0
+
+
+def test_d98_drain_never_sends_an_old_placeholder_row(db, provider, monkeypatch):
+    db.notification_logs.insert_one({
+        "notification_id": "ZZ-OLD-PH", "customer_id": CID, "customer_phone": PHONE, "channel": "SMS",
+        "template_id": "repair_ready", "message": "[Template repair_ready not found]",
+        "status": "PENDING", "category": "SERVICE", "consent_basis": "transactional"})
+    sms = []
+
+    async def _sms(*a, **_k):
+        sms.append(a)
+        return SimpleNamespace(ok=True, status="SIMULATED", provider_id="SPY", error=None)
+
+    monkeypatch.setattr(mega_mod, "send_sms", _sms)
+    _drain(db)
+    assert sms == [] and provider == []
+    assert db.notification_logs.find_one({"notification_id": "ZZ-OLD-PH"})["status"] == "FAILED"

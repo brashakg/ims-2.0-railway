@@ -19,11 +19,11 @@ class CustomerRepository(BaseRepository):
     def id_field(self) -> str:
         return "customer_id"
     
-    def find_by_mobile(self, mobile: str) -> Optional[Dict]:
+    def find_by_mobile(self, mobile: str, strict: bool = False) -> Optional[Dict]:
         # TechCherry-imported customers store the number under `phone`;
         # natively-created docs use `mobile`. Match either so a lookup by
         # number resolves both data sources.
-        return self.find_one({"$or": [{"phone": mobile}, {"mobile": mobile}]})
+        return self.find_one({"$or": [{"phone": mobile}, {"mobile": mobile}]}, strict=strict)
     
     def find_by_patient_mobile(self, mobile: str) -> Optional[Dict]:
         """The account that carries `mobile` as a FAMILY MEMBER's number

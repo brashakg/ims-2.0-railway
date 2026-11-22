@@ -25,6 +25,7 @@ from datetime import datetime
 import os
 import uuid
 import logging
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -339,6 +340,45 @@ def queue_notification_row(
     return result
 
 
+# What staff read when a message has no wording set up (D98).
+_MESSAGE_LABELS = {
+    "repair_ready": "the repair ready message",
+    "CL_REORDER_REMINDER": "the contact lens reorder reminder",
+    "POOL_REDEEM_OTP": "the family wallet redemption code",
+}
+
+
+def not_sent_reason(res) -> Optional[str]:
+    """THE one reading of the queue writer's verdict for staff (D91, D98):
+    None when the message is stored; otherwise why it was not sent."""
+    res = res if isinstance(res, dict) else {}
+    if res.get("status") == "REFUSED":
+        if res.get("refused_reason") == "no_wording":
+            tid = res.get("template_id") or "this message"
+            return f"No approved wording is set up for {_MESSAGE_LABELS.get(tid, tid)}"
+        return (
+            "the template needs "
+            + ", ".join(res.get("missing_variables") or ["a value"])
+            + " and it was not supplied"
+        )
+    if not res.get("persisted"):
+        return "it could not be saved to the queue"
+    return None
+
+
+def raise_unless_stored(res) -> dict:
+    """HTTP doors: a refused message is a 422, an unsaved one a 503, never
+    "sent" / "queued" (Codex 1419 round 1, D91, D98)."""
+    why = not_sent_reason(res)
+    if why is None:
+        return res
+    from fastapi import HTTPException
+
+    if res.get("status") == "REFUSED":
+        raise HTTPException(status_code=422, detail=f"Message not sent: {why}.")
+    raise HTTPException(status_code=503, detail=f"Message not sent: {why}. Try again.")
+
+
 async def send_notification(
     store_id: str,
     customer_id: str,
@@ -391,10 +431,26 @@ async def send_notification(
                 except Exception as _short_exc:  # noqa: BLE001
                     logger.debug("shorturl wrap skipped: %s", _short_exc)
 
+    # D98: no wording set up for this message (no built-in text and no
+    # switched-on saved template) -> REFUSED. It is never stored as the text
+    # "[Template X not found]" and no door may answer "sent" for it.
+    content = _template_content(template_id)
+    if not content:
+        logger.warning("Notification %s NOT queued: no approved wording", template_id)
+        return {
+            "notification_id": None,
+            "template_id": template_id,
+            "customer_id": customer_id,
+            "status": "REFUSED",
+            "refused_reason": "no_wording",
+            "missing_variables": [],
+            "dispatched": False,
+            "persisted": False,
+        }
+
     # Build message from template. D56: a message with an unfilled
     # placeholder is NEVER queued (the customer would read "{order_number}").
-    content = _template_content(template_id)
-    missing = unfilled_placeholders(content, variables) if content else []
+    missing = unfilled_placeholders(content, variables)
     # The sending shop's own name / phone are filled from its store record when
     # the caller did not pass them (campaign and reminder segments carry only
     # the customer's name). A store that cannot be read leaves them missing.

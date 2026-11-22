@@ -500,14 +500,21 @@ async def request_rx_otp(payload: RxOtpRequest, request: Request):
         # D91: no lookup possible, for any number alike (no enumeration).
         raise HTTPException(status_code=503, detail=_OTP_NOT_SENT)
 
+    # strict: a customers read that FAILS raises (the repository's default
+    # reads a failure as "no such customer", which answered "a code has been
+    # sent" during an outage, Codex 1419 R2-A). A genuine miss stays generic.
     customer = None
-    if cust_repo is not None:
+    try:
         for candidate in {phone_norm, phone_norm[-10:], payload.phone.strip()}:
             if not candidate:
                 continue
-            customer = cust_repo.find_by_mobile(candidate)
+            customer = cust_repo.find_by_mobile(candidate, strict=True)
             if customer:
                 break
+    except Exception as exc:  # noqa: BLE001
+        # D91: the lookup is down, for any number alike (no enumeration).
+        logger.warning("[PORTAL] customer lookup failed for OTP request: %s", exc)
+        raise HTTPException(status_code=503, detail=_OTP_NOT_SENT)
 
     if not customer:
         # No such customer -- still return generic success (no enumeration).

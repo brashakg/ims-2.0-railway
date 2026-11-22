@@ -677,7 +677,7 @@ def test_pool_otp_issue_and_verify(monkeypatch):
                 "status": "PENDING",
             }
         )
-        return {"notification_id": "N1", "dispatched": False, "status": "PENDING"}
+        return {"notification_id": "N1", "dispatched": False, "status": "PENDING", "persisted": True}
 
     monkeypatch.setattr(ns, "send_notification", _cap)
 
@@ -721,7 +721,7 @@ def test_pool_otp_atomic_single_winner(monkeypatch):
     async def _cap(**kw):
         if kw.get("category") == "OTP":
             code_box["code"] = (kw.get("variables") or {}).get("otp")
-        return {"notification_id": "N1", "dispatched": False, "status": "PENDING"}
+        return {"notification_id": "N1", "dispatched": False, "status": "PENDING", "persisted": True}
 
     monkeypatch.setattr(ns, "send_notification", _cap)
     out = _run(

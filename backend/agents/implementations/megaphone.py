@@ -1097,6 +1097,19 @@ class MegaphoneAgent(JarvisAgent):
                     stats["cancelled"] += 1
                     continue
 
+            # D98: a row stored before the writer refused missing wording
+            # carries the placeholder "[Template X not found]"; it is never
+            # sent to a customer.
+            if message.startswith("[Template ") and message.endswith(" not found]"):
+                self._update_status(
+                    notif_coll,
+                    row,
+                    status="FAILED",
+                    error="no approved wording is set up for this message",
+                )
+                stats["failed"] += 1
+                continue
+
             # EMAIL rows need an address + message (no phone); the phone
             # channels need a phone + message. MEGAPHONE only drains
             # pre-populated messages — populating is notification_service's job.

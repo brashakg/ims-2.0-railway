@@ -189,7 +189,7 @@ async def fan_out_campaign(
                     {
                         "customer_id": cid,
                         "status": "failed",
-                        "reason": "unfilled_placeholder",
+                        "reason": res.get("refused_reason") or "unfilled_placeholder",
                         "missing_variables": res.get("missing_variables"),
                     }
                 )

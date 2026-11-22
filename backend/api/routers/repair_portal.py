@@ -108,10 +108,9 @@ async def _ready_sms(job: Dict[str, Any]) -> Dict[str, Any]:
     stored message is {"sent": True}; a refused or unsaved one says it was
     not sent and why. The READY transition itself is already committed, so
     this never raises."""
-    why = "it could not be saved to the queue"
-    try:
-        from ..services import notification_service as ns
+    from ..services import notification_service as ns
 
+    try:
         res = await ns.send_notification(
             store_id=job.get("store_id") or "",
             customer_id=job.get("customer_id") or "",
@@ -126,12 +125,8 @@ async def _ready_sms(job: Dict[str, Any]) -> Dict[str, Any]:
         )
     except Exception:  # noqa: BLE001
         res = {}
-    res = res if isinstance(res, dict) else {}
-    if res.get("status") == "REFUSED":
-        why = "the message wording needs " + ", ".join(
-            res.get("missing_variables") or ["a value this job does not have"]
-        )
-    elif res.get("persisted"):
+    why = ns.not_sent_reason(res)
+    if why is None:
         return {"sent": True, "notification_id": res.get("notification_id")}
     return {
         "sent": False,

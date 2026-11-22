@@ -83,7 +83,7 @@ class FakeCustomerRepo:
     def __init__(self, customers: List[Dict[str, Any]]):
         self._customers = customers
 
-    def find_by_mobile(self, mobile: str) -> Optional[Dict[str, Any]]:
+    def find_by_mobile(self, mobile: str, strict: bool = False) -> Optional[Dict[str, Any]]:
         for c in self._customers:
             if mobile in (c.get("mobile"), c.get("phone")):
                 return c

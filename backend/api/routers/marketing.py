@@ -41,7 +41,7 @@ def _check_notification_rate(user_id: str) -> Optional[str]:
 
 from ..dependencies import get_db as _dep_get_db
 from ..dependencies import validate_store_access
-from ..services.notification_service import send_notification, populate_template
+from ..services.notification_service import send_notification, raise_unless_stored
 from ..utils.ist import ist_date_str
 
 router = APIRouter()
@@ -121,23 +121,9 @@ def _enforce_promo_window(template_id: str) -> None:
 
 def _queued_or_raise(result: dict) -> dict:
     """The queue writer's verdict, told truthfully to the caller (Codex 1419
-    round 1): a message refused for an unfilled placeholder is a 422 (D56),
-    a row that did not reach storage is a 503, never "Notification queued"."""
-    if (result or {}).get("status") == "REFUSED":
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "Message not sent: the template needs "
-                + ", ".join(result.get("missing_variables") or [])
-                + " and it was not supplied."
-            ),
-        )
-    if not (result or {}).get("persisted"):
-        raise HTTPException(
-            status_code=503,
-            detail="Message not sent: it could not be saved to the queue. Try again.",
-        )
-    return result
+    round 1, D91, D98): refused (unfilled placeholder or no wording set up) is
+    a 422, a row that did not reach storage is a 503, never "queued"."""
+    return raise_unless_stored(result)
 
 
 # Indian mobile: 10 digits starting with 6-9.
@@ -336,7 +322,7 @@ async def send_bulk_notifications(
                 triggered_by=current_user.get("user_id", "unknown"),
             )
             if res.get("status") == "REFUSED":
-                results.append({"phone": r.phone, "status": "failed", "error": "unfilled_placeholder", "result": res})
+                results.append({"phone": r.phone, "status": "failed", "error": res.get("refused_reason") or "refused", "result": res})
             elif not res.get("persisted"):
                 results.append({"phone": r.phone, "status": "failed", "error": "not_saved", "result": res})
             else:
@@ -973,52 +959,28 @@ async def send_nps_survey(
     )
     store_id = order.get("store_id", current_user.get("active_store_id", ""))
 
-    nps_id = f"NPS-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
-
-    nps_entry = {
-        "nps_id": nps_id,
-        "store_id": store_id,
-        "customer_id": order.get("customer_id", ""),
-        "customer_name": customer.get("name", order.get("customer_name", "")),
-        "order_id": order_id,
-        "score": None,
-        "feedback": None,
-        "status": "SENT",
-        "survey_sent_at": utc_now_iso(),
-        "responded_at": None,
-        "created_at": utc_now_iso(),
-    }
-
-    db.get_collection("nps_responses").insert_one(nps_entry)
-
-    store = db.get_collection("stores").find_one({"store_id": store_id}) or {}
+    # ONE survey sender for this door and the automatic trigger: the row is
+    # PENDING_SEND until its message is stored (Codex 1419 R2-B), so a failed
+    # status write can never leave a phantom "sent" survey.
+    from ..services.nps_trigger import send_survey
 
     try:
-        res = await send_notification(
+        res = await send_survey(
+            db,
+            order={**order, "order_id": order_id},
+            customer=customer,
             store_id=store_id,
-            customer_id=order.get("customer_id", ""),
-            customer_phone=customer.get("mobile", ""),
-            customer_name=customer.get("name", "Customer"),
-            template_id="NPS_SURVEY",
-            channel="WHATSAPP",
-            variables={
-                "store_name": store.get("name", "Better Vision"),
-                "survey_link": f"https://bettervision.in/nps/{nps_id}",
-            },
-            category="SERVICE",
             triggered_by=current_user.get("user_id", "unknown"),
-            related_entity_type="order",
-            related_entity_id=order_id,
+            auto=False,
         )
-    except Exception as exc:  # noqa: BLE001 - told below as "not sent"
-        logger.warning("NPS survey %s: queueing failed: %s", nps_id, exc)
-        res = {}
-    # D91: a survey whose message was not stored is NOT_SENT, never "sent".
-    from ..services.nps_trigger import mark_nps_not_sent
-
-    if mark_nps_not_sent(db, nps_id, res):
-        _queued_or_raise(res)
-
+    except Exception as exc:  # noqa: BLE001 - the survey row itself was not saved
+        logger.warning("NPS survey for %s: survey row not saved: %s", order_id, exc)
+        raise HTTPException(
+            status_code=503,
+            detail="Message not sent: the survey could not be saved. Try again.",
+        )
+    _queued_or_raise(res)
+    nps_id = res["nps_id"]
     return {"message": "NPS survey sent", "nps_id": nps_id}
 
 
@@ -1098,20 +1060,21 @@ async def get_nps_dashboard(
     active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id", "")
     db = _get_db()
     if db is None:
-        return {
-            "avg_score": 0,
-            "promoters": 0,
-            "passives": 0,
-            "detractors": 0,
-            "response_rate": 0,
-            "responses": [],
-        }
+        # An unreadable database is not "no surveys" (the screen says it
+        # failed to load instead of showing zeros).
+        raise HTTPException(status_code=503, detail="Database unavailable")
 
     coll = db.get_collection("nps_responses")
-    all_surveys = list(
-        coll.find({"store_id": active_store, "status": {"$ne": "NOT_SENT"}})
-        .sort("created_at", -1)
-        .limit(200)
+    from ..services.nps_trigger import counted_surveys
+
+    # A survey counts only when its message was stored (one rule, R2-B).
+    all_surveys = counted_surveys(
+        db,
+        list(
+            coll.find({"store_id": active_store, "status": {"$ne": "NOT_SENT"}})
+            .sort("created_at", -1)
+            .limit(200)
+        ),
     )
 
     responded = [s for s in all_surveys if s.get("score") is not None]
