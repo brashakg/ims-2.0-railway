@@ -934,6 +934,29 @@ def drawer_counts(db, drawer: Dict[str, Any], own: Optional[str] = None) -> Dict
     return out
 
 
+def banked_before_count(db, drawer: Dict[str, Any], own: Optional[str] = None) -> int:
+    """D127 (one count, one figure): the bank deposits recorded on the CLOSED
+    Cash Register sessions of a drawer that is not counted yet, leaving out
+    the close ``own`` (the one counting it now passes its own deposit).
+
+    The drawer is still OPEN, so none of these closes made its count: closed
+    without a sheet, or their till link failed. Their deposits left this
+    drawer before its count and are taken off the count's expected cash.
+    Left out, the drawer's count read SHORT by cash recorded as banked (in
+    the totals and at its Z-Read lock: a note and an alert), while every
+    register close balanced. ``close_as_count`` carries such a deposit only
+    AFTER the count; this is the window before it, so each deposit is taken
+    off once. RAISES when the read fails: read as "none", the count would
+    store that false shortage."""
+    did = drawer.get("session_id") or drawer.get("_id")
+    closes = db.get_collection(_REGISTER_SESSIONS).find({"till_session_id": did, "status": "CLOSED"})
+    return sum(
+        _to_int_paisa_from_rupees(c.get("bank_deposit") or 0)
+        for c in closes
+        if c.get("session_id") != own
+    )
+
+
 def _charged(db, drawers: List[Dict[str, Any]], own: Optional[str] = None) -> List[Dict[str, Any]]:
     """D60 / D127(3): what every count of these drawers was charged with --
     each drawer's own count and every later sheet on it -- for ``_own_share``
@@ -1536,8 +1559,16 @@ def blind_submit(
     # A Cash Register close that counts the drawer may record cash banked
     # out of it (D127: one count, one figure). Left out here, the till's own
     # count of that drawer read short by the deposit -- in the totals and at
-    # its Z-Read lock -- where the register close it came from balanced.
-    deposit = max(int(bank_deposit_paisa or 0), 0)
+    # its Z-Read lock -- where the register close it came from balanced. So
+    # do the drawer's EARLIER register closes that did not count it (no
+    # sheet, or their till link failed): their deposits left it before this
+    # count. Unreadable is refused, never read as "none".
+    try:
+        banked_before = banked_before_count(db, session, origin)
+    except Exception:  # noqa: BLE001
+        logger.exception("Register closes unreadable before counting %s", session_id)
+        return {"ok": False, "error": "drawer_read_failed", "http": 503}
+    deposit = max(int(bank_deposit_paisa or 0), 0) + max(banked_before, 0)
     if deposit:
         exp = {**exp, "expected_cash_paisa": int(exp["expected_cash_paisa"]) - deposit}
         exp["negative_expected_advisory"] = exp["expected_cash_paisa"] < 0
@@ -1993,7 +2024,10 @@ def shared_counted_paisa(till_link: Optional[Dict[str, Any]]) -> Optional[int]:
 
 
 def count_by_another(
-    till_link: Optional[Dict[str, Any]], opened_at: Any, own: Optional[str] = None
+    till_link: Optional[Dict[str, Any]],
+    opened_at: Any,
+    own: Optional[str] = None,
+    opened_on: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """D120: the drawer's count that a Cash Register close (session id
     ``own``) did NOT make itself, as ``{"paisa", "at"}``, or None: a count
@@ -2020,9 +2054,14 @@ def count_by_another(
     than one drawer, and its sheet may hold more than that one drawer's cash
     (D53): nothing is compared for it, and the next close on the drawer is
     not compared either (``close_as_count``: UNKNOWN, D127(2)). A session
-    that opened on that drawer -- at or after its opening -- lives on it and
-    is judged from its count, also when the count was made while it was
-    open."""
+    that opened on that drawer lives on it and is judged from its count, also
+    when the count was made while it was open. WHICH drawer a session opened
+    on is the one its own open stored (``opened_on``, the register row's
+    ``till_session_id``), never a comparison of the two instants: a register
+    open that CREATES the drawer stamps its own instant first, so the session
+    that opened the drawer read as one that began before it. Only a session
+    whose open named no drawer (its link failed, or older code) is placed by
+    the instants."""
     link = till_link or {}
     at = (link.get("session") or {}).get("blind_submitted_at")
     origin = (link.get("session") or {}).get("blind_count_origin")
@@ -2037,10 +2076,14 @@ def count_by_another(
     # may hold another drawer's cash (Codex's D53 replay: Rs 1,000 + Rs 3,000
     # on one sheet), so IMS cannot tell its drawer and compares nothing. One
     # that opened on this drawer lives on it and is judged from its count.
+    drawer_id = link.get("session_id") or (link.get("session") or {}).get("session_id")
     drawer_opened = _instant((link.get("session") or {}).get("opened_at"))
-    spans = int(link.get("drawers_on_day") or 1) > 1 and (
-        drawer_opened is None or opened_at < drawer_opened
+    on_drawer = (
+        opened_on == drawer_id
+        if opened_on
+        else drawer_opened is not None and opened_at >= drawer_opened
     )
+    spans = int(link.get("drawers_on_day") or 1) > 1 and not on_drawer
     if origin == own or (while_open and (not origin or spans)):
         return None
     return {"paisa": paisa, "at": at}
@@ -2096,6 +2139,22 @@ def count_awaiting_its_note(
 # ---------------------------------------------------------------------------
 
 
+def _register_close_note(db, origin: Any) -> str:
+    """The note stored by the CLOSED Cash Register session ``origin`` that
+    made a drawer's count, or "" (not a register's count, no note, or the
+    read failed)."""
+    if origin in (None, COUNT_ORIGIN_TILL, COUNT_ORIGIN_DAY_END):
+        return ""
+    try:
+        close = db.get_collection(_REGISTER_SESSIONS).find_one(
+            {"session_id": origin, "status": "CLOSED"}
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Register close unreadable before locking (count by %s)", origin)
+        return ""
+    return str((close or {}).get("closing_note") or "").strip()
+
+
 def lock_session(
     db,
     session_id: str,
@@ -2149,6 +2208,13 @@ def lock_session(
         tolerance_paisa = get_variance_tolerance_paisa(store_id=store_id)
     clean_note = str(variance_note or "").strip()
     out_of_band = needs_variance_note(variance_paisa, tolerance_paisa)
+    if out_of_band and not clean_note:
+        # D128(1): a count's difference is explained ONCE, by the door that
+        # owns the count. A count MADE by a Cash Register close beyond the
+        # band was noted (and alerted, under this count's id) at that close;
+        # its note is the lock's, never asked a second time. Unreadable, or
+        # a close that took no note, asks it here as before.
+        clean_note = _register_close_note(db, session.get("blind_count_origin"))
     if out_of_band and not clean_note:
         return {
             "ok": False,
@@ -2637,13 +2703,16 @@ def build_zread(db, session_id: str) -> Dict[str, Any]:
         or _denom.not_captured_block(int(counted or 0)),
         "face_ledger": _own_face_ledger(db, session),
         "by_mode": session.get("by_mode") or {},
-        # The Z-Read identity: opening + cash_sales - cash_refunds - payouts =
-        # expected. cash_sales is GROSS collected; cash_refunds is the recorded
+        # The Z-Read identity: opening + cash_sales - cash_refunds - payouts -
+        # bank_deposit = expected. cash_sales is GROSS collected; cash_refunds is the recorded
         # cash refunds auto-deducted (a DISTINCT line from the manual payouts, so
         # a refund is never silently merged into "cash paid out").
         "cash_sales_paisa": cash_sales,
         "cash_refunds_paisa": cash_refunds,
         "cash_payouts_paisa": payouts,
+        # D127: cash banked out of the drawer on its register closes up to
+        # its count (0 on a drawer nothing banked from).
+        "bank_deposit_paisa": int(session.get("bank_deposit_paisa") or 0),
         # AUTO_EXPENSES on sessions submitted after the 2026-08-25 ruling;
         # None on older sessions whose payouts were hand-keyed.
         "cash_payouts_source": session.get("cash_payouts_source"),

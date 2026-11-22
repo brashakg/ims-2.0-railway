@@ -42,6 +42,9 @@ export interface TillSession {
   blind_count_paisa?: number | null;
   blind_denominations?: DenominationLine[];
   cash_payouts_paisa?: number | null;
+  // Cash banked out of the drawer on its Cash Register closes up to its
+  // count (D127); taken off its expected cash.
+  bank_deposit_paisa?: number | null;
   // Revealed only to managers/finance (redacted for cashiers pre-lock).
   expected_cash_paisa?: number | null;
   // GROSS cash collected; recorded customer cash refunds are a SEPARATE line
@@ -94,6 +97,7 @@ export interface ZRead {
   cash_sales_paisa: number | null;
   cash_refunds_paisa?: number | null;
   cash_payouts_paisa: number | null;
+  bank_deposit_paisa?: number | null;
   refund_double_entry_advisory?: boolean | null;
   negative_expected_advisory?: boolean | null;
   negative_expected_message?: string | null;

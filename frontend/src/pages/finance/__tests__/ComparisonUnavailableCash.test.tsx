@@ -88,6 +88,29 @@ describe('Blind EOD Tally - D86(3)', () => {
   });
 });
 
+describe('Blind EOD Tally - D127 one count, one figure', () => {
+  it('a drawer cash was banked from shows the deposit in its Z-Read sum', async () => {
+    api.list.mockResolvedValue([drawer({
+      variance_status: 'BALANCED', expected_cash_paisa: 200000, variance_paisa: 0,
+      cash_sales_paisa: 300000, cash_refunds_paisa: 0, cash_payouts_paisa: 0,
+      blind_count_paisa: 200000, bank_deposit_paisa: 100000,
+    })]);
+    render(<BlindEodTallyPage />);
+    const label = await screen.findByText('Bank deposit');
+    expect(within(label.parentElement as HTMLElement).getByText('Rs 1000.00')).toBeTruthy();
+  });
+
+  it('CONTROL: a drawer nothing was banked from shows no deposit line', async () => {
+    api.list.mockResolvedValue([drawer({
+      variance_status: 'BALANCED', expected_cash_paisa: 300000, variance_paisa: 0,
+      cash_sales_paisa: 300000, cash_refunds_paisa: 0, cash_payouts_paisa: 0, bank_deposit_paisa: 0,
+    })]);
+    render(<BlindEodTallyPage />);
+    await screen.findByText('Cash sales (gross)');
+    expect(screen.queryByText('Bank deposit')).toBeNull();
+  });
+});
+
 const row = (over: Record<string, unknown>) => ({
   session_id: 'TILL-C', source: 'BLIND_EOD', store_id: 'BV-1', store_name: 'BV-1',
   session_date: today, shift: 'PM', opening_float: 0, cash_sales: 3000, cash_refunds: 0,

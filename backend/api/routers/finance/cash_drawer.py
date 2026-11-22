@@ -361,7 +361,10 @@ async def close_cash_register(
     # a later sheet of an earlier register session included -- less a bank
     # deposit recorded after it on a close with no sheet, plus the day so
     # far minus what every count of the day was charged with (D60).
-    standing = till_service.count_by_another(till_link, _to_dt(start_iso), body.session_id)
+    standing = till_service.count_by_another(
+        till_link, _to_dt(start_iso), body.session_id,
+        opened_on=session.get("till_session_id"),
+    )
     moved = None
     banked_since = 0
     count_noted = False
@@ -544,10 +547,22 @@ async def close_cash_register(
         else None
     )
     judged_band_paisa = cash_denom.rupees_to_paisa(tolerance_rupees)
+    # D128(1) on the several-drawer path too: the drawer's own count is
+    # judged (note and alert) here only when THIS close made it (or older
+    # code stored no door). A count made through another door -- the Blind
+    # EOD Tally, Day-End, another register's close -- is explained by that
+    # door; this close only shows it and owes its alert under the count's
+    # id (below), as a D120 close does. Judged here, a count on the Blind
+    # EOD Tally refused the register close for a note it never owed.
+    counted_by_another_door = several_drawers and (till_link.get("session") or {}).get(
+        "blind_count_origin"
+    ) not in (None, body.session_id)
     if several_drawers:
         judged_variance_paisa, drawer_band = till_service.unlocked_count_variance(
             till_link.get("session")
         )
+        if counted_by_another_door:
+            judged_variance_paisa = None
         if drawer_band is not None:
             judged_band_paisa = drawer_band
 
@@ -566,7 +581,7 @@ async def close_cash_register(
     # count: that one still needs the note here, so a sheet retyped to
     # balance does not escape it.
     count_owed = None
-    if (standing is not None and not count_noted) or resheeted:
+    if (standing is not None and not count_noted) or resheeted or counted_by_another_door:
         count_owed = till_service.count_awaiting_its_note(
             till_link.get("session"), body.session_id, judged_band_paisa
         )

@@ -369,7 +369,10 @@ async def cash_reconciliation_summary(
                 "cash_sales": None if no_comparison else _p2r(s.get("cash_sales_paisa")),
                 "cash_refunds": None if no_comparison else _p2r(s.get("cash_refunds_paisa")),
                 "cash_expenses": None if no_comparison else _p2r(s.get("cash_payouts_paisa")),
-                "bank_deposit": 0.0,
+                # D127: the cash banked out of the drawer before its count
+                # (on the register closes folded into this row), so the
+                # row's sum keeps tying out to its expected figure.
+                "bank_deposit": _p2r(s.get("bank_deposit_paisa")),
                 "expected_cash": expected,
                 "counted_cash": counted,
                 "blind": True,

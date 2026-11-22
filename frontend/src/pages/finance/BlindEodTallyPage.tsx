@@ -478,7 +478,7 @@ export default function BlindEodTallyPage() {
                   </div>
                 )}
                 {/* Z-Read identity, visible so a manager can foot it by eye:
-                    opening + cash sales - cash refunds - cash paid out = expected.
+                    opening + cash sales - cash refunds - cash paid out - bank deposit = expected.
                     cash_sales_paisa is GROSS; recorded customer cash refunds are
                     their OWN line, never merged into the manual payout figure. */}
                 <div className="grid grid-cols-3 tablet:grid-cols-6 gap-3 mt-3 text-sm">
@@ -486,6 +486,9 @@ export default function BlindEodTallyPage() {
                   <Figure label="Cash sales (gross)" value={drawerCash(s, s.cash_sales_paisa)} />
                   <Figure label="Cash refunds (recorded)" value={drawerCash(s, s.cash_refunds_paisa)} />
                   <Figure label="Cash payouts (auto)" value={drawerCash(s, s.cash_payouts_paisa)} />
+                  {(s.bank_deposit_paisa ?? 0) > 0 && (
+                    <Figure label="Bank deposit" value={paisaToInr(s.bank_deposit_paisa ?? 0)} />
+                  )}
                   <Figure label="Expected" value={s.expected_cash_paisa == null ? '—' : paisaToInr(s.expected_cash_paisa)} />
                   <Figure label="Counted" value={paisaToInr(s.blind_count_paisa)} />
                 </div>
@@ -548,7 +551,7 @@ export default function BlindEodTallyPage() {
                   </span>
                 </div>
                 {/* Z-Read identity, visible so a manager can foot it by eye:
-                    opening + cash sales - cash refunds - cash paid out = expected.
+                    opening + cash sales - cash refunds - cash paid out - bank deposit = expected.
                     cash_sales_paisa is GROSS; recorded customer cash refunds are
                     their OWN line, never merged into the manual payout figure. */}
                 <div className="grid grid-cols-3 tablet:grid-cols-6 gap-3 mt-3 text-sm">
@@ -556,6 +559,9 @@ export default function BlindEodTallyPage() {
                   <Figure label="Cash sales (gross)" value={drawerCash(s, s.cash_sales_paisa)} />
                   <Figure label="Cash refunds (recorded)" value={drawerCash(s, s.cash_refunds_paisa)} />
                   <Figure label="Cash payouts (auto)" value={drawerCash(s, s.cash_payouts_paisa)} />
+                  {(s.bank_deposit_paisa ?? 0) > 0 && (
+                    <Figure label="Bank deposit" value={paisaToInr(s.bank_deposit_paisa ?? 0)} />
+                  )}
                   <Figure label="Expected" value={s.expected_cash_paisa == null ? '—' : paisaToInr(s.expected_cash_paisa)} />
                   <Figure label="Counted" value={paisaToInr(s.blind_count_paisa)} />
                 </div>
