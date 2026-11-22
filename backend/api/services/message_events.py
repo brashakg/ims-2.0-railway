@@ -324,7 +324,11 @@ def apply_delivery_report(
          the log row.
 
     Returns {"delivery_status", "logs_updated", "event", "event_result"}.
-    Never raises.
+    Never raises. When the report could NOT be applied because storage failed
+    (no database, the log update raised, or the spine insert failed) the
+    result also carries "error" naming why -- so a receiver can leave its
+    inbox row retryable instead of calling it processed (audit L1-F26). A
+    report that simply matches no log row is not an error.
     """
     pid = str(provider_message_id or "").strip()
     canonical = canonical_dlr_status(raw_status)
@@ -338,7 +342,9 @@ def apply_delivery_report(
         return out
 
     db = db if db is not None else _get_db()
-    if db is not None:
+    if db is None:
+        out["error"] = "storage_unavailable"
+    else:
         try:
             coll = db.get_collection("notification_logs")
             update = {
@@ -354,8 +360,10 @@ def apply_delivery_report(
             )
             out["logs_updated"] = getattr(res, "modified_count", 0) or 0
         except Exception as exc:  # noqa: BLE001
-            # Stay green so MSG91 doesn't retry-storm; the miss is logged.
+            # Stay green so MSG91 doesn't retry-storm; the miss is logged
+            # and reported to the caller.
             logger.error("[MESSAGE_EVENTS] DLR log update failed: %s", exc)
+            out["error"] = f"log_update_failed: {type(exc).__name__}"
 
     ev = event_for(raw_status)
     if ev:
@@ -370,6 +378,11 @@ def apply_delivery_report(
             url=url,
             db=db,
         )
+        if out["event_result"] in (
+            "skipped:storage_unavailable",
+            "skipped:insert_failed",
+        ):
+            out.setdefault("error", out["event_result"])
         # SMS fallback on failed WhatsApp (channel expansions): fires ONLY on
         # a freshly RECORDED failure - the spine's (channel, pid, event)
         # dedupe means a provider retry of the same failure resolves
@@ -452,13 +465,17 @@ _REFERRAL_KEYS = (
 )
 
 
-def stamp_ctwa_attribution(phone: Any, referral: Any, db=None) -> bool:
+def stamp_ctwa_attribution(
+    phone: Any, referral: Any, db=None, *, strict: bool = False
+) -> bool:
     """Stamp Click-to-WhatsApp ad attribution onto the customer record
     (mobile-primary match). First touch is written once and never
     overwritten; last touch always updates. Returns True when a customer row
-    was stamped. Fail-soft -> False. Callers (the complete enumeration):
+    was stamped. Fail-soft -> False; with ``strict=True`` a STORAGE failure
+    raises instead (the msg91 inbox drain uses it so a failed stamp leaves the
+    inbox row retryable, audit L1-F26). Callers (the complete enumeration):
 
-      1. webhooks.receive_whatsapp_inbound   (Meta direct inbound)
+      1. webhooks._process_whatsapp_message  (Meta direct inbound)
       2. webhooks._process_msg91_events      (MSG91 whatsapp channel inbound)
     """
     if not isinstance(referral, dict) or not referral:
@@ -468,6 +485,8 @@ def stamp_ctwa_attribution(phone: Any, referral: Any, db=None) -> bool:
         return False
     db = db if db is not None else _get_db()
     if db is None:
+        if strict:
+            raise RuntimeError("CTWA stamp: storage unavailable")
         return False
     try:
         stamp = {
@@ -503,4 +522,6 @@ def stamp_ctwa_attribution(phone: Any, referral: Any, db=None) -> bool:
         return True
     except Exception as exc:  # noqa: BLE001
         logger.warning("[MESSAGE_EVENTS] CTWA stamp failed: %s", exc)
+        if strict:
+            raise
         return False
