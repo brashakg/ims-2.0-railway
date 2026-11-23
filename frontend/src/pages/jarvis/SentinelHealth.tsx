@@ -4,7 +4,7 @@ import type { JarvisPageState } from './useJarvisPage';
 
 export function SentinelHealth({ page }: { page: JarvisPageState }) {
   const {
-    sentinelHealth, sentinelLoading, handleRunNow, loadSentinelHealth,
+    sentinelHealth, sentinelLoading, sentinelError, handleRunNow, loadSentinelHealth,
   } = page;
   return (
     <>
@@ -49,7 +49,12 @@ export function SentinelHealth({ page }: { page: JarvisPageState }) {
             Loading SENTINEL health…
           </div>
         )}
-        {!sentinelLoading && !sentinelHealth?.latest && (
+        {!sentinelLoading && sentinelError && (
+          <div role="alert" style={{ color: 'var(--ink-2)', fontSize: 12.5, padding: 12 }}>
+            Could not load SENTINEL health. Nothing is known about the system right now; press Refresh to try again.
+          </div>
+        )}
+        {!sentinelLoading && !sentinelError && !sentinelHealth?.latest && (
           <div style={{ color: 'var(--ink-4)', fontSize: 12.5, padding: 12 }}>
             <div style={{ marginBottom: 8 }}>No health checks on record yet.</div>
             <div style={{ fontSize: 11, color: 'var(--ink-3)' }}>

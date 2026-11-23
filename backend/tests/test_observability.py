@@ -149,3 +149,49 @@ def test_is_slack_configured(monkeypatch):
     assert observability.is_slack_configured() is True
     monkeypatch.setenv("SLACK_WEBHOOK_URL", "   ")
     assert observability.is_slack_configured() is False
+
+
+# INFRA-06: a malformed SLACK_TIMEOUT must never escape notify_slack
+# ("Never raises"); it falls back to the 10s default and still delivers.
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw", ["not-a-number", "broken", "nan", "inf", "-5", "0", ""])
+async def test_notify_slack_bad_timeout_defaults_and_delivers(monkeypatch, raw):
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.example/abc")
+    monkeypatch.setenv("SLACK_ALERT_SEVERITY", "CRITICAL")
+    monkeypatch.setenv("SLACK_TIMEOUT", raw)
+
+    seen = {}
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, text="ok"))
+    original_client = httpx.AsyncClient
+
+    class TestClient(original_client):
+        def __init__(self, *args, **kwargs):
+            seen["timeout"] = kwargs.get("timeout")
+            kwargs["transport"] = transport
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", TestClient)
+
+    ok = await observability.notify_slack("CRITICAL", "t", "b", None)
+    assert ok is True
+    assert seen["timeout"].read == 10.0
+
+
+@pytest.mark.asyncio
+async def test_notify_slack_valid_timeout_is_honoured(monkeypatch):
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.example/abc")
+    monkeypatch.setenv("SLACK_ALERT_SEVERITY", "CRITICAL")
+    monkeypatch.setenv("SLACK_TIMEOUT", "3.5")
+    seen = {}
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, text="ok"))
+    original_client = httpx.AsyncClient
+
+    class TestClient(original_client):
+        def __init__(self, *args, **kwargs):
+            seen["timeout"] = kwargs.get("timeout")
+            kwargs["transport"] = transport
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", TestClient)
+    assert await observability.notify_slack("CRITICAL", "t", "b", None) is True
+    assert seen["timeout"].read == 3.5

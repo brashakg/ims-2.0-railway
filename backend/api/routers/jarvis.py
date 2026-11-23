@@ -3522,7 +3522,10 @@ async def sentinel_health(
             if history:
                 latest = history[0]
         except Exception as e:
+            # A failed read is not "no checks on record": answer 503 so the
+            # card shows an error instead of a false all-clear (INFRA-05).
             logger.warning("[JARVIS] sentinel health read failed: %s", e)
+            raise HTTPException(status_code=503, detail="SENTINEL health history could not be read; try again.")
 
     alerts: List[Dict[str, Any]] = []
     if alerts_col is not None:
@@ -3532,8 +3535,9 @@ async def sentinel_health(
                 .sort("timestamp", -1)
                 .limit(alerts_limit)
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("[JARVIS] sentinel alert read failed: %s", e)
+            raise HTTPException(status_code=503, detail="SENTINEL alerts could not be read; try again.")
 
     return {
         "latest": latest,
