@@ -39,7 +39,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from api.routers import hr  # noqa: E402
+from api.routers import hr, hr_self_service  # noqa: E402
 from api.utils.ist import ist_today  # noqa: E402  -- server uses IST for "today"
 
 SECRET = os.environ["JWT_SECRET_KEY"]
@@ -86,9 +86,12 @@ class _FakeAttendanceRepo:
                     return False
             elif isinstance(val, dict):
                 rv = r.get(key)
-                if "$gte" in val and not (rv is not None and rv >= val["$gte"]):
+                # Mongo brackets range matches by type: a string date never
+                # matches a datetime bound (and never raises).
+                lo, hi = val.get("$gte"), val.get("$lte")
+                if "$gte" in val and not (type(rv) is type(lo) and rv >= lo):
                     return False
-                if "$lte" in val and not (rv is not None and rv <= val["$lte"]):
+                if "$lte" in val and not (type(rv) is type(hi) and rv <= hi):
                     return False
             else:
                 if r.get(key) != val:
@@ -121,6 +124,20 @@ class _FakeAttendanceRepo:
             return True
         return False
 
+    def update_if(self, aid, expected, updates):
+        # Compare-and-set, as AttendanceRepository.update_if (dotted keys ok).
+        row = self._store.get(aid)
+        if row is None:
+            return False
+        for key, val in expected.items():
+            cur = row
+            for part in key.split("."):
+                cur = cur.get(part) if isinstance(cur, dict) else None
+            if cur != val:
+                return False
+        row.update(updates)
+        return True
+
 
 class _FakeUserRepo:
     def __init__(self, users):
@@ -140,6 +157,9 @@ class _FakeAuditRepo:
         self.rows.append(dict(row))
         return row
 
+    def find_by_id(self, log_id):
+        return next((r for r in self.rows if r.get("log_id") == log_id), None)
+
 
 def _make_app(
     monkeypatch,
@@ -149,6 +169,8 @@ def _make_app(
 ):
     app = FastAPI()
     app.include_router(hr.router, prefix="/hr")
+    # Self check-in/out live on the self-service router (R13).
+    app.include_router(hr_self_service.router, prefix="/hr")
     monkeypatch.setattr(
         hr, "get_attendance_repository", lambda: attendance_repo or _FakeAttendanceRepo([])
     )
@@ -437,16 +459,16 @@ class TestSummary:
         r2 = c.get(f"/hr/attendance/summary?month={month}", headers=_headers(roles=["ACCOUNTANT"]))
         assert r2.status_code == 200, r2.text
 
-    def test_summary_failsoft_no_db(self, monkeypatch):
+    def test_summary_no_db_is_unavailable_not_an_empty_summary(self, monkeypatch):
+        # #1433 Codex round 2: an empty summary read as "no attendance".
         app = FastAPI()
         app.include_router(hr.router, prefix="/hr")
         monkeypatch.setattr(hr, "get_attendance_repository", lambda: None)
         monkeypatch.setattr(hr, "get_user_repository", lambda: None)
         c = TestClient(app)
         month = ist_today().strftime("%Y-%m")
-        r = c.get(f"/hr/attendance/summary?month={month}", headers=_headers(roles=["ADMIN"]))
-        assert r.status_code == 200, r.text
-        assert r.json()["employees"] == []
+        with pytest.raises(hr.AttendanceUnavailable):
+            c.get(f"/hr/attendance/summary?month={month}", headers=_headers(roles=["ADMIN"]))
 
 
 # ---------------------------------------------------------------------------

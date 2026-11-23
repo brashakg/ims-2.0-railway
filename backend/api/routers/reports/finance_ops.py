@@ -19,6 +19,7 @@ from ...dependencies import (
 )
 from ...services.task_visibility import task_counts
 from ...services.cost_mask import AP_ROLES
+from database.repositories.hr_repository import AttendanceUnavailable
 from ._shared import (
     _REPORT_FINANCE_ROLES,
     router,
@@ -50,8 +51,8 @@ async def attendance_report(
     active_store = store_in_view(store_id, current_user)
     attendance_repo = get_attendance_repository()
 
-    if attendance_repo is None:
-        return {"data": [], "summary": {"total_present": 0, "total_absent": 0}}
+    if attendance_repo is None:  # never an empty month with zero totals (#1433 r2)
+        raise AttendanceUnavailable("attendance store not connected")
 
     # Get attendance for month
     start_date = datetime(year, month, 1)

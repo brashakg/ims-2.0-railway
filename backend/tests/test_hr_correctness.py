@@ -37,7 +37,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from api.routers import hr  # noqa: E402
+from api.routers import hr, hr_self_service  # noqa: E402
 from api.utils.ist import ist_today  # noqa: E402  -- server uses IST for "today"
 
 SECRET = os.environ["JWT_SECRET_KEY"]
@@ -143,8 +143,25 @@ class _FakeAttendanceRepo:
         return doc
 
     def update(self, aid, updates):
+        # Same contract as AttendanceRepository.update: True when matched.
         if aid in self._store:
             self._store[aid].update(updates)
+            return True
+        return False
+
+    def update_if(self, aid, expected, updates):
+        # Compare-and-set, as AttendanceRepository.update_if (dotted keys ok).
+        row = self._store.get(aid)
+        if row is None:
+            return False
+        for key, val in expected.items():
+            cur = row
+            for part in key.split("."):
+                cur = cur.get(part) if isinstance(cur, dict) else None
+            if cur != val:
+                return False
+        row.update(updates)
+        return True
 
 
 def _make_app(monkeypatch, attendance_records=None, leave_records=None,
@@ -152,6 +169,8 @@ def _make_app(monkeypatch, attendance_records=None, leave_records=None,
     """Build a TestClient with monkeypatched fake repos."""
     app = FastAPI()
     app.include_router(hr.router, prefix="/hr")
+    # Self check-in/out live on the self-service router (R13).
+    app.include_router(hr_self_service.router, prefix="/hr")
 
     monkeypatch.setattr(
         hr, "get_attendance_repository",
@@ -375,6 +394,7 @@ class TestCheckOutBlocking:
         rec = {
             "attendance_id": "att-2",
             "employee_id": "u-test",
+            "store_id": "S1",  # D48: a no-shop day is read-only on this door
             "date": ist_today().isoformat(),
             "check_in": "2026-01-01T09:00:00",
             "check_out": None,

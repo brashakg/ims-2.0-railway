@@ -13,11 +13,10 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Clock, Loader2, LayoutDashboard } from 'lucide-react';
-import { hrApi, storeApi } from '../../services/api';
+import { LayoutDashboard } from 'lucide-react';
+import { storeApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { useIsOnlineStore } from '../../hooks/useIsOnlineStore';
-import { useToast } from '../../context/ToastContext';
 import { MonthlyAttendanceGrid } from '../../components/hr/MonthlyAttendanceGrid';
 import { AttendanceWidget } from '../../components/hr/AttendanceWidget';
 
@@ -29,7 +28,6 @@ interface StoreOpt {
 
 export function AttendancePage() {
   const { user, hasRole } = useAuth();
-  const toast = useToast();
   // OS-065: a virtual (ONLINE) store has no premises to geo-fence — self
   // check-in against it is disabled (switch to your physical store to clock
   // in). The manager grid stays readable.
@@ -44,7 +42,6 @@ export function AttendancePage() {
 
   const [stores, setStores] = useState<StoreOpt[]>([]);
   const [selectedStore, setSelectedStore] = useState<string>(user?.activeStoreId || '');
-  const [checking, setChecking] = useState(false);
 
   useEffect(() => {
     if (!canSwitchStore) return;
@@ -69,24 +66,6 @@ export function AttendancePage() {
     return s ? (s.store_name || s.store_code || s.store_id) : gridStore;
   }, [stores, gridStore]);
 
-  // Geo-fenced self check-in (same flow as the HR page header). The backend is
-  // idempotent on (employee, store, date); the UI guard lives in AttendanceWidget.
-  const handleCheckIn = async () => {
-    setChecking(true);
-    try {
-      const pos = await new Promise<GeolocationPosition>((resolve, reject) =>
-        navigator.geolocation.getCurrentPosition(resolve, reject, { timeout: 10000, enableHighAccuracy: true }));
-      await hrApi.checkIn(user?.activeStoreId || '', pos.coords.latitude, pos.coords.longitude);
-      toast.success('Checked in successfully');
-    } catch (err: any) {
-      if (err?.code === 1) toast.error('Location access is required for check-in. Please enable GPS.');
-      else if (err?.code === 3) toast.error('Location request timed out. Please try again.');
-      else toast.error('Check-in failed. Please try again.');
-    } finally {
-      setChecking(false);
-    }
-  };
-
   return (
     <div className="inv-body">
       {/* Editorial header */}
@@ -108,19 +87,11 @@ export function AttendancePage() {
             <LayoutDashboard className="w-4 h-4" />
             My Work
           </Link>
-          <button
-            onClick={handleCheckIn}
-            disabled={checking || isOnlineStoreActive}
-            title={isOnlineStoreActive ? 'Not available for an online store — switch to your physical store to clock in' : undefined}
-            className="btn-primary flex items-center gap-2 text-sm disabled:opacity-50"
-          >
-            {checking ? <Loader2 className="w-4 h-4 animate-spin" /> : <Clock className="w-4 h-4" />}
-            Check In
-          </button>
         </div>
       </div>
 
-      {/* Self check-in card — universal. Guards against double check-in.
+      {/* Self check-in card — the ONE check-in door on this page (R01: the
+          header used to carry a second button with a different rule).
           OS-065: swapped for a note under an ONLINE store (nothing to
           geo-fence on a virtual store). */}
       {isOnlineStoreActive ? (

@@ -728,6 +728,8 @@ export interface WalkinStatusResponse {
   status: FootfallEntryStatus;
   staff_with_data: { staff_id: string; walk_ins: number }[];
   staff_missing: string[];
+  /** staff_id -> display name for every id above (from the staff directory). */
+  staff_names?: Record<string, string>;
   total_walk_ins: number;
   store_conversion_pct: number | null;
 }
