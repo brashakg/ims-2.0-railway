@@ -126,7 +126,7 @@ export function CustomerTagsPanel({
             type="button"
             onClick={submitSuggest}
             disabled={busy || newTag.trim().length < 1}
-            className="bg-bv-red text-white rounded px-3 py-1 text-sm disabled:opacity-40"
+            className="bg-bv-red-500 hover:bg-bv-red-600 text-white rounded px-3 py-1 text-sm disabled:opacity-40"
           >
             Submit
           </button>

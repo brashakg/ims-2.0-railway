@@ -232,7 +232,7 @@ export function LapsedReactivationPage() {
                 <button
                   type="button"
                   onClick={() => setActFor(e)}
-                  className="bg-bv-red text-white rounded px-3 py-1.5 text-sm"
+                  className="bg-bv-red-500 hover:bg-bv-red-600 text-white rounded px-3 py-1.5 text-sm"
                 >
                   Log outcome
                 </button>
@@ -293,7 +293,7 @@ export function LapsedReactivationPage() {
                 type="button"
                 onClick={submit}
                 disabled={busy}
-                className="bg-bv-red text-white rounded px-3 py-1.5 text-sm disabled:opacity-40"
+                className="bg-bv-red-500 hover:bg-bv-red-600 text-white rounded px-3 py-1.5 text-sm disabled:opacity-40"
               >
                 {callSaved ? 'Retry' : 'Save'}
               </button>

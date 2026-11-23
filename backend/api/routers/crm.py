@@ -1062,7 +1062,25 @@ def _audit_spec(action: str, customer_id: str, store_id: str, current_user: dict
     }
 
 
-def _nba_audit(spec: dict, action_key: str, saved: bool = True) -> None:
+def _saved_spec(db, action_key: str, record_ids: list, spec: dict) -> dict:
+    """The audit identity THIS action saved on its first record
+    (``saved_audit``): an identical retry pressed by someone else finishes the
+    action under the person who saved it, never under the retrier (Codex
+    PR-1428 r3 R3-A). No record yet (nothing saved, or a record from before
+    saved_audit existed) -> this request's own spec. A read failure RAISES:
+    the row is never written under a guessed person."""
+    ids = [i for i in (record_ids or []) if i]
+    if db is None or not ids:
+        return spec
+    rec = db.get_collection("follow_ups").find_one(
+        {"follow_up_id": {"$in": ids}, "action_key": action_key,
+         "saved_audit": {"$exists": True}}
+    )
+    return (rec or {}).get("saved_audit") or spec
+
+
+def _nba_audit(spec: dict, action_key: str, saved: bool = True,
+               db=None, record_ids: Optional[list] = None) -> None:
     """THE audit row of one work-list action, ONE per action: its id is fixed
     by the action (``AUD-CRM-<action_key>``) and ``_id`` is unique in Mongo, so
     a retry after a lost answer or a double press stores it once. D84: it is
@@ -1077,6 +1095,7 @@ def _nba_audit(spec: dict, action_key: str, saved: bool = True) -> None:
     try:
         arepo = get_audit_repository()
         if arepo is not None and not arepo.find_by_id(log_id):
+            spec = _saved_spec(db, action_key, record_ids, spec)
             arepo.create(
                 {
                     "log_id": log_id,
@@ -1218,7 +1237,7 @@ async def dismiss_nba_card(
                                   body.customer_id)
 
     # D84: the audit row BEFORE the card leaves the list and success is said.
-    _nba_audit(spec, key, saved=bool(follow_up_id))
+    _nba_audit(spec, key, saved=bool(follow_up_id), db=db, record_ids=[follow_up_id])
     if card:
         _mark_list_entry_done(scores, store_id, target_date, "cards", body.customer_id)
     return {"ok": True}
@@ -1312,7 +1331,8 @@ async def complete_nba_card(
             body.customer_id, bool(card),
         )
     # D84: the audit row BEFORE the card leaves the list and success is said.
-    _nba_audit(spec, key, saved=call_saved or bool(next_follow_up_id))
+    _nba_audit(spec, key, saved=call_saved or bool(next_follow_up_id), db=db,
+               record_ids=[follow_up_id, next_follow_up_id])
     if card:
         _mark_list_entry_done(scores, store_id, target_date, "cards", body.customer_id)
     return {"ok": True, "next_follow_up_id": next_follow_up_id}
@@ -1556,7 +1576,7 @@ async def log_reactivation_outcome(
             body.customer_id, True,
         )
     # D84: the audit row BEFORE the entry leaves the list and success is said.
-    _nba_audit(spec, key)
+    _nba_audit(spec, key, db=db, record_ids=[follow_up_id, next_follow_up_id])
     _mark_list_entry_done(cohorts, store_id, target_date, "entries", body.customer_id)
     return {
         "ok": True,

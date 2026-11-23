@@ -228,7 +228,7 @@ export function NBADashboardPage() {
                 <button
                   type="button"
                   onClick={() => { setDoneFor(c); }}
-                  className="bg-bv-red text-white rounded px-3 py-1.5 text-sm"
+                  className="bg-bv-red-500 hover:bg-bv-red-600 text-white rounded px-3 py-1.5 text-sm"
                 >
                   Done
                 </button>
@@ -279,7 +279,7 @@ export function NBADashboardPage() {
                 type="button"
                 onClick={submitDone}
                 disabled={busy || notes.trim().length < 10}
-                className="bg-bv-red text-white rounded px-3 py-1.5 text-sm disabled:opacity-40"
+                className="bg-bv-red-500 hover:bg-bv-red-600 text-white rounded px-3 py-1.5 text-sm disabled:opacity-40"
               >
                 {callSaved ? 'Retry' : 'Confirm'}
               </button>
