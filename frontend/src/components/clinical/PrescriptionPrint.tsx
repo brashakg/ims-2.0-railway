@@ -163,10 +163,13 @@ export function PrescriptionPrint({
     !!prescription.nearVisionRight || !!prescription.nearVisionLeft ||
     !isAbsentRxValue(prescription.rightEye.add) ||
     !isAbsentRxValue(prescription.leftEye.add);
-  // firstPresent, not `??`: a per-eye PD of "None" must fall THROUGH to the
-  // binocular PD instead of masking it.
-  const rightPD = firstPresent(prescription.rightEye.pd, prescription.pd);
-  const leftPD = firstPresent(prescription.leftEye.pd, prescription.pd);
+  // L2-CLIN-F02: each eye's PD cell is that eye's MONOCULAR PD only. The
+  // binocular IPD used to be copied into BOTH cells when a monocular value was
+  // missing, so a 62mm IPD read as "62 per eye". It now prints on its own line;
+  // a missing monocular stays a dash. firstPresent still treats "None" as absent.
+  const rightPD = firstPresent(prescription.rightEye.pd);
+  const leftPD = firstPresent(prescription.leftEye.pd);
+  const binocularPD = firstPresent(prescription.pd);
   const rightVA = firstPresent(prescription.rightEye.va);
   const leftVA = firstPresent(prescription.leftEye.va);
 
@@ -291,7 +294,7 @@ export function PrescriptionPrint({
                   <th style={tblHead}>CYL</th>
                   <th style={tblHead}>AXIS</th>
                   <th style={tblHead}>ADD</th>
-                  <th style={tblHead}>PD</th>
+                  <th style={tblHead}>PD (mono)</th>
                   <th style={tblHead}>V/A</th>
                 </tr>
               </thead>
@@ -320,6 +323,11 @@ export function PrescriptionPrint({
                 </tr>
               </tbody>
             </table>
+            {binocularPD !== null && (
+              <div data-testid="rx-print-ipd" style={{ fontSize: 11, marginTop: 6 }}>
+                <b>IPD (binocular):</b> {String(binocularPD)} mm
+              </div>
+            )}
           </div>
 
           {hasNearVision && (

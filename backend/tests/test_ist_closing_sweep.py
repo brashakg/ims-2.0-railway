@@ -1042,14 +1042,16 @@ def test_validate_advisory_agrees_with_rx_validity_incl_month_end():
 def test_clinical_rx_card_date_is_the_ist_day():
     """The date printed on the patient's Rx card (clinical.py third renderer).
     Stored instants shift; business-date strings and frame-less naive strings
-    pass through by documented design."""
+    pass through by documented design. created_at is NOT an issue date
+    (PR-1430 round 1): an Rx with only created_at prints "Not recorded"."""
     rd = clinical_mod._rx_date
-    assert rd({"created_at": EARLY}) == "01 Jul 2026"  # BSON datetime
-    assert rd({"created_at": "2026-06-30T20:00:00Z"}) == "01 Jul 2026"  # aware
-    assert rd({"created_at": AFTERNOON}) == "30 Jun 2026"  # control
+    assert rd({"test_date": EARLY}) == "01 Jul 2026"  # BSON datetime
+    assert rd({"test_date": "2026-06-30T20:00:00Z"}) == "01 Jul 2026"  # aware
+    assert rd({"test_date": AFTERNOON}) == "30 Jun 2026"  # control
     assert rd({"prescription_date": "2026-06-30"}) == "30 Jun 2026"  # business
     # naive ISO string: no reliable frame -> unshifted (documented pass-through)
-    assert rd({"created_at": "2026-06-30T20:00:00"}) == "30 Jun 2026"
+    assert rd({"test_date": "2026-06-30T20:00:00"}) == "30 Jun 2026"
+    assert rd({"created_at": EARLY}) == "Not recorded"
 
 
 def test_rtv_fy_label_still_correct_after_dead_fallback_deletion():

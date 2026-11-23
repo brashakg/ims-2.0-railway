@@ -23,18 +23,19 @@ import {
 // ONE display formatter for a dioptric power (explicit "+", blank stays blank).
 import { formatPowerOrDash } from '../../utils/rxPowerValue';
 import { getErrorMessage } from '../../utils/errorHandler';
+import { formatDateIST, toDate } from '../../utils/datetime';
 
 type Step = 'phone' | 'otp' | 'view';
 
+/** A prescription date as its India (IST) calendar day, whatever timezone the
+ *  patient's phone is set to. `new Date(v).toLocaleDateString()` used the
+ *  VIEWER's zone, so one exam read "14 Nov" in India and "13 Nov" in New York.
+ *  The server now sends the issue date as an IST 'YYYY-MM-DD' day. */
 function formatDate(value: string | null | undefined): string {
-  if (!value) return '—';
-  try {
-    return new Date(value).toLocaleDateString('en-IN', {
-      day: '2-digit', month: 'short', year: 'numeric',
-    });
-  } catch {
-    return String(value);
-  }
+  // A bare day is anchored to midnight UTC in full ISO form (05:30 IST, the
+  // same IST day): 'YYYY-MM-DDZ' is not a standard form every browser parses.
+  if (value && /^\d{4}-\d{2}-\d{2}$/.test(value)) return formatDateIST(`${value}T00:00:00Z`);
+  return formatDateIST(value);
 }
 
 export default function RxPortalPage() {
@@ -353,7 +354,8 @@ function eyeVal(
 }
 
 function RxCard({ p }: { p: PortalPrescription }) {
-  const expired = p.expiry_date ? new Date(p.expiry_date).getTime() < Date.now() : false;
+  const expiry = toDate(p.expiry_date);
+  const expired = expiry ? expiry.getTime() < Date.now() : false;
   return (
     <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
       <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between gap-3">
@@ -361,6 +363,11 @@ function RxCard({ p }: { p: PortalPrescription }) {
           <p className="text-sm font-semibold text-gray-900">
             {p.prescription_number || 'Prescription'}
             {p.type && <span className="ml-2 badge-info text-xs">{p.type}</span>}
+          </p>
+          {/* D71: one account holds the whole family's prescriptions, so
+              every card says whose it is. */}
+          <p className="text-sm text-gray-700 mt-0.5" data-testid="rx-portal-member">
+            For {p.patient_name || 'family member (name not recorded)'}
           </p>
           <p className="text-xs text-gray-500 mt-0.5 flex items-center gap-1.5">
             <CalendarDays className="w-3.5 h-3.5" />

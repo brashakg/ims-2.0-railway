@@ -201,13 +201,13 @@ class TestRedoListAndPrintReadable:
         resp = client.get("/clinical/prescriptions/rx-1/print")
         assert resp.status_code != 403
 
-    def test_print_fails_soft_when_no_db(self, monkeypatch):
+    def test_print_without_db_is_503_never_a_blank_card(self, monkeypatch):
         client = _client_no_db(monkeypatch, ["SALES_STAFF"])
         resp = client.get("/clinical/prescriptions/rx-1/print")
-        # No DB -> still a valid printable card (HTML), never a 500.
-        assert resp.status_code == 200
-        assert "text/html" in resp.headers.get("content-type", "")
-        assert "PRESCRIPTION" in resp.text
+        # PR-1430 round 1: no DB used to print an EMPTY Rx card with a 200 --
+        # a blank prescription presented as the patient's. Now: try again.
+        assert resp.status_code == 503
+        assert "PRESCRIPTION" not in resp.text
 
 
 # ============================================================================
