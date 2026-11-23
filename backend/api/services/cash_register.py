@@ -134,6 +134,17 @@ def variance_status(variance: float, tolerance: float = 0.0) -> str:
 # the count of emptying the till. Absence is a state, here as everywhere else
 # in the count block.
 NOT_COUNTED = "NOT_COUNTED"
+# D53: the shop-day had more than one cash drawer. No single variance is true
+# for it; each drawer's own count and variance are on the record instead.
+SEVERAL_DRAWERS = "SEVERAL_DRAWERS"
+# The close could not tell how many drawers the day had (or an earlier drawer
+# was recorded by older code, D76), so no comparison is made. Same string as
+# eod_tally.COMPARISON_UNAVAILABLE.
+COMPARISON_UNAVAILABLE = "COMPARISON_UNAVAILABLE"
+# D111: the register session opened on a drawer that was already counted and
+# closed with no count of its own. The till's count stands and nothing is
+# compared with it: no variance, no note, no alert.
+COUNTED_EARLIER = "COUNTED_EARLIER"
 NOT_COUNTED_MESSAGE = (
     "This drawer was closed without a count, so it is recorded as never "
     "counted - not as an empty drawer. There is no variance to report."

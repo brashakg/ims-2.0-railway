@@ -83,6 +83,7 @@ def _orders_in_window(
     start_dt: datetime,
     end_dt: datetime,
     end_exclusive: bool = False,
+    strict: bool = False,
 ) -> list:
     """Fetch non-cancelled, non-DRAFT orders for a (store, datetime
     window). Filter is a real Mongo Date range — passes through to
@@ -91,13 +92,23 @@ def _orders_in_window(
     ``end_dt`` is inclusive (``$lte``) for the day-range callers; a month
     window from ``ist_month_window_utc`` is half-open, so pass
     ``end_exclusive=True`` (``$lt``) or the next month's first order is
-    counted in both months."""
+    counted in both months.
+
+    ``strict=True`` RAISES when the read fails instead of answering [] (the
+    repository's own find_many prints and returns []). A caller that states a
+    revenue figure for a period (budget actuals, audit L3-15) must not turn
+    "could not read the orders" into "there were no sales". The default keeps
+    every existing report on its current contract."""
     flt: dict = {
         "created_at": {"$gte": start_dt, ("$lt" if end_exclusive else "$lte"): end_dt},
         "status": {"$nin": EXCLUDED_ORDER_STATUSES},
     }
     if store_id:
         flt["store_id"] = store_id
+    if strict:
+        from ...services.product_master import strict_find_many
+
+        return strict_find_many(order_repo, flt)
     try:
         # BUG-061: limit=0 returns ALL matching orders. The default limit=100
         # silently truncated every aggregation that feeds off this helper

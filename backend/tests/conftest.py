@@ -431,6 +431,34 @@ def brand_is_for_the_website(monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def _mongomock_builds_the_refund_claim_index(monkeypatch):
+    """uniq_shopify_refund_id is a PARTIAL unique index: real Mongo indexes
+    only docs that carry a string refund id. mongomock ignores
+    partialFilterExpression -- over docs with no refund id it refuses to build
+    the index (every one of them is a 'duplicate' null) and then enforces
+    nothing. The order-history import books nothing when that index cannot be
+    confirmed (PR #1423 review F-1423-G), so build it SPARSE on mongomock: the
+    same index for docs that either carry a string refund id or none. The
+    same for uniq_shopify_order_id on orders, which the order-history import
+    confirms before it inserts an order (decision D104(2)). Only these two
+    indexes, only on mongomock."""
+    try:
+        import mongomock
+    except ImportError:
+        return
+    real = mongomock.collection.Collection.create_index
+
+    def create_index(self, keys, *args, **kwargs):
+        if (kwargs.get("name") in ("uniq_shopify_refund_id", "uniq_shopify_order_id")
+                and "partialFilterExpression" in kwargs):
+            kwargs = {k: v for k, v in kwargs.items() if k != "partialFilterExpression"}
+            kwargs["sparse"] = True
+        return real(self, keys, *args, **kwargs)
+
+    monkeypatch.setattr(mongomock.collection.Collection, "create_index", create_index)
+
+
 @pytest.fixture
 def gst_numbers(monkeypatch):
     """Each GST document door gets the next number of a stub mint.

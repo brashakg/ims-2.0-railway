@@ -5,6 +5,7 @@ package split): no path, method, dependency, status code, response_model
 or default was changed.
 """
 
+import logging
 from datetime import datetime
 from ...utils.ist import now_ist, now_ist_naive, ist_today, fy_start_year_ist
 from typing import Optional, List
@@ -27,6 +28,8 @@ from ._shared import (
     router,
 )
 
+logger = logging.getLogger(__name__)
+
 # ============================================================================
 # F17/#25 - Maker-checker manual journal entries (gated by E4 ApprovalEngine)
 # ============================================================================
@@ -40,7 +43,7 @@ from ._shared import (
 # Roles allowed to draft + submit a JE (the maker side).
 _JE_MAKER_ROLES = {"ACCOUNTANT", "ADMIN", "SUPERADMIN"}
 # Roles allowed to approve / reject / post / reverse a JE (the checker side).
-_JE_CHECKER_ROLES = {"ADMIN", "SUPERADMIN"}
+_JE_CHECKER_ROLES = je_service.JE_CHECKER_ROLES
 # Roles allowed to READ the vouchers: the accounts roles (owner decision
 # 2026-10-18, audit FU-17). The store managers' read was dropped.
 _JE_READER_ROLES = COST_VISIBLE_ROLES
@@ -51,6 +54,15 @@ def _je_require_enabled() -> None:
     """Feature flag gate for JE WRITE endpoints (off by default)."""
     if not je_service.is_je_enabled():
         raise HTTPException(status_code=503, detail="manual_je_not_enabled")
+
+
+# A journal (or its approval request) that could not be read is HTTP 503 from
+# every door here: je_service raises JournalStoreUnavailable, an HTTPException,
+# from its one reader -- the route's own read and the service's reads alike
+# (D84; Codex round 3, R3-A). The period lock is read strictly here too
+# (check_period_locked(..., strict=True)): a lock that could not be read is
+# 503, so a manual journal never lands in a month that may be closed. Sales,
+# returns and bills keep the shared fail-soft gate.
 
 
 def _require_roles_for(current_user: dict, allowed: set, msg: str) -> None:
@@ -152,7 +164,7 @@ async def create_journal_entry(
         raise HTTPException(status_code=403, detail=NO_SHOP_DETAIL)
     entry_date = _je_parse_entry_date(body.entry_date, current_user)
     # Gate 1: a closed period rejects a draft at creation.
-    check_period_locked(db, entry_date.date())
+    check_period_locked(db, entry_date.date(), strict=True)
     res = je_service.create_je(
         db,
         store_id=store_id,
@@ -178,9 +190,9 @@ async def list_journal_entries(
     _require_roles_for(current_user, _JE_READER_ROLES, _JE_READ_REFUSED)
     db = _get_db()
     store_id = resolve_store_scope(store_id, current_user)
-    rows = je_service.list_jes(
-        db, store_id=store_id, status=status, maker_id=maker_id, limit=200
-    )
+    rows = je_service.list_jes(db, store_id=store_id, status=status, maker_id=maker_id, limit=200)
+    je_service.repair_posted_events(db, rows)
+    rows = je_service.with_flags(db, rows)
     return {"journal_entries": rows, "total": len(rows)}
 
 
@@ -195,11 +207,10 @@ async def get_journal_entry(
     # Another shop's voucher -- or a store-LESS (HQ/entity-level) one, which
     # only admins read (adversarial P3) -- is the same 404 as a missing one,
     # so a guessed id never confirms a voucher exists (audit 2026-10-18).
-    je = in_reach_or_404(
-        je_service.get_je(db, je_id), current_user, "Journal entry not found"
-    )
+    je = in_reach_or_404(je_service.get_je(db, je_id), current_user, "Journal entry not found")
     je.pop("_id", None)
-    return je_service._jsonable(je)
+    je_service.repair_posted_events(db, [je])
+    return je_service._jsonable(je_service.with_flags(db, [je])[0])
 
 
 @router.post("/journal-entries/{je_id}/submit")
@@ -230,7 +241,9 @@ async def approve_journal_entry(
     current_user: dict = Depends(get_current_user),
 ):
     """SUBMITTED -> APPROVED (checker, PIN-gated, via E4). The maker cannot
-    approve their own entry -- E4 enforces approver != maker."""
+    approve their own entry -- E4 enforces approver != maker. An APPROVED
+    entry whose approval can no longer be spent by Post (needs_reapproval:
+    lapsed, or spent elsewhere) is approved again here (D54)."""
     _je_require_enabled()
     _require_roles_for(
         current_user,
@@ -293,9 +306,11 @@ async def post_journal_entry(
     if not je:
         raise HTTPException(status_code=404, detail="Journal entry not found")
     # Gate 2 (double period-lock): a period locked after approval blocks posting.
+    # A journal already POSTED posts nothing more: its retry only records a
+    # missing je_posted event (D68), so a lock never stands in its way.
     entry_date = je.get("entry_date")
-    if isinstance(entry_date, datetime):
-        check_period_locked(db, entry_date.date())
+    if isinstance(entry_date, datetime) and je.get("status") != je_service.STATUS_POSTED:
+        check_period_locked(db, entry_date.date(), strict=True)
     res = je_service.post_je(db, je_id=je_id, poster_id=current_user.get("user_id"))
     return _je_raise(res)
 
@@ -306,7 +321,9 @@ async def reverse_journal_entry(
     current_user: dict = Depends(get_current_user),
 ):
     """Reverse a POSTED JE (ADMIN/SUPERADMIN). Mints a mirror voucher dated
-    today (today's period must be open); both vouchers are linked."""
+    today (today's period must be open); both vouchers are linked. Pressed
+    again on an entry left REVERSED without its mirror voucher
+    (reversal_unfinished), it writes that voucher, once."""
     _je_require_enabled()
     _require_roles_for(
         current_user,
@@ -315,7 +332,7 @@ async def reverse_journal_entry(
     )
     db = _get_db()
     # The reversal posts on today's date -- today's period must be open.
-    check_period_locked(db, now_ist_naive().date())
+    check_period_locked(db, now_ist_naive().date(), strict=True)
     res = je_service.reverse_je(
         db,
         je_id=je_id,
@@ -371,8 +388,10 @@ async def get_tally_journal_jv(
     current_user: dict = Depends(get_current_user),
 ):
     """POSTED journal vouchers as Tally ``<JOURNALVOUCHER>`` import XML. DRAFT /
-    SUBMITTED / APPROVED JEs are never exported. The same vouchers as the
-    journal list, so the same readers: the accounts roles (FU-17)."""
+    SUBMITTED / APPROVED JEs are never exported. An entry marked reversed
+    whose reversal voucher was never written still exports as posted, as the
+    P&L still counts it (D113, je_service.tally_jes). The same vouchers as
+    the journal list, so the same readers: the accounts roles (FU-17)."""
     _require_roles_for(current_user, _JE_READER_ROLES, _JE_READ_REFUSED)
     db = _get_db()
     store_id = resolve_store_scope(store_id, current_user)
@@ -381,9 +400,8 @@ async def get_tally_journal_jv(
     # it by calendar day, never by the IST-shifted created_at bounds.
     from_dt = _je_cal_day(from_date)
     to_dt = _je_cal_day(to_date, end=True)
-    rows = je_service.list_jes(
-        db, store_id=store_id, status=je_service.STATUS_POSTED, limit=1000
-    )
+    rows = je_service.tally_jes(db, store_id=store_id)
+    je_service.repair_posted_events(db, rows)
     # Date-filter in Python (entry_date is a datetime); keeps the service query simple.
     filtered = []
     for je in rows:

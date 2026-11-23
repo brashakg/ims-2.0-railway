@@ -204,3 +204,51 @@ def test_delivery_date_in_past_still_rejected():
             items=[OrderItemCreate(item_type="FRAME", product_id="F1", unit_price=100.0)],
             delivery_date=date.today() - timedelta(days=1),
         )
+
+
+# --------------------------------------------------------------------------- #
+# L2-WS-F03 -- the POS line instructions reach the job the safety net creates
+# --------------------------------------------------------------------------- #
+def test_safety_net_job_carries_every_line_instruction(patched_repos):
+    """The safety net usually wins the race with the POS client's createJob,
+    whose dedup then answers 'existing' without writing. So the job the net
+    creates must itself carry each frame/lens line's item_note, in the same
+    'name: note; ...' form the client sends -- and keep it on a lost client call."""
+    from api.routers.orders import _ensure_workshop_job_for_order
+
+    wrepo, _ = patched_repos
+    order = {
+        "order_id": "ORD-F03",
+        "store_id": "BV-BOK-01",
+        "notes": "cart note",
+        "items": [
+            {"item_type": "FRAME", "product_id": "F1", "product_name": "Ray-Ban RB1",
+             "item_note": "tight frame, careful with screws"},
+            {"item_type": "LENS", "product_id": "L1", "product_name": "Zeiss 1.6",
+             "prescription_id": "RX-9", "item_note": "fit high, varifocal"},
+            {"item_type": "ACCESSORY", "product_id": "A1", "product_name": "Case"},
+        ],
+    }
+    assert _ensure_workshop_job_for_order(order, "u") == "JID-1"
+    job = wrepo.jobs[0]
+    assert job["fitting_instructions"] == (
+        "Ray-Ban RB1: tight frame, careful with screws; Zeiss 1.6: fit high, varifocal"
+    )
+    assert job["special_notes"] == "cart note"
+
+    # A second confirm (retry / lost reply) neither duplicates the job nor
+    # rewrites what the bench has since edited on it.
+    wrepo.jobs[0]["fitting_instructions"] = "bench edit"
+    assert _ensure_workshop_job_for_order(order, "u") == "JID-1"
+    assert len(wrepo.jobs) == 1
+    assert wrepo.jobs[0]["fitting_instructions"] == "bench edit"
+
+
+def test_safety_net_job_without_line_notes_has_none(patched_repos):
+    from api.routers.orders import _ensure_workshop_job_for_order
+
+    wrepo, _ = patched_repos
+    order = {"order_id": "ORD-F03b", "store_id": "S",
+             "items": [{"item_type": "LENS", "prescription_id": "RX-1", "item_note": "  "}]}
+    _ensure_workshop_job_for_order(order, "u")
+    assert wrepo.jobs[0]["fitting_instructions"] is None

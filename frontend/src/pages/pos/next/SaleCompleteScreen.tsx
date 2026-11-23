@@ -54,6 +54,7 @@ import {
   type StoreIdentity,
 } from '../../../components/print/storeIdentity';
 import { WorkshopJobCardPrint } from '../../../components/print/WorkshopJobCardPrint';
+import { jobCardPrintData, type Job } from '../../workshop/shared';
 import {
   LensFittingFormModal,
   type LensFittingFormValue,
@@ -100,21 +101,8 @@ interface OrderView {
   items?: OrderLine[];
 }
 
-interface JobView {
-  jobNumber?: string;
-  orderNumber?: string;
-  customerName?: string;
-  customerPhone?: string;
-  frameName?: string;
-  lensType?: string;
-  priority?: string;
-  promisedDate?: string;
-  expectedDate?: string;
-  assignedTo?: string;
-  assignedToName?: string;
-  status?: string;
-  createdAt?: string;
-}
+/** The workshop job as GET /workshop/jobs/{id} returns it (may be partial). */
+type JobView = Partial<Job>;
 
 export type CompletionStage = 'SALE' | 'COUNTER' | 'DELIVERY';
 
@@ -786,20 +774,13 @@ export function CompletionScreen({
 
       {jobCardOpen && job && identity && (
         <WorkshopJobCardPrint
+          // The one shared card mapping (fitting instructions, notes, IST
+          // days); only the order's own identity fills a gap on the job.
           job={{
-            jobNumber: job.jobNumber || '',
+            ...jobCardPrintData(job),
             orderNumber: job.orderNumber || number,
             customerName: job.customerName || order?.customerName || '',
             customerPhone: job.customerPhone || phone,
-            frameBrand: (job.frameName || '').split(' ')[0],
-            frameModel: (job.frameName || '').replace(/^[^ ]+ /, ''),
-            frameColor: '',
-            lensType: job.lensType || '',
-            priority: job.priority || 'NORMAL',
-            dueDate: job.promisedDate || job.expectedDate || '',
-            assignedTechnician: job.assignedToName || job.assignedTo,
-            status: job.status || '',
-            createdDate: job.createdAt || '',
           }}
           store={{
             storeName: identity.store.storeName,

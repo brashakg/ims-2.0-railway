@@ -14,7 +14,7 @@ import { unlabelledControls } from '../../../test/unlabelledControls';
 
 const toast = { success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn() };
 vi.mock('../../../context/ToastContext', () => ({ useToast: () => toast }));
-vi.mock('../../../context/AuthContext', () => ({ useAuth: () => ({ hasRole: () => true }) }));
+vi.mock('../../../context/AuthContext', () => ({ useAuth: () => ({ hasRole: () => true, user: { roles: ['SUPERADMIN'] } }) }));
 vi.mock('react-router-dom', () => ({
   Link: ({ children, to }: { children: React.ReactNode; to: string }) => <a href={to}>{children}</a>,
 }));

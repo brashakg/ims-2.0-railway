@@ -837,13 +837,27 @@ def _ledger_row_return_ids(row):
     """The RET- ids a credit-note ledger row names in its ``ref`` / ``reason``
     ("Return RET-xxx, ..."), in order. THE one copy of the rule that links a
     note to its return: _ledger_row_return_doc and the GSTR-1 / GSTR-3B
-    returns-leg dedup all read it."""
-    return [
+    returns-leg dedup all read it.
+
+    Decision D117: the order-history import's row names no RET- id -- its
+    ``ref`` is its own key, 'SHOPIFY-HIST-REFUND-<refund id>' -- yet it IS
+    the credit note of the returns record 'RET-HIST-<refund id>' stored
+    beside it (COMPLETED, with the same gst_breakup). Unlinked, both legs
+    filed it: one refund, the tax reversed twice. Read from the ``ref`` (the
+    one field every dedup scan projects), so rows already stored are covered
+    and nothing is rewritten."""
+    from ...services.shopify_refund import hist_return_id
+
+    ids = [
         tok.strip(".:;")
         for f in ("ref", "reason")
         for tok in str(row.get(f) or "").replace(",", " ").split()
         if tok.startswith("RET-")
     ]
+    hist = hist_return_id(row.get("ref"))
+    if hist and hist not in ids:
+        ids.append(hist)
+    return ids
 
 
 def _ledger_row_return_doc(db, row):

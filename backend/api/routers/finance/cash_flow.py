@@ -12,6 +12,7 @@ from fastapi import Depends, Query
 from ..auth import get_current_user
 from ...dependencies import resolve_store_scope
 from ...services import ap_engine, cashflow
+from ...utils.expense_status import COMMITTED_EXPENSE_STATUS_MATCH
 from ...services.cost_mask import can_see_cost
 from ...services.salary_visibility import is_payroll_shaped_expense, is_salary_admin
 from ._shared import (
@@ -76,7 +77,7 @@ async def get_cash_flow(
     # `start` is IST midnight in UTC, i.e. the previous month's last day.
     exp_match = {
         "expense_date": {"$gte": today.replace(day=1).isoformat()},
-        "status": {"$in": ["APPROVED", "PAID", "approved", "paid"]},
+        "status": {"$in": COMMITTED_EXPENSE_STATUS_MATCH},
     }
     if active_store:
         exp_match["store_id"] = active_store
@@ -432,7 +433,7 @@ async def owner_dashboard(current_user: dict = Depends(get_current_user)):
             # the entire expense total. Use a date-only bound to match: the
             # IST 1st, not start.date() (the previous month's last day).
             "expense_date": {"$gte": now.replace(day=1).date().isoformat()},
-            "status": {"$in": ["APPROVED", "PAID", "approved", "paid"]},
+            "status": {"$in": COMMITTED_EXPENSE_STATUS_MATCH},
             **shop,
         },
         "$amount",
@@ -616,7 +617,7 @@ async def cash_flow_forecast(
                     {
                         "$match": {
                             "expense_date": {"$gte": three_mo_ago},
-                            "status": {"$in": ["APPROVED", "PAID", "approved", "paid"]},
+                            "status": {"$in": COMMITTED_EXPENSE_STATUS_MATCH},
                             **shop,
                         }
                     },

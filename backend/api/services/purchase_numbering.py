@@ -81,6 +81,7 @@ def next_purchase_number(
     store_id: Optional[str] = None,
     store_code: Optional[str] = None,
     when: Optional[datetime] = None,
+    strict: bool = False,
 ) -> str:
     """Allocate the next per-store, per-FY serial for a purchase document.
 
@@ -92,7 +93,10 @@ def next_purchase_number(
             for the printed segment).
         when: timestamp deciding the FY; defaults to now (IST).
 
-    Returns a number string in the documented format. Never raises.
+    Returns a number string in the documented format. Never raises -- unless
+    ``strict``: then a missing or failing counter RAISES instead of returning
+    the time-derived fallback (a caller that must never print a reference two
+    documents could share).
     """
     if when is None:
         try:
@@ -122,8 +126,11 @@ def next_purchase_number(
             if isinstance(seq, int) and seq > 0:
                 return format_purchase_number(prefix, store_seg, fy, seq)
         except Exception:  # noqa: BLE001 -- fall through to the safe fallback
-            pass
+            if strict:
+                raise
 
+    if strict:
+        raise RuntimeError("purchase counter unavailable")
     # Fail-soft (DB-less / counter error): time-derived suffix, same format.
     suffix = when.strftime("%m%d%H%M%S")
     return f"{prefix}/{store_seg}/{fy}/{suffix}"

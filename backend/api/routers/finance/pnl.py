@@ -18,6 +18,7 @@ from ...services.salary_visibility import (
 )
 from ...dependencies import resolve_store_scope
 from ...services import je_service, product_cost
+from ...utils.expense_status import COMMITTED_EXPENSE_STATUS_MATCH
 from ._shared import (
     _DISCOUNT_EXPR,
     real_sale_match,
@@ -28,9 +29,13 @@ from ._shared import (
     _get_db,
     _je_cal_day,
     _payroll_cost,
+    _read_or_503,
+    _report_db,
     _ORDER_REVENUE_PROJECTION,
     compute_cogs_with_flag,
+    customer_return_adjustments,
     router,
+    services_bill_costs,
 )
 from ...services.margin_basis import order_revenue_ex_gst
 
@@ -42,16 +47,8 @@ async def get_revenue(
     current_user: dict = Depends(get_current_user),
 ):
     store_id = resolve_store_scope(store_id, current_user)
-    db = _get_db()
-    if db is None:
-        return {
-            "total_revenue": 0,
-            "total_orders": 0,
-            "total_tax": 0,
-            "total_discount": 0,
-            "prev_revenue": 0,
-            "change_pct": None,
-        }
+    # No database handle answers 503 (_report_db), never a revenue of zero.
+    db = _report_db(_get_db())
     today = ist_today()
 
     if period == "day":
@@ -164,6 +161,7 @@ async def get_revenue(
 COST_ONLY_PNL_FIELDS = (
     "cogs",
     "cogs_variance",
+    "returns_cogs_reversal",
     "cogs_is_estimated",
     "cogs_estimated_lines",
     "cogs_total_lines",
@@ -218,17 +216,9 @@ async def get_pnl(
     current_user: dict = Depends(get_current_user),
 ):
     store_id = resolve_store_scope(store_id, current_user)
-    db = _get_db()
-    if db is None:
-        return {
-            "revenue": 0,
-            "tax": 0,
-            "expenses": 0,
-            "gross_profit": 0,
-            "net_profit": 0,
-            "gross_margin_pct": 0,
-            "net_margin_pct": 0,
-        }
+    # No database handle answers 503 (_report_db): never the all-zero P&L
+    # this used to return before the payroll read was reached.
+    db = _report_db(_get_db())
     # Exclude DRAFT/CANCELLED (never-booked / reversed) and compare the
     # date range as datetimes (created_at is a BSON datetime, so a 'YYYY-MM-DD'
     # string bound matched nothing -> the whole date-ranged P&L read zero).
@@ -265,12 +255,30 @@ async def get_pnl(
         exp_match.setdefault("expense_date", {})["$gte"] = from_date
     if to_date:
         exp_match.setdefault("expense_date", {})["$lte"] = to_date
-    exp_match["status"] = {"$in": ["APPROVED", "PAID", "approved", "paid"]}
+    exp_match["status"] = {"$in": COMMITTED_EXPENSE_STATUS_MATCH}
     exp_pipeline = [
         {"$match": exp_match},
         {"$group": {"_id": "$category", "amount": {"$sum": "$amount"}}},
     ]
     expenses = list(db.get_collection("expenses").aggregate(exp_pipeline))
+    # Supplier SERVICES bills are the same costs booked on the supplier side
+    # (audit L3-04): one head per expense type, beside the expense heads.
+    # What a supplier is paid is for the accounts roles only (owner ruling
+    # 2026-10-12, cost_mask 'payables'): anyone else gets no supplier-bill
+    # head and a total without them, flagged -- never a figure to subtract.
+    shop_ids = [store_id] if store_id else None
+    bill_rows = services_bill_costs(db, shop_ids, from_date, to_date)
+    if bill_rows and not can_see_cost(current_user, "payables"):
+        bill_rows = []
+        payables_hidden = True
+    else:
+        payables_hidden = False
+    for row in bill_rows:
+        expenses.append({"_id": row["head"], "amount": row["amount"]})
+    merged: dict = {}
+    for e in expenses:
+        merged[e["_id"]] = round(merged.get(e["_id"], 0.0) + float(e["amount"] or 0), 2)
+    expenses = [{"_id": k, "amount": v} for k, v in merged.items()]
     total_expenses = sum(e["amount"] for e in expenses)
 
     # Real COGS from product cost_price (fallback 60% of line total if a
@@ -289,15 +297,34 @@ async def get_pnl(
     cogs_variance = product_cost.variance_by(
         db, store_ids=[store_id] if store_id else None, from_day=from_date, to_day=to_date
     ).get(None, 0.0)
-    cogs = round(cogs + cogs_variance, 2)
+    # Completed customer returns in the range (audit RUN-04), dated by the
+    # return: their taxable value and GST come off sales, and a GOOD piece
+    # back on sale gives its cost back. Never netted into the original sale.
+    rets = customer_return_adjustments(db, cost_map, shop_ids, from_date, to_date).values()
+    returns_gross = round(sum(r["gross"] for r in rets), 2)
+    returns_taxable = round(sum(r["taxable"] for r in rets), 2)
+    returns_tax = round(sum(r["tax"] for r in rets), 2)
+    returns_cogs_reversal = round(sum(r["cogs_reversal"] for r in rets), 2)
+    gross_sales = round((gross_sales or 0) - returns_gross, 2)
+    tax = round((tax or 0) - returns_tax, 2)
+    cogs = round(cogs + cogs_variance - returns_cogs_reversal, 2)
     cogs_is_estimated = cogs_est_lines > 0
     # Revenue net of GST (the GST is owed to the government): COGS is ex-GST,
     # so gross profit and both margins are measured on the same side of GST.
-    revenue = round(sum(order_revenue_ex_gst(o) for o in period_orders), 2)
+    revenue = round(sum(order_revenue_ex_gst(o) for o in period_orders) - returns_taxable, 2)
     gross_profit = revenue - cogs
 
-    # Payroll cost-to-company for the period's months.
-    payroll_cost = _payroll_cost(db, store_id, from_date, to_date)
+    # Payroll cost-to-company for the period's months. Read only for a reader
+    # who is shown it: everyone else's answer carries no payroll-derived
+    # figure (PAYROLL_DERIVED_PNL_FIELDS are stripped below by this same
+    # test), so their sales and expenses never wait on the payroll read. For
+    # an administrator an unreadable payroll answers 503 (_payroll_cost):
+    # never a P&L that leaves posted wages out.
+    payroll_cost = (
+        _payroll_cost(db, store_id, from_date, to_date)
+        if is_salary_admin(current_user)
+        else 0.0
+    )
 
     # F17/#25: POSTED manual journal entries adjust the P&L (depreciation, bank
     # charges, prior-period corrections). EXPENSE-type debits raise cost;
@@ -309,8 +336,11 @@ async def get_pnl(
     # the window isn't mis-bucketed (the two frames must agree).
     je_from_dt = _je_cal_day(from_date)
     je_to_dt = _je_cal_day(to_date, end=True)
-    je_adj = je_service.pnl_adjustments(
-        db, store_id=store_id, from_dt=je_from_dt, to_dt=je_to_dt
+    # Read strictly (decision D116): journals that cannot be read answer 503,
+    # never this P&L with their adjustment at zero -- for every reader, since
+    # total_expenses carries the journal expenses whoever asks.
+    je_adj = _read_or_503(
+        je_service.pnl_adjustments, db, store_id=store_id, from_dt=je_from_dt, to_dt=je_to_dt
     )
     je_rev = je_adj.get("je_revenue_adjustment", 0.0)
     je_exp = je_adj.get("je_expense_adjustment", 0.0)
@@ -329,6 +359,12 @@ async def get_pnl(
         # Inside cogs: the cost-of-goods variance of pieces sold before
         # their supplier bill (product_cost.variance_by).
         "cogs_variance": cogs_variance,
+        # Inside cogs: the cost given back by GOOD returned pieces restocked.
+        "returns_cogs_reversal": returns_cogs_reversal,
+        # Already taken off revenue / gross_sales_incl_gst / tax_collected.
+        "returns_taxable": returns_taxable,
+        "returns_tax": returns_tax,
+        "returns_gross": returns_gross,
         # When cogs_is_estimated=True, some cost lines used a 60%-of-revenue
         # fallback because the product cost_price is not set. Gross margin shown
         # should be treated as approximate until all products have a cost_price.
@@ -347,6 +383,8 @@ async def get_pnl(
         "net_margin": round(net_profit / revenue * 100, 1) if revenue > 0 else 0,
         "tax_collected": tax,
     }
+    if payables_hidden:
+        pnl["expenses_partially_restricted"] = True
     # F35 / GAP_ANALYSIS G1: /pnl is store-scoped only (NO role gate), so the cost,
     # profit and margin economics must be stripped for any role not in
     # COST_VISIBLE_ROLES (excludes AREA_MANAGER per DECISIONS sec 9). Revenue + tax

@@ -120,8 +120,8 @@ describe('Category Master shows the HSN/GST the SERVER holds', () => {
     const { CategorySection } = await loadScreens(false);
     render(<CategorySection />);
 
-    // All 13 rows show the honest placeholder...
-    expect(await screen.findAllByText('HSN: — | GST: —')).toHaveLength(13);
+    // All 14 rows (13 + Colour Contact Lens, L1-F43) show the honest placeholder...
+    expect(await screen.findAllByText('HSN: — | GST: —')).toHaveLength(14);
     // ...and no HSN or rate is invented, neither the server's nor the old copy's.
     expect(screen.queryByText(/HSN: \d/)).toBeNull();
     expect(screen.queryByText(/GST: \d/)).toBeNull();
