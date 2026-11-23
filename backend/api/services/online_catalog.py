@@ -776,7 +776,8 @@ def online_summary(db) -> Dict[str, Any]:
         "published_products": published,
         "draft_products": draft,
         # The Catalog screen's counts row (+ the sidebar badges). Same
-        # per-doc rule as the list rows -- see product_online_state.
+        # per-doc rule as the list rows -- see product_online_state. None when
+        # the tally could not be read (the screen shows "could not be loaded").
         "catalog": catalog_counts(db),
     }
 
@@ -923,7 +924,7 @@ def _in_catalog(doc: Dict[str, Any]) -> bool:
     return doc.get("is_active") is not False and not in_needs_review(doc)
 
 
-def catalog_counts(db) -> Dict[str, int]:
+def catalog_counts(db) -> Optional[Dict[str, int]]:
     """The Catalog screen's counts row, tallied over catalog_products with the
     SAME doc_online_state the per-row columns use (push gate included) -- so
     the figures and the rows cannot disagree.
@@ -937,7 +938,9 @@ def catalog_counts(db) -> Dict[str, int]:
                       imports awaiting review (product_master.in_needs_review)
 
     ponytail: one Python pass over the catalog (~80 rows); aggregate in Mongo
-    if it ever passes a few thousand. Fail-soft: zeros on any failure."""
+    if it ever passes a few thousand. A failed read (or no database) is None,
+    never zeros: the screen then says the figures could not be loaded (UI-03;
+    a real catalogue read failure used to show IN CATALOG 0)."""
     out = {
         "in_catalog": 0,
         "smartglasses": 0,
@@ -949,7 +952,7 @@ def catalog_counts(db) -> Dict[str, int]:
     }
     prods = _coll(db, "catalog_products")
     if prods is None:
-        return out
+        return None
     try:
         from .product_master import in_needs_review, resolve_category, stamp_ordered_drafts
 
@@ -974,6 +977,7 @@ def catalog_counts(db) -> Dict[str, int]:
                 out["live"] += 1
     except Exception as exc:  # noqa: BLE001
         logger.warning("[ONLINE_CATALOG] catalog counts failed: %s", exc)
+        return None
     return out
 
 

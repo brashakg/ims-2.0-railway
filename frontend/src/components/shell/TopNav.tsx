@@ -21,6 +21,7 @@ import {
   Fragment,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -105,6 +106,25 @@ export function TopNav({ brand = 'bv' }: { brand?: 'bv' | 'wizopt' }) {
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const navRef = useRef<HTMLElement | null>(null);
   const userMenuRef = useRef<HTMLDivElement | null>(null);
+  const menuRef = useRef<HTMLUListElement | null>(null);
+  // R38: which ends of the menu bar have groups scrolled out of sight. The bar
+  // hides its scrollbar, so on a tablet a role with many groups needs a
+  // visible arrow (mouse without a sideways wheel; keyboard focus scrolls by
+  // itself, touch can swipe).
+  const [hidden, setHidden] = useState({ before: false, after: false });
+  const measureMenu = useCallback(() => {
+    const ul = menuRef.current;
+    if (!ul) return;
+    const before = ul.scrollLeft > 1;
+    const after = ul.scrollLeft + ul.clientWidth < ul.scrollWidth - 1;
+    setHidden((h) => (h.before === before && h.after === after ? h : { before, after }));
+  }, []);
+  const scrollMenu = (dir: 1 | -1) => {
+    const ul = menuRef.current;
+    if (!ul) return;
+    ul.scrollLeft += dir * Math.max(120, Math.round(ul.clientWidth * 0.7));
+    measureMenu();
+  };
 
   const visibleGroups = useMemo(
     () => filterVisibleGroups(userRoles, activeRole, hasModuleAccess),
@@ -145,11 +165,14 @@ export function TopNav({ brand = 'bv' }: { brand?: 'bv' | 'wizopt' }) {
     return () => document.removeEventListener('mousedown', onDoc);
   }, [openGroup, userMenuOpen]);
 
-  // Esc closes everything (focus stays on the trigger the user pressed Esc on).
+  // Esc closes everything. Focus that was inside the open group's menu goes
+  // back to that group's trigger (R11), never to the page body.
   useEffect(() => {
     if (!openGroup && !userMenuOpen) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        const trig = navRef.current?.querySelector<HTMLElement>('.top-nav-group.open > .top-nav-trigger');
+        if (trig && trig.parentElement?.contains(document.activeElement)) trig.focus();
         setOpenGroup(null);
         setUserMenuOpen(false);
       }
@@ -195,17 +218,49 @@ export function TopNav({ brand = 'bv' }: { brand?: 'bv' | 'wizopt' }) {
     (title: string) => (e: ReactKeyboardEvent<HTMLButtonElement>) => {
       if (e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ') {
         e.preventDefault();
+        // R11: read the element NOW -- React clears e.currentTarget once this
+        // handler returns, so reading it inside the frame callback threw.
+        const li = e.currentTarget.parentElement;
         setDdPos(dropdownAnchor(e.currentTarget));
         setOpenGroup(title);
         // Focus the first item in the dropdown on the next frame.
         requestAnimationFrame(() => {
-          const dd = e.currentTarget.parentElement?.querySelector<HTMLElement>('.top-nav-dropdown [role="menuitem"]');
-          dd?.focus();
+          li?.querySelector<HTMLElement>('.top-nav-dropdown [role="menuitem"]')?.focus();
         });
       }
     },
     [],
   );
+
+  // R11: inside an open menu the arrows move between its entries (wrapping),
+  // Home/End jump to the ends; Tab and Esc keep their usual meaning.
+  const onMenuKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    const items = Array.from(e.currentTarget.querySelectorAll<HTMLElement>('[role="menuitem"]'));
+    if (!items.length) return;
+    const at = items.indexOf(document.activeElement as HTMLElement);
+    const next =
+      e.key === 'ArrowDown' ? (at + 1) % items.length
+      : e.key === 'ArrowUp' ? (at <= 0 ? items.length - 1 : at - 1)
+      : e.key === 'Home' ? 0
+      : e.key === 'End' ? items.length - 1
+      : -1;
+    if (next < 0) return;
+    e.preventDefault();
+    items[next].focus();
+  };
+
+  // Re-measure the menu bar when its width or its groups change.
+  useLayoutEffect(() => {
+    measureMenu();
+    const ul = menuRef.current;
+    window.addEventListener('resize', measureMenu);
+    const ro = typeof ResizeObserver !== 'undefined' && ul ? new ResizeObserver(measureMenu) : null;
+    if (ro && ul) ro.observe(ul);
+    return () => {
+      window.removeEventListener('resize', measureMenu);
+      ro?.disconnect();
+    };
+  }, [measureMenu, visibleGroups]);
 
   const handleSignOut = async () => {
     setUserMenuOpen(false);
@@ -246,7 +301,12 @@ export function TopNav({ brand = 'bv' }: { brand?: 'bv' | 'wizopt' }) {
 
       {/* Menu — direct links + group dropdowns. Scrolls horizontally only if a
           role's menu is too wide for the viewport (brand + user stay pinned). */}
-      <ul className="top-nav-menu">
+      {hidden.before && (
+        <button type="button" className="top-nav-scroll" aria-label="Show earlier menus" onClick={() => scrollMenu(-1)}>
+          <MenuChevron />
+        </button>
+      )}
+      <ul className="top-nav-menu" ref={menuRef} onScroll={measureMenu}>
         {visibleGroups.map((group, gi) => {
           // Untitled group (Hub / Notifications) -> direct top-level links.
           // The clickable brand logo above IS the Hub link on tablet/desktop, so
@@ -292,6 +352,7 @@ export function TopNav({ brand = 'bv' }: { brand?: 'bv' | 'wizopt' }) {
                   className="top-nav-dropdown"
                   role="menu"
                   aria-label={title}
+                  onKeyDown={onMenuKeyDown}
                   // Fixed + JS-anchored so the menu's overflow-x clip can't hide it.
                   // Height is capped to the VISIBLE viewport below the trigger (dvh, not
                   // vh): on a tablet/phone the layout viewport runs under the browser
@@ -316,6 +377,11 @@ export function TopNav({ brand = 'bv' }: { brand?: 'bv' | 'wizopt' }) {
           );
         })}
       </ul>
+      {hidden.after && (
+        <button type="button" className="top-nav-scroll after" aria-label="Show more menus" onClick={() => scrollMenu(1)}>
+          <MenuChevron />
+        </button>
+      )}
 
       {/* Account / sign-out menu, pinned right */}
       <div className="top-nav-user" ref={userMenuRef}>
