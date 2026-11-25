@@ -1654,12 +1654,14 @@ def test_a_lost_second_edit_on_a_mismatched_order_still_reaches_the_cod_gate(swe
     assert exc.value.detail["code"] == "COD_ABOVE_SHOPIFY_TOTAL"
 
 
-def test_a_mismatch_whose_task_did_not_land_is_fed_again_until_it_lands(swept, monkeypatch):
+@pytest.mark.parametrize("dispatched", [False, True])
+def test_a_mismatch_whose_task_did_not_land_is_fed_again_until_it_lands(swept, monkeypatch, dispatched):
     """Codex P2 on #1347: the sweep caught a lost edit, but raising its P1
     task failed (the task store was down), so the check is stored MISMATCH
     without task_raised. Shopify's total no longer moves, yet the next sweep
-    feeds the order again so the mapper's replay raises the task; once it is
-    raised, nothing more is fed."""
+    feeds the order again so the mapper's replay raises the task -- also once
+    the order has shipped, like a webhook replay; once it is raised, nothing
+    more is fed."""
     import api.dependencies as deps
 
     money = {"financial_status": "pending", "total_price": "999.00"}
@@ -1677,16 +1679,36 @@ def test_a_mismatch_whose_task_did_not_land_is_fed_again_until_it_lands(swept, m
     check = _doc(swept, 30092)["shopify_totals_check"]
     assert check["status"] == "MISMATCH" and not check.get("task_raised")
 
+    if dispatched:
+        swept["orders"].update_one({"shopify_order_id": "30092"}, {"$set": {"status": "SHIPPED"}})
     monkeypatch.setattr(deps, "get_task_repository", healthy)
     assert swept["run"]().payload["status_synced"] == ["30092"]
     doc = _doc(swept, 30092)
     assert doc["shopify_totals_check"]["task_raised"] is True
+    assert doc["shopify_totals_check"]["shopify_total"] == 600.0
     ref = f"online_total_mismatch:{doc['order_id']}"
     assert len(list(swept["db"]["tasks"].find({"source_ref": ref}))) == 1
 
     swept["seen"].clear()
     assert swept["run"]().payload["status_synced"] == []
     assert swept["seen"] == []
+
+
+def test_a_test_orders_mismatch_is_never_fed_for_a_task(swept):
+    """A Shopify test order (ruling 27) books MISMATCH with no task, and no
+    replay ever raises one: the sweep must not feed it every hour (each feed
+    would come back unsynced and be reported as a failure)."""
+    money = {"financial_status": "pending", "total_price": "999.00", "test": True}
+    doc = _book(swept, 30094, current_total_price="600.00", **money)
+    assert doc["is_test"] is True
+    assert doc["shopify_totals_check"]["status"] == "MISMATCH"
+    assert not doc["shopify_totals_check"].get("task_raised")
+
+    swept["state"]["orders"] = [_pulled(30094, current_total_price="600.00", **money)]
+    swept["seen"].clear()
+    run = swept["run"]()
+    assert swept["seen"] == []
+    assert "30094" not in (run.payload.get("status_failed") or [])
 
 
 def test_the_hourly_sweep_repairs_a_failed_customer_link_and_only_that(swept):

@@ -541,8 +541,10 @@ async def _sweep_booked_order(db, order, raw, existing, sid: str, live: bool) ->
                     topic = "orders/updated"
                 # A MISMATCH whose P1 task did not land (the task store failed;
                 # _raise_total_mismatch_task leaves task_raised unset to be
-                # retried): the mapper's replay raises it.
-                elif stored.get("status") == "MISMATCH" and not stored.get("task_raised"):
+                # retried): the mapper's replay raises it, whatever the status.
+                # A Shopify test order never gets one (ruling 27).
+                elif (stored.get("status") == "MISMATCH" and not stored.get("task_raised")
+                      and not existing.get("is_test")):
                     topic = "orders/updated"
             if topic:
                 res = await feed(topic, raw, lambda: map_routed_order(order, db, webhook_id=None, topic=topic))
