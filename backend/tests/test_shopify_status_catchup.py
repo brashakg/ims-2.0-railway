@@ -1654,6 +1654,41 @@ def test_a_lost_second_edit_on_a_mismatched_order_still_reaches_the_cod_gate(swe
     assert exc.value.detail["code"] == "COD_ABOVE_SHOPIFY_TOTAL"
 
 
+def test_a_mismatch_whose_task_did_not_land_is_fed_again_until_it_lands(swept, monkeypatch):
+    """Codex P2 on #1347: the sweep caught a lost edit, but raising its P1
+    task failed (the task store was down), so the check is stored MISMATCH
+    without task_raised. Shopify's total no longer moves, yet the next sweep
+    feeds the order again so the mapper's replay raises the task; once it is
+    raised, nothing more is fed."""
+    import api.dependencies as deps
+
+    money = {"financial_status": "pending", "total_price": "999.00"}
+    _book(swept, 30092, current_total_price="999.00", **money)
+    swept["state"]["orders"] = [_pulled(30092, current_total_price="600.00",
+                                        updated_at="2026-09-06T02:00:00Z", **money)]
+
+    healthy = deps.get_task_repository
+
+    def _store_down():
+        raise RuntimeError("task store down")
+
+    monkeypatch.setattr(deps, "get_task_repository", _store_down)
+    swept["run"]()
+    check = _doc(swept, 30092)["shopify_totals_check"]
+    assert check["status"] == "MISMATCH" and not check.get("task_raised")
+
+    monkeypatch.setattr(deps, "get_task_repository", healthy)
+    assert swept["run"]().payload["status_synced"] == ["30092"]
+    doc = _doc(swept, 30092)
+    assert doc["shopify_totals_check"]["task_raised"] is True
+    ref = f"online_total_mismatch:{doc['order_id']}"
+    assert len(list(swept["db"]["tasks"].find({"source_ref": ref}))) == 1
+
+    swept["seen"].clear()
+    assert swept["run"]().payload["status_synced"] == []
+    assert swept["seen"] == []
+
+
 def test_the_hourly_sweep_repairs_a_failed_customer_link_and_only_that(swept):
     """PR #1388: a flagged order with no other fact moving is still fed to the
     mapper's replay repair; once linked, or for a plain guest, the sweep stays

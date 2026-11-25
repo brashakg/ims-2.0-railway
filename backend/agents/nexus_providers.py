@@ -539,6 +539,11 @@ async def _sweep_booked_order(db, order, raw, existing, sid: str, live: bool) ->
                 # repairs it, with no other fact to wait for.
                 elif existing.get("customer_link_failed"):
                     topic = "orders/updated"
+                # A MISMATCH whose P1 task did not land (the task store failed;
+                # _raise_total_mismatch_task leaves task_raised unset to be
+                # retried): the mapper's replay raises it.
+                elif stored.get("status") == "MISMATCH" and not stored.get("task_raised"):
+                    topic = "orders/updated"
             if topic:
                 res = await feed(topic, raw, lambda: map_routed_order(order, db, webhook_id=None, topic=topic))
                 # The transition table kept a finished status while the
