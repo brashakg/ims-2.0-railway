@@ -165,10 +165,14 @@ def _pay(rid="RET-O", **body):
     return asyncio.run(returns_router.mark_owed_paid(rid, returns_router.OwedPaidBody(**body), _user("ACCOUNTANT")))
 
 
-def test_a_lost_flip_keeps_the_return_owed_and_a_re_press_replays_the_stored_payment(till, monkeypatch):
+def test_a_lost_flip_is_settled_by_the_owed_list_and_a_re_press_replays_the_stored_payment(till, monkeypatch):
+    """D123: the payout row is stored but its press answered 503. The owed
+    list reads through the stored payout and settles the return as paid --
+    it is not shown as owed again; a re-press replays the stored payment."""
     monkeypatch.setattr(returns_router, "_close_task", lambda *a, **k: None)
     audits = []
-    monkeypatch.setattr(returns_router, "_audit_complete", lambda rid, *a, **k: audits.append(rid))
+    # By its fixed id: every press writes the stored payment's row, once.
+    monkeypatch.setattr(returns_router, "_audit_once", lambda log_id, row: audits.append(log_id) or True)
     _owed(till)
     returns = till["db"].get_collection("returns")
     real = returns.update_one
@@ -184,14 +188,16 @@ def test_a_lost_flip_keeps_the_return_owed_and_a_re_press_replays_the_stored_pay
     with pytest.raises(HTTPException) as e:
         _pay(method="UPI")
     assert e.value.status_code == 503
+    assert returns.find_one({"return_id": "RET-O"}).get("owed_paid_at") is None  # the 503 left it unmarked
     out = asyncio.run(returns_router.needs_completing(_user("ACCOUNTANT")))
-    assert [o["return_id"] for o in out["owed"]] == ["RET-O"]  # still owed: it can be pressed again
+    assert out["owed"] == []  # D123: paid (its payout row is stored), never listed as owed
+    assert returns.find_one({"return_id": "RET-O"})["owed_paid_method"] == "UPI"
     monkeypatch.setattr(returns_router, "_drawer_closed_today", lambda store_id: True)  # never re-checked
     again = _pay(method="CASH", cash_paid_from="STORE_DRAWER")
     assert again["method"] == "UPI" and again["replayed"] is True
     payouts = list(returns.find({"payout_of": "RET-O"}))
     assert len(payouts) == 1 and payouts[0]["refund_tenders"] == [{"method": "UPI", "amount": 600.0}]
-    assert returns.find_one({"return_id": "RET-O"})["owed_paid_method"] == "UPI" and audits == ["RET-O"]
+    assert returns.find_one({"return_id": "RET-O"})["owed_paid_method"] == "UPI" and sorted(set(audits)) == ["return_owed_paid:RET-O"]
 
 
 def test_a_lost_payout_write_books_nothing_and_stays_owed(till, monkeypatch):

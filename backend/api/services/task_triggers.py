@@ -283,3 +283,24 @@ def create_system_task(
         return repo.create(task) or None
     except Exception:  # noqa: BLE001
         return None
+
+
+def task_on_worklist(
+    repo: Any, created: Any, dedupe_ref: str, task_id: Optional[str] = None
+) -> bool:
+    """After ``created = create_system_task(repo, ...)``: is the task KNOWN to
+    be stored? Yes when it was made now, when an active one is already on the
+    same ``dedupe_ref``, or when the fixed ``task_id`` is already there (a
+    retry after the first insert landed, whatever happened to the task since).
+    False = not stored or not known, so a caller that owes the task keeps
+    owing it."""
+    if repo is None:
+        return False
+    if created:
+        return True
+    try:
+        if active_tasks(repo, dedupe_ref):
+            return True
+        return bool(task_id) and repo.find_by_id(task_id) is not None
+    except Exception:  # noqa: BLE001
+        return False

@@ -91,7 +91,7 @@ class _TaskRepo:
 
         return [t for t in self.docs if all(ok(t.get(k), v) for k, v in (query or {}).items())]
 
-    def create(self, task):
+    def create(self, task, **_kw):  # the real one takes raise_on_duplicate
         self.docs.append(dict(task))
         return dict(task)
 
@@ -245,7 +245,7 @@ def test_an_out_of_band_lock_raises_one_store_manager_task(db, task_repo):
     assert task["source"] == "SYSTEM"
     assert task["assigned_to"] == "store_manager@BV-1"  # a person, not a title
     assert task["store_id"] == "BV-1"
-    assert task["source_ref"] == "till_variance:BV-1:2026-06-09"
+    assert task["source_ref"] == f"till_variance:BV-1:2026-06-09:{sid}"  # per drawer (D63)
     assert "SHORT" in task["title"]
     assert "200.00" in task["title"]
     assert "till short, note attached" in task["description"]

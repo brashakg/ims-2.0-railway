@@ -755,3 +755,133 @@ def test_trace_sale_lines_carry_no_cost_for_counter_roles(client, till, role):
     assert [s["order_number"] for s in sales] == [s["order_number"] for s in admin]
     for line in sales[0]["matched_lines"]:
         assert "cost_at_sale" not in line and "cost_price" not in line, line
+
+
+# ---------------------------------------------------------------------------
+# L2-STOCK-F03 (Codex audit 2026-11-04): the trace follows ONE unit through
+# sale -> return -> resale. It used to find sales only through the unit's
+# CURRENT bill and returns only through a barcode on the return line (which
+# no return line carries), so a resold piece lost its first sale and return.
+# ---------------------------------------------------------------------------
+
+
+def _screen_return(client, till, monkeypatch, order_id, item, condition="GOOD"):
+    """POST /returns with the Returns screen's own line: the bill line's id
+    and NO product_id (L2-RETURN-F01: the server takes it from the sale)."""
+    from api.routers import returns as ret_mod
+
+    db = till["db"]
+    monkeypatch.setattr(ret_mod, "_get_db", lambda: db)
+    monkeypatch.setattr(ret_mod, "get_order_repository", lambda: till["orders"])
+    # mongomock cannot run the `items.$` booking (see the test above).
+    monkeypatch.setattr(ret_mod, "_claim_returnable_qty", lambda *a, **k: True)
+    total = _order(till, order_id)["grand_total"]
+    db.orders.update_one(
+        {"order_id": order_id},
+        {"$set": {"status": "DELIVERED", "amount_paid": total, "balance_due": 0}},
+    )
+    r = client.post(
+        "/api/v1/returns",
+        json={
+            "order_id": order_id,
+            "return_type": "RETURN",
+            "items": [{
+                "order_item_id": item["item_id"],
+                "product_name": item.get("product_name") or "",
+                "sku": item.get("sku") or "",
+                "return_qty": 1,
+                "unit_price": 9000.0,
+                "reason": "CUSTOMER_CHANGED_MIND",
+                "condition": condition,
+                "notes": "",
+            }],
+        },
+        headers=_token(["SUPERADMIN"]),
+    )
+    assert r.status_code in (200, 201), r.text
+    return r.json()
+
+
+def _trace(client, barcode, roles=("SUPERADMIN",)):
+    r = client.get(f"/api/v1/inventory/barcode/{barcode}/trace", headers=_token(list(roles)))
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_trace_keeps_the_first_sale_and_its_return_after_the_piece_is_resold(
+    client, till, monkeypatch
+):
+    # 1. A product-selected sale: the till takes SU-A, the line names no unit.
+    first = _sell(client, [_line()])
+    assert first.status_code in (200, 201), first.text
+    o1, n1 = _order_id(first), first.json().get("order_number")
+    assert _unit(till, "SU-A")["order_id"] == o1
+    # 2. Returned GOOD through the Returns screen: the SAME unit is back on sale.
+    ret1 = _screen_return(client, till, monkeypatch, o1, _item_of(_order(till, o1), None))
+    assert ret1["restock_stock_ids"] == ["SU-A"], ret1
+    assert _unit(till, "SU-A")["status"] == "AVAILABLE"
+    assert till["db"].returns.find_one({"return_id": ret1["return_id"]})["items"][0]["product_id"] == PID
+    # 3. The till scans that piece and sells it again.
+    second = _sell(client, [_line(stock_id="SU-A")])
+    assert second.status_code in (200, 201), second.text
+    o2, n2 = _order_id(second), second.json().get("order_number")
+    assert _unit(till, "SU-A")["status"] == "SOLD" and _unit(till, "SU-A")["order_id"] == o2
+
+    trace = _trace(client, UNIT_A["barcode"])
+    # The audit's finding: only the resale showed, and no return at all.
+    assert [s["order_number"] for s in trace["sales"]] == [n1, n2]
+    assert [r.get("return_id") for r in trace["returns"]] == [ret1["return_id"]]
+    assert [s["link"] for s in trace["sales"]] == ["RETURN", "LINE"]
+    assert trace["returns"][0]["order_id"] == o1
+
+    # 4. The resale comes back DAMAGED: set aside, and the unit's own stamps now
+    #    name only the SECOND bill -- the first is kept by its return alone.
+    ret2 = _screen_return(
+        client, till, monkeypatch, o2, _item_of(_order(till, o2), "SU-A"), condition="DAMAGED"
+    )
+    unit = _unit(till, "SU-A")
+    assert unit["status"] == "QUARANTINED" and unit["returned_from_order_id"] == o2, unit
+    trace = _trace(client, UNIT_A["barcode"])
+    assert [s["order_number"] for s in trace["sales"]] == [n1, n2]
+    assert [s["link"] for s in trace["sales"]] == ["RETURN", "LINE"]
+    assert [r["return_id"] for r in trace["returns"]] == [ret1["return_id"], ret2["return_id"]]
+    assert trace["returns"][1]["quarantined_stock_ids"] == ["SU-A"]
+    # The other unit of the same product never left the shelf: no history.
+    other = _trace(client, UNIT_B["barcode"])
+    assert other["sales"] == [] and other["returns"] == []
+
+
+def test_trace_links_are_explicit_and_stay_inside_the_callers_shops(client, till):
+    """Sold at another shop, returned there, moved here and sold here. Admin
+    sees the whole chain, each sale saying how it is linked; this shop's login
+    sees this shop's sale only. A bill of the same PRODUCT that no record ties
+    to the unit is never listed."""
+    db = till["db"]
+    db.stock_units.update_one(
+        {"stock_id": "SU-B"},
+        {"$set": {"status": "SOLD", "order_id": "ORD-HERE", "returned_from_order_id": "ORD-THERE",
+                  "prior_sold_order_id": "ORD-THERE"}},
+    )
+
+    def _bill(oid, number, store, day):
+        return {"order_id": oid, "order_number": number, "store_id": store, "status": "DELIVERED",
+                "created_at": f"2026-01-{day:02d}T10:00:00", "items": [{"product_id": PID, "quantity": 1}]}
+
+    db.orders.insert_many([
+        _bill("ORD-THERE", "BV-THERE-1", "BV-OTHER-09", 5),
+        _bill("ORD-UNRELATED", "BV-SAME-PRODUCT", STORE, 7),
+        _bill("ORD-HERE", "BV-HERE-1", STORE, 9),
+    ])
+    db.returns.insert_one({
+        "return_id": "RET-THERE", "order_id": "ORD-THERE", "store_id": "BV-OTHER-09",
+        "status": "COMPLETED", "created_at": "2026-01-06T10:00:00+00:00",
+        "items": [{"order_item_id": "x", "product_id": PID, "return_qty": 1}],
+        "restock_stock_ids": ["SU-B"], "quarantined_stock_ids": [],
+    })
+    admin = _trace(client, UNIT_B["barcode"])
+    assert [s["order_number"] for s in admin["sales"]] == ["BV-THERE-1", "BV-HERE-1"]
+    assert [r.get("return_id") for r in admin["returns"]] == ["RET-THERE"]
+    assert [s["link"] for s in admin["sales"]] == ["RETURN", "UNIT"]
+    shop = _trace(client, UNIT_B["barcode"], roles=("STORE_MANAGER",))
+    assert [(s["order_number"], s["link"]) for s in shop["sales"]] == [("BV-HERE-1", "UNIT")]
+    assert shop["returns"] == []

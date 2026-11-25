@@ -765,6 +765,10 @@ def _gb_review(db, monkeypatch, results):
     monkeypatch.setattr(sr, "_cap_restock_to_returnable", lambda lines, _o, _r: (lines, None, False))
     feed = iter(results)
     monkeypatch.setattr(sr, "_restock_booked", lambda *_a, **_k: next(feed))
+    # #1397's one claimed stock step (D129): Goods back places through
+    # restock_refund, whose slot reads this fake db does not serve -- the
+    # press's outcome is fed there, as above.
+    monkeypatch.setattr(sr, "restock_refund", lambda *_a, **_k: next(feed))
     return lambda: sr.goods_back(db, db.shopify_refund_review.find_one({"review_id": "VG"}), user_id="u")
 
 

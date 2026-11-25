@@ -1045,7 +1045,12 @@ async def http_exception_handler(request: Request, exc: HTTPException):
     logger.warning(f"HTTP Exception {exc.status_code}: {exc.detail}")
 
     # Create response with proper content
-    response = JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+    # jsonable_encoder: a detail that carries a stored record (a 409 with the
+    # saved Day-End close) can hold BSON datetimes; the raw JSONResponse could
+    # not encode them and the conflict became a 500.
+    response = JSONResponse(
+        status_code=exc.status_code, content={"detail": jsonable_encoder(exc.detail)}
+    )
 
     # Add CORS headers to the error response so browser doesn't treat it as CORS error
     origin = request.headers.get("origin")

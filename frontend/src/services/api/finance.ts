@@ -42,7 +42,9 @@ export const financeApi = {
     return response.data;
   },
 
-  getBudget: async (params?: { month?: number; year?: number; mode?: string }) => {
+  // The plan Budgeting saved for a shop-month (one reader with
+  // /budgets/variance). No month/year = the current IST month.
+  getBudget: async (params?: { month?: number; year?: number; mode?: string; store_id?: string }) => {
     const response = await api.get('/finance/budget', { params });
     return response.data;
   },

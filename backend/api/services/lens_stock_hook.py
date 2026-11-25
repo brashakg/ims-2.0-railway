@@ -48,7 +48,7 @@ over the lens_stock router functions.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from fastapi import HTTPException
 
@@ -464,6 +464,7 @@ async def release_for_cancel(
     line_index: int,
     store_id: str,
     user: Dict[str, Any],
+    was_saved: Optional[Callable[[], bool]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Release the reserved cell back to AVAILABLE on order cancel.
 
@@ -472,9 +473,27 @@ async def release_for_cancel(
     cancel) or the cell does not exist; either way we don't block the
     cancel. Skips when no `reserve` row exists for this line (nothing
     was ever reserved -- e.g. lens_reserve_failed=true at order create).
+
+    `was_saved` (a save-failure rollback passes it, as _release_claimed_units
+    and discount_approval.give_back take it): the write may have landed
+    before the error, so the cell is never freed under a line that exists. A
+    check that fails keeps the cell reserved (fail closed) -- the reserve
+    audit row under this order_id is the record to reconcile against.
     """
     if not _is_lens_item(order_item):
         return None
+    if was_saved is not None:
+        try:
+            saved = was_saved()
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "[LENS_HOOK] could not tell if order %s line %s was saved (%s); "
+                "lens kept reserved -- reconcile manually",
+                order_id, line_index, exc,
+            )
+            return {"status": "kept_unverified"}
+        if saved:
+            return {"status": "kept_for_saved_order"}
 
     cell = _extract_cell_key(order_item)
     if cell is None:

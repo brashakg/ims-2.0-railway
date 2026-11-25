@@ -407,9 +407,13 @@ async def add_order_item(
             # The units and the approval go back only once it is confirmed the
             # line did NOT land (the write may have landed before the error).
             def _line_was_saved() -> bool:
+                # RAW read (repo.find_by_id swallows errors into None, which
+                # would read as "not saved"): an unreadable outcome raises so
+                # the give-backs fail closed.
+                doc = repo.collection.find_one({"order_id": order_id}) or {}
                 return any(
                     ln.get("item_id") == item_data["item_id"]
-                    for ln in (repo.find_by_id(order_id) or {}).get("items", [])
+                    for ln in doc.get("items", [])
                 )
 
             _release_claimed_units(order_id, claimed, _line_was_saved)
@@ -421,6 +425,7 @@ async def add_order_item(
                     line_index=_line_idx,
                     store_id=_store_id or "",
                     user=current_user,
+                    was_saved=_line_was_saved,
                 )
             except Exception:  # noqa: BLE001
                 pass  # fail-soft compensating action

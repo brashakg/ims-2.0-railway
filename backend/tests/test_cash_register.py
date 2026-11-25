@@ -172,8 +172,14 @@ class _FakeCollection:
         return _R()
 
     def update_one(self, flt, upd):
+        def _eq(d, k, v):
+            # {"$ne": x}: the guarded close's "not yet CLOSED" filter.
+            if isinstance(v, dict) and "$ne" in v:
+                return d.get(k) != v["$ne"]
+            return d.get(k) == v
+
         for d in self.docs:
-            if all(d.get(k) == v for k, v in flt.items()):
+            if all(_eq(d, k, v) for k, v in flt.items()):
                 if "$set" in upd:
                     d.update(upd["$set"])
 
@@ -356,7 +362,7 @@ class TestCashRegisterEndpoints:
             def find_many(self, q):
                 return [t for t in tasks if all(t.get(k) == v for k, v in (q or {}).items())]
 
-            def create(self, t):
+            def create(self, t, **_kw):  # the real one takes raise_on_duplicate
                 tasks.append(dict(t))
                 return dict(t)
 
@@ -405,6 +411,11 @@ class TestCashRegisterEndpoints:
 
         # Manager alert above the band (owner ruling 2026-08-25): ONE SYSTEM
         # task on the store manager's worklist, deduped per (store, day).
+        # (This fake has no find_one_and_update, so the count never reaches
+        # the till: that raises its own "count it on the Z-Read" task, #1421.)
+        assert body["till_link_ok"] is False
+        assert [t["source_ref"] for t in tasks if t["source_ref"].startswith("till_uncounted:")]
+        tasks = [t for t in tasks if t["source_ref"].startswith("till_variance:")]
         assert len(tasks) == 1, tasks
         assert tasks[0]["assigned_to"] == "store_manager@store-001"  # a person
         assert tasks[0]["store_id"] == "store-001"

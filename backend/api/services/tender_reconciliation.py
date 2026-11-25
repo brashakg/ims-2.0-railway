@@ -242,6 +242,7 @@ def reconcile_window(
     *,
     tender_map: Optional[Dict[str, str]] = None,
     include_returns: bool = False,
+    strict: bool = False,
 ) -> Dict[str, Any]:
     """Aggregate ``order.payments[]`` for ``store_id`` in [start, end] by
     canonical tender. ``window_*`` may be ISO strings or datetimes; both a
@@ -272,7 +273,11 @@ def reconcile_window(
     the payment_reconciliations snapshot, the cash-register close by-mode
     display) keeps the payments-only contract it was written against -- netting
     refunds into it silently emitted NEGATIVE expected gateway settlements with
-    negative MDR. Only eod_tally.compute_expected (the drawer figure) opts in."""
+    negative MDR. Only eod_tally.compute_expected (the drawer figure) opts in.
+
+    ``strict=True`` RAISES when the orders or returns read fails instead of
+    answering an empty envelope: a drawer figure built on a read that failed
+    is a zero presented as a sale-free day (PR #1421 review, D53)."""
     if tender_map is None:
         tender_map = get_effective_tender_map(db, store_id=store_id)
 
@@ -285,6 +290,8 @@ def reconcile_window(
             for o in cursor:
                 all_payments.extend(o.get("payments") or [])
         except Exception:  # noqa: BLE001
+            if strict:
+                raise
             all_payments = []
             payments_read_ok = False
 
@@ -293,7 +300,9 @@ def reconcile_window(
     # readers never disagree (a refunds-only envelope must not be frozen into the
     # hash-chained snapshot on a transient Mongo blip).
     if include_returns and payments_read_ok:
-        _net_returns_into_by_mode(db, by_mode, store_id, window_start, window_end)
+        _net_returns_into_by_mode(
+            db, by_mode, store_id, window_start, window_end, strict=strict
+        )
     total_net = 0.0
     for tender, agg in by_mode.items():
         agg["ledger"] = resolve_ledger(tender, tender_map)
@@ -313,6 +322,7 @@ def _net_returns_into_by_mode(
     store_id: str,
     window_start: Any,
     window_end: Any,
+    strict: bool = False,
 ) -> None:
     """Net COMPLETED, non-historical ``returns`` docs into the by-mode rows
     (in place). See reconcile_window's docstring for the why.
@@ -402,6 +412,8 @@ def _net_returns_into_by_mode(
             row["refunded"] = round(row["refunded"] + d["refunded"], 2)
             row["net"] = round(row["net"] + d["collected"] - d["refunded"], 2)
     except Exception:  # noqa: BLE001
+        if strict:
+            raise
         return
 
 

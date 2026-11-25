@@ -195,6 +195,13 @@ function ReturnsDesk({ canComplete }: { canComplete: boolean }) {
   const [resultDrawerNetted, setResultDrawerNetted] = useState<boolean | null>(null);
   const [resultCashRefunded, setResultCashRefunded] = useState(0);
   const [resultCreditAmount, setResultCreditAmount] = useState(0);
+  // What the press PAID (money or store credit), read off the server's answer:
+  // its net_refund less the points-paid part (_press_answer). The live quote
+  // is dropped once the step leaves 'select', so the done screen must never
+  // read netRefund (it falls back to the local gross, points included).
+  const [resultPays, setResultPays] = useState(0);
+  // The server's note when the returned units were NOT put back in stock.
+  const [resultStockNote, setResultStockNote] = useState('');
   const [resultCollectAmount, setResultCollectAmount] = useState(0);
   const [resultCollectMethod, setResultCollectMethod] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -223,6 +230,9 @@ function ReturnsDesk({ canComplete }: { canComplete: boolean }) {
   const [mode, setMode] = useState<'new' | 'history'>('new');
   const [history, setHistory] = useState<any[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
+  // D109(1): a History read that failed is said, never shown as "no returns"
+  // (staff are sent here to press 'Update stock').
+  const [historyFailed, setHistoryFailed] = useState(false);
 
   // F27 refund-approval gate: when the server demands a tiered sign-off this
   // holds the context for the request+poll modal.
@@ -599,8 +609,17 @@ function ReturnsDesk({ canComplete }: { canComplete: boolean }) {
       ) / 100,
     );
     setResultCreditAmount(Number(result?.credit_amount) || 0);
+    // An answer without net_refund (an older record) keeps the quoted figure
+    // the press was confirmed on -- the quote is still live at this point.
+    setResultPays(
+      result?.net_refund != null
+        ? Math.max(0, Math.round(
+          (Number(result.net_refund) - (Number(result?.points_paid_share) || 0)) * 100) / 100)
+        : roundedNet,
+    );
     setResultCollectAmount(Number(result?.collect_amount) || 0);
     setResultCollectMethod(String(result?.collect_method || ''));
+    setResultStockNote(String(result?.stock_note || ''));
     setStep('complete');
     return true;
   };
@@ -707,8 +726,10 @@ function ReturnsDesk({ canComplete }: { canComplete: boolean }) {
     try {
       const res = await returnsApi.list({ store_id: user?.activeStoreId, limit: 100 });
       setHistory(res?.returns || res || []);
+      setHistoryFailed(false);
     } catch {
       setHistory([]);
+      setHistoryFailed(true);
     } finally {
       setHistoryLoading(false);
     }
@@ -717,6 +738,24 @@ function ReturnsDesk({ canComplete }: { canComplete: boolean }) {
   useEffect(() => {
     if (mode === 'history') loadHistory();
   }, [mode, loadHistory]);
+
+  // "Update stock" on a recorded return whose units are not placed yet (its
+  // press stopped after the record, or Accounts completed it): the server
+  // puts each unit back once. The answer is shown on the row.
+  const [stockBusy, setStockBusy] = useState<string | null>(null);
+  const [stockMsg, setStockMsg] = useState<Record<string, string>>({});
+  const updateStock = async (returnId: string) => {
+    setStockBusy(returnId);
+    try {
+      const res = await returnsApi.restock(returnId);
+      setStockMsg((m) => ({ ...m, [returnId]: String(res?.message || 'Done.') }));
+      await loadHistory();
+    } catch (e) {
+      setStockMsg((m) => ({ ...m, [returnId]: getErrorMessage(e, 'Could not update stock. Try again.') }));
+    } finally {
+      setStockBusy(null);
+    }
+  };
 
   return (
     <div className="inv-body">
@@ -1003,6 +1042,14 @@ function ReturnsDesk({ canComplete }: { canComplete: boolean }) {
                       {quoteLoading && !quote ? 'Calculating…' : fp(netRefund)}
                     </span>
                   </div>
+                  {(quote?.points_paid_share ?? 0) > 0 && (
+                    <p className="mt-1 text-xs text-gray-500">
+                      {/* D28: an admin closed this bill's points -- no promise that points go back. */}
+                      {quote?.points_waived
+                        ? `${fp(quote?.points_paid_share ?? 0)} was paid with loyalty points: points for this bill are settled by head office and are not returned automatically. It is not paid as money or store credit.`
+                        : `${fp(quote?.points_paid_share ?? 0)} was paid with loyalty points: it goes back to the customer's points by itself, not as money or store credit.`}
+                    </p>
+                  )}
 
                   {/* Refund-tender capture (RETURN only): how the cash is returned. */}
                   {returnType === 'RETURN' && roundedNet > 0 && (
@@ -1141,7 +1188,7 @@ function ReturnsDesk({ canComplete }: { canComplete: boolean }) {
           </h3>
           <p className="text-gray-500 mt-2">Reference: {resultId}</p>
           <p className="text-2xl font-bold text-bv-red-600 mt-3">
-            {returnType === 'EXCHANGE' ? (exchangeDirection === 'EVEN' ? fc(0) : fc(Math.abs(exchangeDiff))) : fc(netRefund)}
+            {returnType === 'EXCHANGE' ? (exchangeDirection === 'EVEN' ? fc(0) : fc(Math.abs(exchangeDiff))) : fc(resultPays)}
           </p>
           <p className="text-sm text-gray-500 mt-1">
             {returnType === 'CREDIT_NOTE' ? 'Store credit added to customer account' :
@@ -1151,6 +1198,11 @@ function ReturnsDesk({ canComplete }: { canComplete: boolean }) {
                   : 'Even exchange — no balance due')
                 : 'Refund recorded against the tender(s) you selected'}
           </p>
+          {resultStockNote && (
+            <p role="alert" className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mt-3 max-w-md mx-auto">
+              {resultStockNote}
+            </p>
+          )}
           {/* Store credit actually ISSUED for the non-drawer portion. */}
           {returnType === 'RETURN' && resultCreditAmount > 0 && (
             <p className="text-xs text-gray-600 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 mt-3 max-w-md mx-auto">
@@ -1164,10 +1216,10 @@ function ReturnsDesk({ canComplete }: { canComplete: boolean }) {
               This {fp(resultCashRefunded)} cash refund is now recorded in Day-End — do not also enter it as cash paid out.
             </p>
           )}
-          {returnType === 'RETURN' && resultDrawerNetted === false && roundedNet > 0 && (
+          {returnType === 'RETURN' && resultDrawerNetted === false && resultPays > 0 && (
             <p className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2 mt-3 max-w-md mx-auto">
               This refund could NOT be auto-deducted from the drawer (the order has no verified payment tenders).
-              If you handed back cash, record {fp(netRefund)} as cash paid out at day-end — otherwise the till will read short.
+              If you handed back cash, record {fp(resultPays)} as cash paid out at day-end — otherwise the till will read short.
             </p>
           )}
           {/* An EXCHANGE-COLLECT taken in CASH moves the SAME drawer figure as
@@ -1187,7 +1239,7 @@ function ReturnsDesk({ canComplete }: { canComplete: boolean }) {
             </p>
           )}
           <div className="flex gap-3 justify-center mt-6">
-            <button onClick={() => { setStep('search'); setSelectedOrder(null); setReturnItems([]); setResultId(null); setReplacementItems([]); setProductResults([]); setProductQuery(''); setRestockingFee(0); setRefundTenders([]); setCollectMethod(''); setQuote(null); setQuoteError(null); setResultDrawerNetted(null); setResultCashRefunded(0); setResultCreditAmount(0); setResultCollectAmount(0); setResultCollectMethod(''); }}
+            <button onClick={() => { setStep('search'); setSelectedOrder(null); setReturnItems([]); setResultId(null); setReplacementItems([]); setProductResults([]); setProductQuery(''); setRestockingFee(0); setRefundTenders([]); setCollectMethod(''); setQuote(null); setQuoteError(null); setResultDrawerNetted(null); setResultCashRefunded(0); setResultCreditAmount(0); setResultPays(0); setResultCollectAmount(0); setResultCollectMethod(''); setResultStockNote(''); }}
               className="px-6 py-2.5 bg-bv-red-600 text-white rounded-lg text-sm font-semibold">New Return</button>
           </div>
         </div>
@@ -1205,6 +1257,14 @@ function ReturnsDesk({ canComplete }: { canComplete: boolean }) {
           </div>
           {historyLoading ? (
             <div className="py-10 text-center text-gray-500">Loading...</div>
+          ) : historyFailed ? (
+            <div role="alert" className="py-10 text-center text-red-700">
+              <p>Could not load returns.</p>
+              <button type="button" onClick={loadHistory}
+                className="mt-2 px-4 min-h-[44px] text-sm rounded-md border border-gray-300 bg-white text-gray-800 hover:bg-gray-50">
+                Retry
+              </button>
+            </div>
           ) : history.length === 0 ? (
             <div className="py-10 text-center text-gray-500">
               <RotateCcw className="w-9 h-9 mx-auto mb-2 opacity-40" />
@@ -1232,7 +1292,28 @@ function ReturnsDesk({ canComplete }: { canComplete: boolean }) {
                     const typeLabel = ({ RETURN: 'Refund', EXCHANGE: 'Exchange', CREDIT_NOTE: 'Credit' } as Record<string, string>)[r.return_type] || r.return_type;
                     return (
                       <tr key={r.return_id || i} className="border-b border-gray-100">
-                        <td className="py-2 pr-3 font-mono text-xs text-gray-700">{r.return_id}</td>
+                        <td className="py-2 pr-3 font-mono text-xs text-gray-700">
+                          {r.return_id}
+                          {r.stock_pending === true && r.restock_applied !== true && r.status === 'COMPLETED' && (
+                            <div className="mt-1 font-sans">
+                              {/* D122(3): every unfinished stock step reads the same and IMS
+                                  finishes it (this button, or its hourly sweep) -- never a hand entry. */}
+                              <div className="text-xs text-amber-700">Units not back in stock</div>
+                              {r.recovered ? (
+                                // D7: a record completed in Needs completing is retried there.
+                                <div className="text-xs text-gray-600">Retry stock step is in Needs completing (Accounts / Admin)</div>
+                              ) : (
+                                <button type="button" onClick={() => updateStock(r.return_id)} disabled={stockBusy === r.return_id}
+                                  className="mt-1 px-3 min-h-[36px] text-xs rounded-md border border-gray-300 bg-white text-gray-800 hover:bg-gray-50 disabled:opacity-50">
+                                  {stockBusy === r.return_id ? 'Updating...' : 'Update stock'}
+                                </button>
+                              )}
+                            </div>
+                          )}
+                          {stockMsg[r.return_id] && (
+                            <div role="status" className="mt-1 font-sans text-xs text-gray-600">{stockMsg[r.return_id]}</div>
+                          )}
+                        </td>
                         <td className="py-2 pr-3"><span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-700">{typeLabel}</span></td>
                         <td className="py-2 pr-3">{r.customer_name || '-'}</td>
                         <td className="py-2 pr-3 text-gray-500">{r.order_number || '-'}</td>

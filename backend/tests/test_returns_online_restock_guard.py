@@ -530,10 +530,11 @@ def test_redirected_return_still_reactivates_its_OWN_order_unit(monkeypatch):
     assert by_id["STK-DECOY"]["order_id"] == "ORD-OTHER-7"
 
 
-def test_ordinary_in_store_return_keeps_its_store_wide_fallback(monkeypatch):
-    """The order-agnostic fallback stays for a PHYSICAL-store return: there the
-    store IS where the sale happened, so 'some SOLD unit of this product at this
-    shop' remains a reasonable stand-in for a lost row. Byte-unchanged."""
+def test_ordinary_in_store_return_never_takes_a_sold_unit_that_is_not_its_bills(monkeypatch):
+    """Decision D5 (2026-11-11) retired the counter's order-agnostic fallback
+    ("some SOLD unit of this product at this shop"): a SOLD row that does not
+    name THIS bill is left alone, on a physical-store return too, and the
+    returned piece gets a new record."""
     order = {
         "order_id": "ORD-1",
         "order_number": "INV-1001",
@@ -545,7 +546,7 @@ def test_ordinary_in_store_return_keeps_its_store_wide_fallback(monkeypatch):
         order=order,
         stock_units=[
             {
-                # No order_id at all -> only the store-wide fallback can find it.
+                # No order_id at all: nothing says it is this bill's unit.
                 "stock_id": "STK-LEGACY",
                 "product_id": "PRD-1",
                 "store_id": PHYSICAL_COUNTER_STORE,
@@ -560,8 +561,12 @@ def test_ordinary_in_store_return_keeps_its_store_wide_fallback(monkeypatch):
         headers={"Authorization": f"Bearer {ctx['token']}"},
     )
     assert r.status_code == 201, r.text
-    assert r.json()["restock_stock_ids"] == ["STK-LEGACY"]
-    assert ctx["stock_repo"].units[0]["status"] == "AVAILABLE"
+    units = ctx["stock_repo"].units
+    assert units[0]["stock_id"] == "STK-LEGACY" and units[0]["status"] == "SOLD"
+    assert [(u["stock_id"], u["status"], u["store_id"], u["source_type"]) for u in units[1:]] == [
+        ("NEW-1", "AVAILABLE", PHYSICAL_COUNTER_STORE, "RETURN")]
+    assert r.json()["restock_stock_ids"] == ["NEW-1"]
+    assert "print the new label" in r.json()["stock_note"]
 
 
 # ---------------------------------------------------------------------------
@@ -1730,6 +1735,35 @@ def test_retry_door_restocks_normally_when_the_order_is_readable(monkeypatch):
     assert by_id["STK-B"]["status"] == "AVAILABLE"
     assert by_id["STK-B"]["store_id"] == PHYSICAL_COUNTER_STORE
     assert all(not sid.startswith("NEW-") for sid in by_id)
+
+
+@pytest.mark.parametrize("resolved_at", [PHYSICAL_COUNTER_STORE, None])
+def test_the_accounts_retry_never_books_an_online_return_at_the_pressers_own_shop(monkeypatch, resolved_at):
+    """Needs completing > Retry stock step is pressed at head office: the
+    presser's active shop (BOK here) is not where the goods were handed back.
+    An online order that names no fulfilment shop goes back to the shop the
+    press itself resolved (kept on the record: PUN), else nowhere -- the
+    store door's "my own counter" fallback would have minted it at BOK."""
+    ctx = _build_ctx(monkeypatch, order=dict(_ONLINE_ORDER), stock_units=[],
+                     active_store=PHYSICAL_FULFILMENT_STORE)
+    ctx["returns_coll"].insert_one({
+        "return_id": "RET-REC-ONL", "order_id": "ORD-ONL-1", "store_id": ONLINE_STORE,
+        "status": "COMPLETED", "restock_applied": False, "restock_stock_ids": [], "restocked": [],
+        "restock_store_id": resolved_at, "recovered": {"by": "U-ACC", "source": "unsaved doc"},
+        "items": [{"order_item_id": "li1", "product_id": "PRD-1", "sku": "RB-1", "return_qty": 1,
+                   "unit_price": 1500, "condition": "GOOD"}],
+    })
+    r = ctx["client"].post("/api/v1/returns/RET-REC-ONL/complete-record/restock",
+                           headers={"Authorization": f"Bearer {ctx['token']}"})
+    assert r.status_code == 200, r.text
+    assert ctx["stock_repo"].units_at(PHYSICAL_FULFILMENT_STORE) == []
+    assert ctx["stock_repo"].units_at(ONLINE_STORE) == []
+    if resolved_at:
+        assert r.json()["restock_applied"] is True and r.json()["restock_store_id"] == resolved_at
+        assert [u["status"] for u in ctx["stock_repo"].units_at(resolved_at)] == ["AVAILABLE"]
+    else:
+        # No shop resolved: nothing is minted anywhere, the step stays open.
+        assert r.json()["restock_applied"] is False and ctx["stock_repo"].units == []
 
 
 def test_retry_restock_door_redirects_off_the_online_store(monkeypatch):

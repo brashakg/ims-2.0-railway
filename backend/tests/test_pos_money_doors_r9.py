@@ -290,7 +290,9 @@ def test_a_return_whose_doc_was_lost_keeps_counting(till, monkeypatch):
     returns = till["db"].get_collection("returns")
     _crash_once(monkeypatch, returns, "insert_one", lambda doc, *a, **k: doc.get("status") == "COMPLETED")
     client = _advance_client()
-    assert client.post("/api/v1/returns", json=payload, headers=_hdr("CASHIER")).status_code == 201
+    # D95(3): a record that is not confirmed is never "Refund recorded".
+    lost = client.post("/api/v1/returns", json=payload, headers=_hdr("CASHIER"))
+    assert lost.status_code == 503 and lost.json()["detail"] == returns_router.RECORD_NOT_CONFIRMED_MESSAGE
     assert returns.count_documents({}) == 0
     holds = _stored(till)["refund_holds"]
     rid = next(iter(holds))

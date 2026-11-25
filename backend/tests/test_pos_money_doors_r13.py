@@ -74,10 +74,12 @@ def test_an_error_after_the_credit_lands_keeps_the_hold_and_the_approval(till, m
     monkeypatch.setattr(approvals.ApprovalEngine, "release_consumption",
                         lambda self, rid, **k: released.append(rid), raising=False)
 
-    def _boom(*a, **k):
-        raise RuntimeError("quarantine store down")
+    async def _boom(*a, **k):
+        raise RuntimeError("the record's store is down")
 
-    monkeypatch.setattr(returns_router, "_quarantine_damaged_units", _boom)
+    # D95 / D122: the stock step runs after the record and is fail-soft, so
+    # the error after the credit is the record insert's.
+    monkeypatch.setattr(returns_router, "_own_record_or_refuse", _boom)
     with pytest.raises(RuntimeError):
         _advance_client().post("/api/v1/returns", json=payload, headers=_hdr("STORE_MANAGER"))
     assert _balance(till) == 1800.0  # the credit landed
@@ -102,13 +104,15 @@ def test_the_sweep_skips_young_holds_and_holds_another_owner_has(till, tasks):
     till["db"].get_collection("orders").insert_one(_order(order_id="ORD-2", refund_holds={
         "RET-Y": {"amount": 100.0, "at": _ago(1), "kept": True},                    # too young
         "RET-I": {"amount": 100.0, "at": _ago(30), "kept": True},                   # its credit landed
-        "RET-D": {"amount": 100.0, "at": _ago(30), "kept": True, "doc": {"x": 1}},  # its own task
+        # D95(3): its press could not confirm its record and was never pressed again.
+        "RET-D": {"amount": 100.0, "at": _ago(30), "kept": True, "doc": {"return_id": "RET-D"}},
+        "RET-E": {"amount": 100.0, "at": _ago(1), "kept": True, "doc": {"return_id": "RET-E"}},  # may still re-press
         "RET-V": {"amount": 100.0, "at": _ago(30), "kept": True},                   # a VOID line
     }, refund_holds_v=1))
     _ledger(till).insert_one(_row("RET-I:credit", type=scl.ISSUED, applied=True))
     _ledger(till).insert_one(_row("RET-V:credit", type="VOID", delta=0.0, void_delta=200.0))
-    assert returns_router.sweep_stuck_return_holds() == 1
-    assert [t["dedupe_ref"] for t in tasks] == ["return_hold_stuck:RET-V"]
+    assert returns_router.sweep_stuck_return_holds() == 2
+    assert sorted(t["dedupe_ref"] for t in tasks) == ["return_doc_missing:RET-D", "return_hold_stuck:RET-V"]
 
 
 def test_nothing_paid_gives_the_claims_hold_and_number_back_once(till, monkeypatch, tasks):
@@ -279,8 +283,11 @@ def test_an_unpaid_cash_part_is_owed_and_raises_a_pay_task(till, tasks):
     assert [t["method"] for t in doc["refund_tenders"]] == ["STORE_CREDIT"]
     assert [(t["method"], t["status"]) for t in doc["owed_tenders"]] == [("CASH", "OWED")]
     assert round(doc["gst_breakup"]["taxable"] + doc["gst_breakup"]["tax"], 2) == doc["net_refund"]
-    assert [t["dedupe_ref"] for t in tasks] == ["return_cash_owed:RET-P"]
-    assert "Pay customer Rs 600.00 for return RET-P" in tasks[0]["title"]
+    # #1413 (D6): a rebuilt line whose condition was not kept is set aside
+    # by the record's Retry stock step, so the record carries that task too.
+    assert sorted(t["dedupe_ref"] for t in tasks) == ["return_cash_owed:RET-P", "return_restock_blocked:RET-P"]
+    owed_task = [t for t in tasks if t["dedupe_ref"] == "return_cash_owed:RET-P"][0]
+    assert "Pay customer Rs 600.00 for return RET-P" in owed_task["title"]
 
 
 # =========================================================================== #
@@ -573,4 +580,5 @@ def test_the_scheduled_tick_also_sweeps_stuck_holds(monkeypatch):
 
     monkeypatch.setattr(asyncio, "to_thread", _to_thread)
     asyncio.run(cust_router.scheduled_credit_reconcile())
-    assert seen == ["reconcile_pending_credits", "sweep_stuck_return_holds"]
+    assert seen == ["reconcile_pending_credits", "sweep_stuck_return_holds",
+                    "finish_unfinished_refunds", "reconcile_loyalty_reversals"]
