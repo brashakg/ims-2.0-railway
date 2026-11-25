@@ -102,6 +102,8 @@ _ALLOWED = {
     ("taskmaster.py", "now = datetime.now()"),
     # A reward id's date label, not a stored instant.
     ("loyalty.py", "reward_id = f\"RWD-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}\""),
+    # A return id's date label, not a stored instant.
+    ("returns.py", 'stamp = datetime.now().strftime("%y%m%d")'),
 }
 
 
@@ -136,6 +138,9 @@ _TASK_FILES = [
     "api/routers/products.py",
     "api/routers/reports/blueprint.py",
     "api/routers/workshop/spoilage.py",
+    # #1397's return writes (stock flip-back, blocked-restock task reopen) and
+    # task closes: stored event instants, UTC like every other (D100).
+    "api/routers/returns.py",
 ]
 
 
