@@ -35,6 +35,8 @@ from .shopify_delete_shape import (
     unexpected_delete_keys,
 )
 
+from .shopify_lookup import find_by_shopify_id
+
 logger = logging.getLogger(__name__)
 
 
@@ -44,17 +46,11 @@ def _norm(value: Any) -> str:
 
 def _find_customer_by_shopify_id(db, shopify_customer_id: str) -> Optional[Dict[str, Any]]:
     """The IMS customer previously synced from this Shopify customer
-    (shopify_customer_sync stamps shopify_customer_id). Fail-soft -> None."""
-    if db is None or not shopify_customer_id:
-        return None
-    try:
-        coll = db.get_collection("customers")
-        if coll is None:
-            return None
-        return coll.find_one({"shopify_customer_id": shopify_customer_id})
-    except Exception:  # noqa: BLE001
-        logger.debug("[SHOPIFY_CUSTOMER_DELETE] customer lookup failed", exc_info=True)
-        return None
+    (shopify_customer_sync stamps shopify_customer_id), or None when there
+    is none. A lookup that FAILS raises (L1-F29: an outage is not
+    "customer not found") - the handler's own except turns it into a
+    failed, retried inbox row."""
+    return find_by_shopify_id(db, "customers", "shopify_customer_id", shopify_customer_id)
 
 
 def handle_shopify_customer_delete(

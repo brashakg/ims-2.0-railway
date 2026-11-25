@@ -28,6 +28,7 @@ Scope of MVP implementation:
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone, timedelta
 import logging
+import re
 
 from ..base import JarvisAgent, AgentType, AgentResponse, AgentContext
 from api.utils.ist import ist_day_start_utc, ist_today, now_ist
@@ -821,7 +822,8 @@ class NexusAgent(JarvisAgent):
     # (webhooks._duplicate_response) or the hourly retry sweep re-runs it; after
     # WEBHOOK_MAX_ATTEMPTS it parks as status=dead (dead letter: counted in the
     # failed-webhooks number on the SUPERADMIN sync-health card and listed in
-    # that route's webhooks.dead_letters) and nothing re-runs it again.
+    # that route's webhooks.dead_letters) and nothing re-runs it again; ONE
+    # open task per provider tells an admin (_raise_dead_webhook_task).
     WEBHOOK_MAX_ATTEMPTS = 5
     # A drain that died mid-run (worker killed) leaves status=processing; after
     # this lease another drain may claim it. Business handlers keep their own
@@ -876,6 +878,8 @@ class NexusAgent(JarvisAgent):
         if not doc:
             # Missing (swept), already done, dead, or being drained right now.
             logger.info(f"[NEXUS] inbox row {webhook_id} not claimable (done, dead, in flight or missing)")
+            # A dead row whose Admin alert never landed raises it now (D55).
+            self._settle_dead_alerts(coll, {"webhook_id": webhook_id}, vendor)
             return
 
         webhook_payload = doc.get("payload") or {}
@@ -924,6 +928,7 @@ class NexusAgent(JarvisAgent):
 
         done_at = datetime.now(timezone.utc).isoformat()
         attempts = int(doc.get("attempts") or 1)
+        dead = False
         if terminal:
             update = {"$set": {"processed": True, "processed_at": done_at,
                                "status": "skipped", "handler_error": handler_error}}
@@ -936,7 +941,11 @@ class NexusAgent(JarvisAgent):
             dead = attempts >= self.WEBHOOK_MAX_ATTEMPTS
             update = {"$set": {"processed": False, "status": "dead" if dead else "failed",
                                "handler_error": handler_error[:500],
-                               "failed_at": done_at}}
+                               "failed_at": done_at,
+                               # The Admin alert is owed by the SAME write that
+                               # parks the row dead (D55): cleared only once an
+                               # open task names it (_settle_dead_alerts).
+                               **({"alert_pending": True} if dead else {})}}
             if dead:
                 logger.error(
                     f"[NEXUS] {vendor} webhook {webhook_id} DEAD after {attempts} attempts: {handler_error}"
@@ -950,15 +959,150 @@ class NexusAgent(JarvisAgent):
                 )
         except Exception as e:
             logger.warning(f"[NEXUS] outcome update failed on {webhook_id}: {e}")
+        if dead:
+            # Parked dead: nothing retries the webhook again, so its alert is
+            # raised now -- or, if that fails (or the outcome write's answer
+            # was lost), by the next drain of the row / the hourly sweep.
+            self._settle_dead_alerts(coll, {"webhook_id": webhook_id}, vendor)
+
+    def _settle_dead_alerts(self, coll, match: Dict[str, Any], vendor: Optional[str] = None,
+                            limit: int = 50) -> None:
+        """A row parked dead owes an Admin alert (D13) until an open task names
+        it. The obligation is stored ON the row (alert_pending, written by the
+        write that parks it dead), so a task insert that failed or a drain that
+        died between the two writes is raised again here, from the next drain
+        of the row or the hourly sweep (D55). Fail-soft."""
+        try:
+            rows = list(coll.find({**match, "status": "dead", "alert_pending": True}).limit(limit))
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[NEXUS] pending dead-webhook alerts not read: {e}")
+            return
+        for row in rows:
+            wid = row.get("webhook_id")
+            if not self._raise_dead_webhook_task(
+                row.get("vendor") or vendor or "", wid, row,
+                str(row.get("handler_error") or ""), int(row.get("attempts") or 0),
+            ):
+                continue  # still owed: asked again next time
+            try:
+                coll.update_one({"webhook_id": wid, "alert_pending": True},
+                                {"$unset": {"alert_pending": ""},
+                                 "$set": {"alert_raised_at": datetime.now(timezone.utc).isoformat()}})
+            except Exception as e:  # noqa: BLE001 -- re-raising later only re-finds the task
+                logger.warning(f"[NEXUS] dead-webhook alert for {wid} raised, not marked: {e}")
+
+    def _raise_dead_webhook_task(
+        self, vendor: str, webhook_id: str, doc: Dict[str, Any], handler_error: str, attempts: int
+    ) -> bool:
+        """A webhook parked dead is retried by nothing, so a person must see
+        it (audit L1-F29, decision D13). ONE open task per provider for an
+        admin, on the Tasks board every other background failure uses
+        (task_triggers.create_system_task, deduped on its source_ref). While
+        that task is open a later dead webhook from the same provider opens no
+        second one: it is added as a line to the open task, so an outage that
+        parks forty rows is one item that names them. Fail-soft: the drain
+        must keep ticking.
+
+        True once an open task names this webhook (created, joined, or already
+        listed: a replay after a lost acknowledgement adds nothing). False when
+        that could not be written or checked -- the caller keeps the alert owed.
+        One task per episode (D55): its id is the next episode number -- one
+        past the HIGHEST episode id still stored for the provider, read BEFORE
+        the open-task read -- so two drains raising at once insert the SAME id,
+        the database refuses the second and it joins the first; a closed task
+        makes the next episode. (A count of the ref's tasks stalled for good
+        once an earlier episode was deleted: the count landed on ids still
+        stored, every insert collided, Codex 1412-round2 R2-B.)
+
+        Every webhook is NAMED on the task, however many there are (Codex
+        1412-round2 R2-A): past the readable length its line is cut to the
+        topic and id, never dropped -- a webhook the task does not name is
+        never reported alerted."""
+        try:
+            from api.services.task_triggers import (
+                _ACTIVE,
+                _person_holding,
+                active_tasks,
+                create_system_task,
+            )
+            from database.repositories.task_repository import TaskRepository
+
+            tasks = self.get_collection("tasks")
+            if tasks is None:
+                return False
+            repo = TaskRepository(tasks)
+            ref = f"webhook_dead_letter:{vendor}"
+            name = str(vendor or "provider").capitalize()
+            topic = (
+                (doc.get("headers") or {}).get("x-shopify-topic")
+                or (doc.get("payload") or {}).get("event")
+                or "unknown type"
+            )
+            line = f"{topic}, id {webhook_id}. Last error: {handler_error[:200]}"
+            prefix = f"TSK-DEADLETTER-{str(vendor).upper()}-"
+            for _ in range(3):
+                stored = tasks.find({"_id": {"$regex": f"^{re.escape(prefix)}[0-9]+$"}}, {"_id": 1})
+                episode = max((int(str(t["_id"])[len(prefix):]) for t in stored), default=0) + 1
+                task = next(iter(active_tasks(repo, ref)), None)
+                if task is not None:
+                    text = str(task.get("description") or "")
+                    if f"id {webhook_id}." in text:
+                        return True  # already listed (a replay after a lost answer)
+                    # Past the readable length: the id and topic only, never dropped.
+                    more = line if len(text) < 4000 else f"{topic}, id {webhook_id}"
+                    # Still open AND unchanged: closing a task leaves its text
+                    # alone, so a text-only check let a late line land on a
+                    # task an Admin had just closed (no open task named it).
+                    if repo.update_if(task.get("task_id"),
+                                      {"description": task.get("description"),
+                                       "status": {"$in": sorted(_ACTIVE)}},
+                                      {"description": f"{text} Also not processed: {more}."}):
+                        return True
+                    continue  # changed or closed first: read again (none open = next episode)
+                if create_system_task(
+                    repo,
+                    title=f"{name} notification not processed after {attempts} tries",
+                    description=(
+                        f"IMS stopped retrying a {name} notification after {attempts} failed "
+                        "tries. What it was meant to do (book or update an order, a refund, "
+                        "a cancellation, a delivery update, a payment) has NOT been applied "
+                        f"in IMS: check that record against {name} and correct it, or ask "
+                        "for the notification to be re-run. Close this task when every "
+                        f"notification listed here is dealt with. Not processed: {line}."
+                    ),
+                    priority="P2",
+                    category="Integrations",
+                    store_id=None,
+                    dedupe_ref=ref,
+                    assigned_to=_person_holding("ADMIN", None, any_store=True),
+                    extra={
+                        # msg91 / WhatsApp rows reach here too since #1416:
+                        # only a Shopify alert links to the Shopify screen.
+                        **({"link": "/online-store/shopify"} if vendor == "shopify" else {}),
+                        "payload": {"vendor": vendor, "webhook_id": webhook_id, "topic": topic},
+                    },
+                    # Deterministic: a second drain raising the same episode is
+                    # refused by the database, then joins the task (D55).
+                    task_id=f"{prefix}{episode}",
+                ):
+                    return True
+                # Not written (lost a race, failed, or written with its answer
+                # lost): the next pass reads the open task again.
+            return False
+        except Exception as e:  # noqa: BLE001 - a missing task never stops the drain
+            logger.warning(f"[NEXUS] dead-webhook task not raised for {webhook_id}: {e}")
+            return False
 
     async def _retry_failed_webhooks(self, limit: int = 50):
         """Bounded retry: re-run inbox rows whose handler FAILED (not dead, not
         skipped), and rows a drain was killed in (a deploy or restart left them
         status=processing past the lease -- the drain's claim takes those over).
-        Called from the hourly tick, so the tick is the back-off. Fail-soft."""
+        Called from the hourly tick, so the tick is the back-off. Fail-soft.
+        Also raises every dead row's Admin alert still owed (D55)."""
         coll = self.get_collection("webhook_inbox")
         if coll is None:
             return
+        self._settle_dead_alerts(coll, {}, limit=limit)
         abandoned = datetime.now(timezone.utc) - self.WEBHOOK_PROCESSING_LEASE
         try:
             rows = list(

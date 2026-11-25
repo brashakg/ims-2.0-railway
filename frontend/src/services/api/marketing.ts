@@ -30,6 +30,9 @@ export interface AdPerformanceResponse {
   total_cpl: number;
   google_configured: boolean;
   meta_configured: boolean;
+  // Why a CONNECTED channel has no rows ("" = fetched fine).
+  google_error?: string;
+  meta_error?: string;
   fetched_at: string;
   note: string;
 }

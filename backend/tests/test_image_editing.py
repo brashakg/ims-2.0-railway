@@ -9,12 +9,20 @@ or network -- the editor/storage/repo are faked.
 """
 
 import asyncio
+import base64
 
 import api.services.image_editor as ied
 import api.services.object_storage as ost
 from api.routers import online_store_images as imod
 
 USER = {"user_id": "u1", "roles": ["ADMIN"]}
+
+# A real 1x1 PNG: the doors under test store bytes only when they ARE an image
+# (audit L1-F41), so a made-up byte string is refused.
+_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jF90A"
+    "AAAASUVORK5CYII="
+)
 
 
 def _run(coro):
@@ -48,7 +56,7 @@ class _FakeEditor:
         return True
 
     async def edit(self, raw, spec):  # noqa: ARG002
-        return b"EDITED_PNG_BYTES"
+        return _PNG
 
 
 class _DisabledEditor:

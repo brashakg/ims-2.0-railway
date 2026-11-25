@@ -22,6 +22,9 @@ export interface IntegrationCollectionState {
 
 export type IntegrationState =
   | 'live'
+  // Shopify only: its gate is live but IMS_SHOPIFY_WRITES is off, so order
+  // intake is live and catalogue/stock pushes are still simulated.
+  | 'intake_live'
   | 'active'
   | 'test_only'
   | 'simulated'
@@ -45,6 +48,10 @@ export interface IntegrationStatusItem {
   armed?: boolean;
   /** Vendor docs / product page for hook-only rows. */
   docs?: string;
+  /** Only on a row that follows its OWN send gate instead of the report's
+   *  global dispatch_mode (Shopify): the value it is using and which switch
+   *  sets it. */
+  gate?: { label: string; mode: string; rule: string };
 }
 
 // MSG91 + Coexistence messaging preflight: honest per-item readiness rows,

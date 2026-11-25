@@ -79,6 +79,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .online_order_status import GOODS_OUT
 
+from .shopify_lookup import find_by_shopify_id
+
 logger = logging.getLogger(__name__)
 
 _REVIEW_COLLECTION = "shopify_refund_review"
@@ -244,11 +246,11 @@ def _close_unfinished_task(refund_id: str) -> None:
 
 def _unfinished_claim(db, refund_id: str) -> Optional[Dict[str, Any]]:
     """The refund's returns doc when it is unfinished (is_unfinished), else
-    None. A read that fails RAISES (decision D118): no answer is never
-    "nobody holds it" -- the caller answers an error that is retried
-    (CLAIM_UNREADABLE), never "duplicate"."""
-    coll = db.get_collection(_RETURNS_COLLECTION)
-    doc = coll.find_one({"shopify_refund_id": refund_id}) if coll is not None else None
+    None. A read that fails RAISES (decisions D13 and D118; find_by_shopify_id,
+    the lookup _refund_already_processed uses, also raises when the database
+    is not connected): no answer is never "nobody holds it" -- the caller
+    answers an error that is retried (CLAIM_UNREADABLE), never "duplicate"."""
+    doc = find_by_shopify_id(db, _RETURNS_COLLECTION, "shopify_refund_id", refund_id)
     return doc if is_unfinished(doc) else None
 
 
@@ -392,8 +394,10 @@ def _raise_unreadable_date_task(order: Dict[str, Any], refund_id: Any) -> None:
 def _posted_credit(db, return_id: Optional[str]) -> Optional[Dict[str, Any]]:
     """The credit-note ledger row an earlier attempt of this return already
     wrote (its ref is the return id), so a re-drive never posts it twice.
-    RAISES when the ledger cannot be read: "unreadable" is no answer, and a
-    None here sends the re-drive on to post (or to finalize CREDIT_FAILED)."""
+    RAISES when the ledger cannot be read (decision D13): "could not check" is
+    not "the dead run posted nothing" -- a None here sends the re-drive on to
+    post (or to finalize CREDIT_FAILED), and past the section 34 window that
+    second row is ADJUSTED while the old one stays ISSUED."""
     if not return_id:
         return None
     ledger = db.get_collection("credit_note_ledger")
@@ -589,18 +593,11 @@ def _refund_auto_enabled(db) -> bool:
 
 
 def _find_ims_order(db, shopify_order_id: str) -> Optional[Dict[str, Any]]:
-    """The canonical IMS order minted for this Shopify order (shopify_ingest).
-    Fail-soft -> None."""
-    if db is None or not shopify_order_id:
-        return None
-    try:
-        coll = db.get_collection("orders")
-        if coll is None:
-            return None
-        return coll.find_one({"shopify_order_id": shopify_order_id})
-    except Exception:  # noqa: BLE001
-        logger.debug("[SHOPIFY_REFUND] order lookup failed", exc_info=True)
-        return None
+    """The canonical IMS order minted for this Shopify order (shopify_ingest),
+    or None when there is none. A lookup that FAILS raises (L1-F29: an
+    outage is not "order not found") - the handler's own except turns it
+    into a failed, retried inbox row."""
+    return find_by_shopify_id(db, "orders", "shopify_order_id", shopify_order_id)
 
 
 def _hist_refund_ref(refund_id: str) -> str:
@@ -628,38 +625,26 @@ def _refund_already_processed(db, refund_id: str, strict: bool = False) -> bool:
 
     An UNMATCHED review row is DELIBERATELY not treated as processed: it means
     the refund arrived before its order was ingested, so once the order exists a
-    redelivery (or a re-drive) must be able to reprocess it. Fail-soft -> False
-    (the caller then proceeds; a stray double is preferable to dropping a real
-    refund). ``strict`` (the order-history import, which a re-run heals): a
-    read that fails RAISES instead -- no answer is never "not booked"."""
+    redelivery (or a re-drive) must be able to reprocess it.
+
+    FAIL CLOSED (audit L1-F29, decisions D13 and D118): a read that FAILED --
+    or a database that is not connected -- is NOT "not booked yet". It RAISES
+    (find_by_shopify_id, the lookup every Shopify handler shares), so the
+    caller books nothing and the refund stays retryable: the webhook's inbox
+    row is recorded failed and retried, the sweep reports status_failed and
+    asks again next hour, the history import counts a failed booking its next
+    run heals. A refund is money: a late credit note is recoverable, a second
+    one is not. ``strict`` is kept for its callers: every door reads strictly
+    now."""
+    del strict  # every read is strict (L1-F29); kept for the import's call
     if db is None or not refund_id:
         return False
-    try:
-        returns_coll = db.get_collection(_RETURNS_COLLECTION)
-        if returns_coll is not None and returns_coll.find_one(
-            {"shopify_refund_id": refund_id}
-        ):
-            return True
-    except Exception:  # noqa: BLE001
-        if strict:
-            raise
-    try:
-        ledger = db.get_collection("credit_note_ledger")
-        if ledger is not None and ledger.find_one({"ref": _hist_refund_ref(refund_id)}):
-            return True
-    except Exception:  # noqa: BLE001
-        if strict:
-            raise
-    try:
-        review_coll = db.get_collection(_REVIEW_COLLECTION)
-        if review_coll is not None:
-            row = review_coll.find_one({"shopify_refund_id": refund_id})
-            if row is not None and _norm(row.get("status")).upper() != "UNMATCHED":
-                return True
-    except Exception:  # noqa: BLE001
-        if strict:
-            raise
-    return False
+    if find_by_shopify_id(db, _RETURNS_COLLECTION, "shopify_refund_id", refund_id):
+        return True
+    if find_by_shopify_id(db, "credit_note_ledger", "ref", _hist_refund_ref(refund_id)):
+        return True
+    row = find_by_shopify_id(db, _REVIEW_COLLECTION, "shopify_refund_id", refund_id)
+    return row is not None and _norm(row.get("status")).upper() != "UNMATCHED"
 
 
 def _supersede_unmatched(db, refund_id: str) -> None:

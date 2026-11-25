@@ -25,15 +25,23 @@ os.environ.setdefault("JWT_SECRET_KEY", "test")
 os.environ.setdefault("ENVIRONMENT", "test")
 
 import pytest  # noqa: E402
+from PIL import Image  # noqa: E402
 
 from api.services import rbac_policy as rbac  # noqa: E402
 
 _UPLOAD_PATH = "/api/v1/online-store/images/upload"
 _ECOM_SET = {"ADMIN", "CATALOG_MANAGER", "DESIGN_MANAGER", "SUPERADMIN"}
 
-# A tiny valid-enough PNG header + a few bytes (the endpoint trusts the declared
-# content-type, not the magic bytes -- it only needs SOME bytes to persist).
-_PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+
+def _real(fmt: str) -> bytes:
+    """A small genuine image: the endpoint checks the BYTES, not the declared
+    content-type (audit L1-F41), so a signature plus padding no longer uploads."""
+    buf = io.BytesIO()
+    Image.new("RGB", (8, 8), (200, 30, 30)).save(buf, fmt)
+    return buf.getvalue()
+
+
+_PNG_BYTES = _real("PNG")
 
 
 # ---------------------------------------------------------------------------
@@ -157,10 +165,47 @@ def test_upload_happy_path_returns_url_and_writes_audit(
 
 def test_upload_defaults_kind_to_raw(client, auth_headers, patched_storage_and_audit):
     """No kind form field -> defaults to RAW."""
-    files = {"file": ("p.jpg", io.BytesIO(b"\xff\xd8\xff" + b"0" * 32), "image/jpeg")}
+    files = {"file": ("p.jpg", io.BytesIO(_real("JPEG")), "image/jpeg")}
     r = client.post(_UPLOAD_PATH, headers=auth_headers, files=files)
     assert r.status_code == 200, r.text
     assert r.json()["kind"] == "RAW"
+
+
+# ---------------------------------------------------------------------------
+# Audit L1-F41: the bytes decide, not the declared content-type
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"<html><script>window.marker=true</script></html>",
+        b"\x89PNG\r\n\x1a\n" + b"\x00" * 64,   # a signature, then padding
+        b"\xff\xd8\xff" + b"0" * 32,
+    ],
+)
+def test_upload_rejects_non_image_bytes_under_an_image_label(
+    client, auth_headers, patched_storage_and_audit, content
+):
+    storage, audit = patched_storage_and_audit
+    files = {"file": ("x.png", io.BytesIO(content), "image/png")}
+    r = client.post(_UPLOAD_PATH, headers=auth_headers, files=files)
+    assert r.status_code == 415, r.text
+    assert "not a valid image" in r.json()["detail"]
+    assert storage.calls == [], "nothing may be persisted"
+
+
+def test_upload_stores_the_type_the_bytes_are(
+    client, auth_headers, patched_storage_and_audit
+):
+    """A real PNG the browser called image/jpeg: kept, as a .png / image/png."""
+    storage, _ = patched_storage_and_audit
+    files = {"file": ("p.jpg", io.BytesIO(_PNG_BYTES), "image/jpeg")}
+    r = client.post(_UPLOAD_PATH, headers=auth_headers, files=files)
+    assert r.status_code == 200, r.text
+    assert r.json()["content_type"] == "image/png"
+    key, _size, content_type = storage.calls[0]
+    assert key.endswith(".png") and content_type == "image/png"
 
 
 # ---------------------------------------------------------------------------
@@ -210,3 +255,43 @@ def test_upload_bad_kind_is_400(client, auth_headers, patched_storage_and_audit)
         _UPLOAD_PATH, headers=auth_headers, files=files, data={"kind": "BOGUS"}
     )
     assert r.status_code == 400, r.text
+
+
+def _bmff(major: bytes, *compatible: bytes) -> bytes:
+    """A structurally valid ISO-BMFF photo container (ftyp + meta + mdat), the
+    shape an iPhone HEIC has. SYNTHETIC: no decodable pixel data."""
+    def box(kind: bytes, payload: bytes) -> bytes:
+        return (8 + len(payload)).to_bytes(4, "big") + kind + payload
+    ftyp = box(b"ftyp", major + b"\x00\x00\x00\x00" + b"".join(compatible))
+    return ftyp + box(b"meta", b"\x00" * 40) + box(b"mdat", b"\x01" * 200)
+
+
+@pytest.mark.parametrize(
+    "content,mime,ext",
+    [
+        (_bmff(b"heic", b"mif1", b"heic"), "image/heic", ".heic"),
+        (_bmff(b"mif1", b"mif1", b"miaf"), "image/heif", ".heif"),
+    ],
+    ids=["heic", "heif"],
+)
+def test_upload_accepts_an_iphone_photo_like_the_catalogue_door(
+    client, auth_headers, patched_storage_and_audit, content, mime, ext
+):
+    """D9 / D55: HEIC is accepted at BOTH staff upload doors. This door used to
+    answer 415 to the HEIC the catalogue door takes."""
+    storage, _ = patched_storage_and_audit
+    files = {"file": ("IMG_0001.HEIC", io.BytesIO(content), mime)}
+    r = client.post(_UPLOAD_PATH, headers=auth_headers, files=files)
+    assert r.status_code == 200, r.text
+    assert r.json()["content_type"] == mime
+    key, _size, content_type = storage.calls[0]
+    assert key.endswith(ext) and content_type == mime
+
+
+def test_a_cut_short_heic_is_still_refused(client, auth_headers, patched_storage_and_audit):
+    storage, _ = patched_storage_and_audit
+    heic = _bmff(b"heic", b"mif1", b"heic")
+    files = {"file": ("x.heic", io.BytesIO(heic[:24]), "image/heic")}
+    r = client.post(_UPLOAD_PATH, headers=auth_headers, files=files)
+    assert r.status_code == 415, r.text
+    assert storage.calls == []

@@ -183,6 +183,29 @@ def _mint_oauth_token(
     return body or None
 
 
+def shopify_credential_sources(db, storefront_id: str = "BV") -> list:
+    """Which credential paths are PRESENT for a storefront, in the order
+    resolve_shopify_credentials tries them: "oauth", "vault", "env".
+
+    For the integration status screen (audit L1-F34), which must say whether
+    Shopify is configured WITHOUT minting a token: no network call, no value
+    returned. Presence is not proof - a present path can still be refused by
+    Shopify; only resolve_shopify_credentials (and a real call) finds that
+    out. tests/test_audit_b04_integration_status.py pins this order to the
+    resolver's."""
+    storefront_id = (storefront_id or "BV").strip() or "BV"
+    vault = _vault_config(db, storefront_id)
+    shop = _resolve_shop(db, vault, storefront_id)
+    found = []
+    if _env("SHOPIFY_CLIENT_ID") and _env("SHOPIFY_CLIENT_SECRET") and shop:
+        found.append("oauth")
+    if _normalize_shop(vault.get("shop_url")) and vault.get("access_token"):
+        found.append("vault")
+    if (_env("SHOPIFY_ACCESS_TOKEN") or _env("SHOPIFY_ADMIN_TOKEN")) and shop:
+        found.append("env")
+    return found
+
+
 def resolve_shopify_credentials(
     db, storefront_id: str = "BV"
 ) -> Optional[Dict[str, str]]:
