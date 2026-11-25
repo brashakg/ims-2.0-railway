@@ -942,8 +942,10 @@ def test_redrive_books_the_credit_once_whichever_reads_fail(env, monkeypatch, in
         down[reads[n - 1]] = outage(down_from=n)[0]
     assert pairs >= len(reads), pairs
     # With the ledger down the door refuses (nothing booked, the row stays
-    # open) rather than answering as if the note had been read.
-    assert down[("credit_note_ledger", "find_one")] == "credit_failed", down
+    # open) rather than answering as if the note had been read. Since #1397
+    # an unreadable earlier note leaves the refund UNFINISHED (an error the
+    # tick re-drives), never CREDIT_FAILED ("not issued").
+    assert down[("credit_note_ledger", "find_one")] == "error", down
 
 
 def test_hand_credit_typed_like_the_refunds_return_id_is_counted(env):
