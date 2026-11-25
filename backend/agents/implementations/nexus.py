@@ -1076,7 +1076,9 @@ class NexusAgent(JarvisAgent):
                     dedupe_ref=ref,
                     assigned_to=_person_holding("ADMIN", None, any_store=True),
                     extra={
-                        "link": "/online-store/shopify",
+                        # msg91 / WhatsApp rows reach here too since #1416:
+                        # only a Shopify alert links to the Shopify screen.
+                        **({"link": "/online-store/shopify"} if vendor == "shopify" else {}),
                         "payload": {"vendor": vendor, "webhook_id": webhook_id, "topic": topic},
                     },
                     # Deterministic: a second drain raising the same episode is

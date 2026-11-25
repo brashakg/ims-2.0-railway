@@ -730,6 +730,19 @@ def test_a_dead_webhook_raises_one_task_for_an_admin(db, an_admin):
     assert db.tasks.count_documents({}) == 1
 
 
+def test_a_dead_msg91_row_gets_its_own_task_without_the_shopify_link(db, an_admin):
+    """Since #1416 msg91 / WhatsApp inbox rows are drained (and can park dead)
+    too: their Admin task is their own provider's, never linked to the
+    Shopify screen."""
+    agent = NexusAgent(db=db)
+    assert agent._raise_dead_webhook_task(
+        "msg91", "m-dead-1", {"payload": {"event": "delivered"}}, "RuntimeError: x", 5)
+    task = db.tasks.find_one({"source_ref": "webhook_dead_letter:msg91"})
+    assert task["task_id"] == "TSK-DEADLETTER-MSG91-1" and task["status"] == "OPEN"
+    assert "delivered, id m-dead-1." in task["description"]
+    assert not task.get("link"), task.get("link")
+
+
 def test_later_dead_webhooks_join_the_open_task_and_a_closed_task_is_not_reused(db, an_admin):
     _order(db)
     _park_dead(db, "dead-1")
