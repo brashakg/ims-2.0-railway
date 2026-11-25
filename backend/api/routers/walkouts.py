@@ -24,6 +24,7 @@ Side effects on POST:
 """
 
 from datetime import datetime, date as date_type, timedelta
+from api.utils.event_time import utc_now_naive
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional, Tuple
 import logging
@@ -512,7 +513,7 @@ def _ensure_customer(
                 audit_repo.create(
                     {
                         "log_id": uuid.uuid4().hex,
-                        "timestamp": datetime.now(),
+                        "timestamp": utc_now_naive(),
                         "user_id": current_user.get("user_id"),
                         "action": "customer.create",
                         "entity_type": "customer",
@@ -543,7 +544,7 @@ def _audit_walkout_create(
         audit_repo.create(
             {
                 "log_id": uuid.uuid4().hex,
-                "timestamp": datetime.now(),
+                "timestamp": utc_now_naive(),
                 "user_id": current_user.get("user_id"),
                 "action": "walkout.create",
                 "entity_type": "walkout",
@@ -576,7 +577,7 @@ def _audit_walkout_action(
         audit_repo.create(
             {
                 "log_id": uuid.uuid4().hex,
-                "timestamp": datetime.now(),
+                "timestamp": utc_now_naive(),
                 "user_id": current_user.get("user_id"),
                 "action": action,
                 "entity_type": "walkout",
@@ -704,8 +705,8 @@ def _create_manager_escalation_task(
         "assigned_by": current_user.get("user_id"),
         "store_id": store_id,
         "type": "system",
-        "due_date": datetime.now(),
-        "created_at": datetime.now(),
+        "due_date": utc_now_naive(),
+        "created_at": utc_now_naive(),
         "escalation_level": 0,
         "source": {
             "type": "walkout_staff_behaviour",
@@ -791,7 +792,7 @@ def _write_sale_credits(
     # the 1st must not roll into the PRIOR month's SC rollup. An injected
     # `now` (tests) stays authoritative for determinism.
     explicit_now = now is not None
-    now = now or datetime.now()
+    now = now or utc_now_naive()
     month_key = now.strftime("%Y-%m") if explicit_now else now_ist().strftime("%Y-%m")
     plan = [
         ("LOGGING", logging_user_id, logging_user_name),
@@ -1264,8 +1265,8 @@ async def escalate_overdue_followups(
             "assigned_by": current_user.get("user_id"),
             "store_id": row.get("store_id"),
             "type": "system",
-            "due_date": datetime.now(),
-            "created_at": datetime.now(),
+            "due_date": utc_now_naive(),
+            "created_at": utc_now_naive(),
             "escalation_level": 0,
             "source": {
                 "type": "walkout_followup",
@@ -2128,7 +2129,7 @@ async def append_followup(
         "approved_by_name": None,
         "approved_at": None,
         "manager_note": None,
-        "created_at": datetime.now(),
+        "created_at": utc_now_naive(),
     }
 
     updated = repo.append_followup(walkout_id, fu_doc)
@@ -2209,7 +2210,7 @@ async def update_followup(
             changes[key] = {"from": old_val, "to": new_val}
 
     if "status" in patch and patch["status"] == FollowUpStatus.DONE.value:
-        now = datetime.now()
+        now = utc_now_naive()
         patch["completed_at"] = now
         patch["completed_by"] = current_user.get("user_id")
         # Approval gate: salespeople -> PENDING_APPROVAL; managers

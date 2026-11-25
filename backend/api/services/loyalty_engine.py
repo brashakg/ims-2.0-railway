@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from api.services.product_master import resolve_category
+from api.utils.event_time import utc_now_naive
 
 # ============================================================================
 # Tier helpers
@@ -315,7 +316,8 @@ def expiry_for_earn(
     settings: Dict[str, Any], now: Optional[datetime] = None
 ) -> datetime:
     days = int(settings.get("expiry_days", 365) or 365)
-    base = now or datetime.now()
+    # UTC frame, the same clock the sweep and expiring-soon readers use (RUN-02).
+    base = now or utc_now_naive()
     return base + timedelta(days=max(0, days))
 
 
@@ -353,7 +355,44 @@ def expirable_points_by_lot(
     Pure + deterministic; no I/O. Only EARN lots that still have unspent points
     AND are past expiry appear in the result (always > 0).
     """
-    now = now or datetime.now()
+    now = now or utc_now_naive()
+    out: Dict[str, int] = {}
+    for lot in _fifo_lots(ledger):
+        if lot["already_swept"] or lot["remaining"] <= 0:
+            continue
+        exp = lot["expires_at"]
+        if exp is not None and exp <= now and lot["txn_id"]:
+            out[lot["txn_id"]] = int(lot["remaining"])
+    return out
+
+
+def points_held_by_unexpired_lots(
+    ledger: List[Dict[str, Any]],
+    now: Optional[datetime] = None,
+    not_in_balance: Any = (),
+) -> int:
+    """Points the ledger says belong to lots that have NOT expired (no expiry,
+    or expires_at > now). The expiry sweep never lets a debit take the balance
+    below this, so a redemption that lands while the sweep works (its ledger
+    row not read yet) can never make the sweep expire a valid lot's points.
+
+    ``not_in_balance``: txn_ids of credit rows whose balance write is known not
+    to have landed yet (a reversal marker still pending). Their points are not
+    on the balance, so they are left out of the share the balance must keep."""
+    now = now or utc_now_naive()
+    skip = set(not_in_balance or ())
+    return sum(
+        int(lot["remaining"])
+        for lot in _fifo_lots(ledger)
+        if lot["remaining"] > 0
+        and lot["txn_id"] not in skip
+        and (lot["expires_at"] is None or lot["expires_at"] > now)
+    )
+
+
+def _fifo_lots(ledger: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Walk the ledger oldest->newest and return every lot with its remaining
+    (unspent, unexpired) points after FIFO consumption."""
     rows = sorted(ledger or [], key=_txn_sort_key)
 
     # Each EARN lot: its remaining (unspent, unexpired) balance, in FIFO order.
@@ -372,6 +411,10 @@ def expirable_points_by_lot(
     for t in rows:
         ttype = str(t.get("type") or "").upper()
         pts = int(t.get("points") or 0)
+        if ttype == "ADJUST" and t.get("delta") is not None:
+            # POST /loyalty/adjust stores the size in "points" and the sign in
+            # "delta"; reading "points" alone made a manual deduction a credit.
+            pts = int(t.get("delta") or 0)
         if ttype == "EARN":
             lots.append(
                 {
@@ -381,8 +424,21 @@ def expirable_points_by_lot(
                     "already_swept": bool(t.get("expired")),
                 }
             )
-        elif ttype in ("REDEEM", "EXPIRE"):
-            # Both reduce the live balance; points are stored positive on the row.
+        elif ttype == "EXPIRE":
+            # An expiry sheds ITS OWN lot first (source_earn_txn_id); only what
+            # that lot no longer holds falls to the oldest lots. Pure FIFO here
+            # let one lot's expiry eat an older lot that had not expired yet, so
+            # the older lot later shed too little (seen when an older lot's
+            # expiry had to be retried after a newer lot's went through).
+            left = abs(pts)
+            for lot in lots:
+                if lot["txn_id"] == t.get("source_earn_txn_id"):
+                    take = min(lot["remaining"], left)
+                    lot["remaining"] -= take
+                    left -= take
+            _consume(left)
+        elif ttype == "REDEEM":
+            # Reduces the live balance; points are stored positive on the row.
             _consume(abs(pts))
         elif ttype == "ADJUST":
             # A signed adjustment: negative reduces (FIFO), positive is a manual
@@ -398,12 +454,4 @@ def expirable_points_by_lot(
                         "already_swept": False,
                     }
                 )
-
-    out: Dict[str, int] = {}
-    for lot in lots:
-        if lot["already_swept"] or lot["remaining"] <= 0:
-            continue
-        exp = lot["expires_at"]
-        if exp is not None and exp <= now and lot["txn_id"]:
-            out[lot["txn_id"]] = int(lot["remaining"])
-    return out
+    return lots

@@ -113,6 +113,13 @@ def _set_path(doc: Dict[str, Any], key: str, value) -> None:
     """
     parts = key.split(".")
     cur: Any = doc
+    if "$" in parts:
+        # This used to REPLACE the whole array with {"$": {...}} -- silently
+        # destroying it (money_guard's balance_after stamp wiped the
+        # idempotency markers it had just written).
+        raise UnsupportedMongoFeature(
+            "the positional operator in an update path (%r) is not implemented" % key
+        )
     for part in parts[:-1]:
         if part.isdigit():
             raise UnsupportedMongoFeature(

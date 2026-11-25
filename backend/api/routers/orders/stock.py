@@ -8,6 +8,7 @@ rounding or validation was changed.
 
 import asyncio
 from datetime import datetime, timedelta
+from api.utils.event_time import utc_now_naive
 
 from fastapi import HTTPException
 from typing import Dict, List, Optional
@@ -600,7 +601,10 @@ def sweep_unsaved_claims() -> List[str]:
         return []
     if stock_repo is None or order_repo is None:
         return []
-    now = datetime.now()  # the clock the claim stamps sold_at with
+    # The clock the claim stamps sold_at with (StockRepository: UTC, RUN-02).
+    # The host's local clock ran 5h30m ahead on an IST host, so a claim made
+    # seconds ago looked 15+ minutes old and an in-flight sale lost its unit.
+    now = utc_now_naive()
     try:
         stray = stock_repo.collection.distinct(
             "order_id",

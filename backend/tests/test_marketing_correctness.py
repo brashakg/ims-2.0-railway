@@ -420,7 +420,7 @@ def test_rx_reminder_dedup_blocks_within_24h(monkeypatch):
         "customer_id": "C1",
         "template_id": "PRESCRIPTION_EXPIRY",
         "status": "SENT",
-        "created_at": (datetime.now() - timedelta(hours=2)).isoformat(),
+        "created_at": (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(),
     }
     db = _FakeDB(
         {
@@ -448,7 +448,7 @@ def test_rx_reminder_dedup_allows_after_24h(monkeypatch):
         "customer_id": "C1",
         "template_id": "PRESCRIPTION_EXPIRY",
         "status": "SENT",
-        "created_at": (datetime.now() - timedelta(hours=25)).isoformat(),
+        "created_at": (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat(),
     }
     db = _FakeDB(
         {
@@ -476,7 +476,7 @@ def test_rx_reminder_dedup_allows_retry_on_failed(monkeypatch):
         "customer_id": "C1",
         "template_id": "PRESCRIPTION_EXPIRY",
         "status": "FAILED",
-        "created_at": (datetime.now() - timedelta(minutes=30)).isoformat(),
+        "created_at": (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat(),
     }
     db = _FakeDB(
         {

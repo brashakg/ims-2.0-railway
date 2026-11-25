@@ -11,6 +11,7 @@ Distinct from marketing /notifications/* (customer-facing notification_logs).
 from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import Optional
 from datetime import datetime
+from api.utils.event_time import utc_now_naive, parse_event_utc_naive
 
 from .auth import get_current_user
 from ..dependencies import get_db
@@ -64,7 +65,7 @@ async def list_notifications(
     if col is None or not uid:
         return {"notifications": [], "unread_count": 0, "total": 0}
 
-    now = datetime.now()
+    now = utc_now_naive()
     base = {"user_id": uid}
     query = dict(base)
     if unread_only:
@@ -96,7 +97,7 @@ async def unread_count(current_user: dict = Depends(get_current_user)):
             {
                 "user_id": uid,
                 "status": {"$in": _UNREAD_STATUSES},
-                **_not_snoozed(datetime.now()),
+                **_not_snoozed(utc_now_naive()),
             }
         )
     except Exception:
@@ -115,7 +116,7 @@ async def mark_read(
         raise HTTPException(status_code=503, detail="DB unavailable")
     res = col.update_one(
         {"notification_id": notification_id, "user_id": uid},
-        {"$set": {"status": "READ", "read_at": datetime.now()}},
+        {"$set": {"status": "READ", "read_at": utc_now_naive()}},
     )
     if res.matched_count == 0:
         raise HTTPException(status_code=404, detail="Notification not found")
@@ -131,7 +132,7 @@ async def mark_all_read(current_user: dict = Depends(get_current_user)):
         return {"updated": 0}
     res = col.update_many(
         {"user_id": uid, "status": {"$in": _UNREAD_STATUSES}},
-        {"$set": {"status": "READ", "read_at": datetime.now()}},
+        {"$set": {"status": "READ", "read_at": utc_now_naive()}},
     )
     return {"updated": res.modified_count}
 
@@ -150,14 +151,17 @@ async def snooze_notification(
 
     # Parse the requested time (accept trailing 'Z').
     try:
-        until_dt = datetime.fromisoformat(until.replace("Z", "+00:00"))
-        # Store naive (server local, like other timestamps here).
-        if until_dt.tzinfo is not None:
-            until_dt = until_dt.replace(tzinfo=None)
+        datetime.fromisoformat(until.replace("Z", "+00:00"))
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid 'until' datetime")
+    # RUN-02: the instant, in the stored naive-UTC frame. Stripping the offset
+    # kept the UTC digits and compared them with the host's local clock: on an
+    # IST host a 1-hour snooze was refused as "in the past".
+    until_dt = parse_event_utc_naive(until)
+    if until_dt is None:
+        raise HTTPException(status_code=400, detail="Invalid 'until' datetime")
 
-    if until_dt <= datetime.now():
+    if until_dt <= utc_now_naive():
         raise HTTPException(status_code=400, detail="Snooze time must be in the future")
 
     doc = col.find_one({"notification_id": notification_id, "user_id": uid})
@@ -174,7 +178,7 @@ async def snooze_notification(
     col.update_one(
         {"notification_id": notification_id, "user_id": uid},
         {
-            "$set": {"snoozed_until": until_dt, "snoozed_at": datetime.now()},
+            "$set": {"snoozed_until": until_dt, "snoozed_at": utc_now_naive()},
             "$inc": {"snooze_count": 1},
         },
     )

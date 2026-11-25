@@ -16,6 +16,7 @@ Design notes (docs/PUNE_INCENTIVE_BUILD_PLAN.md §Module ii):
 from __future__ import annotations
 
 from datetime import datetime
+from api.utils.event_time import utc_now_naive
 from typing import Any, Dict, List, Optional
 import uuid
 
@@ -60,7 +61,7 @@ class PointsLogRepository(BaseRepository):
         Raises if the unique partial index rejects the write
         (DuplicateKeyError) so the router can return 409.
         """
-        now = datetime.now()
+        now = utc_now_naive()
         log_id = self._generate_log_id(
             data.get("store_id", ""),
             data.get("date_str", ""),
@@ -199,10 +200,10 @@ class PointsLogRepository(BaseRepository):
                 {"log_id": log_id},
                 {
                     "$set": {
-                        "deleted_at": datetime.now(),
+                        "deleted_at": utc_now_naive(),
                         "deleted_by": deleted_by,
                         "delete_reason": reason,
-                        "updated_at": datetime.now(),
+                        "updated_at": utc_now_naive(),
                     }
                 },
             )

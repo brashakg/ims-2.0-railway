@@ -4,7 +4,7 @@ seen by exactly the people who raise or clear flags."""
 
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -25,7 +25,7 @@ def _coll(*docs):
 
 
 def test_an_in_progress_task_past_due_is_overdue():
-    late = datetime.now() - timedelta(hours=1)
+    late = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=1)  # stored UTC frame
     c = _coll(
         {"task_id": "A", "status": "IN_PROGRESS", "due_at": late},
         {"task_id": "B", "status": "in_progress", "due_at": late},

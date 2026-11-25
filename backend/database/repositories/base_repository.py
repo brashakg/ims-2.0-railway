@@ -6,7 +6,8 @@ Abstract base class for all repositories
 
 from abc import ABC, abstractmethod
 from typing import List, Optional, Dict, Any, TypeVar, Generic
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from api.utils.event_time import utc_now_naive
 import re
 import uuid
 
@@ -61,11 +62,35 @@ class BaseRepository(ABC, Generic[T]):
 
     def _add_timestamps(self, data: Dict, is_update: bool = False) -> Dict:
         """Add created_at/updated_at timestamps"""
-        now = datetime.now()
+        now = utc_now_naive()
         if not is_update:
-            data["created_at"] = now
+            data["created_at"] = BaseRepository._supplied_instant(data.get("created_at"), now) or now
         data["updated_at"] = now
         return data
+
+    @staticmethod
+    def _supplied_instant(value: Any, now: datetime) -> Optional[datetime]:
+        """A caller-supplied creation instant worth keeping (RUN-02).
+
+        Only an UNAMBIGUOUS instant is kept: an aware datetime or an ISO string
+        carrying its offset ("Z", "+00:00", "+05:30"). A naive value cannot say
+        which clock wrote it (legacy callers pass the host's local
+        datetime.now()), so it is replaced by the UTC clock as before. A value
+        more than five minutes ahead of the clock is not a real past event and
+        is replaced too. Stored in the BSON naive-UTC frame like every other row.
+        """
+        if isinstance(value, str) and value.strip():
+            try:
+                value = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+            except ValueError:
+                return None
+        if not isinstance(value, datetime) or value.tzinfo is None:
+            return None
+        try:
+            instant = value.astimezone(timezone.utc).replace(tzinfo=None)
+        except (ValueError, OverflowError):
+            return None
+        return instant if instant <= now + timedelta(minutes=5) else None
 
     @staticmethod
     def _clean_id(doc: Optional[Dict]) -> Optional[Dict]:
@@ -229,7 +254,7 @@ class BaseRepository(ABC, Generic[T]):
         """
         try:
             # Add updated timestamp
-            data["updated_at"] = datetime.now()
+            data["updated_at"] = utc_now_naive()
 
             # ``expected``: extra field values the stored row must still hold
             # (a compare-and-set); no match -> False, nothing written.
@@ -254,7 +279,7 @@ class BaseRepository(ABC, Generic[T]):
         False when another write got there first -- the caller refuses rather
         than overwriting it. A database error RAISES: it is never reported as
         a lost race."""
-        data["updated_at"] = datetime.now()
+        data["updated_at"] = utc_now_naive()
         update: Dict = {"$set": data}
         if unset:
             update["$unset"] = {field: "" for field in unset}
@@ -291,7 +316,7 @@ class BaseRepository(ABC, Generic[T]):
         Returns:
             Success boolean
         """
-        return self.update(id, {"is_active": False, "deleted_at": datetime.now()})
+        return self.update(id, {"is_active": False, "deleted_at": utc_now_naive()})
 
     def count(self, filter: Dict = None) -> int:
         """
@@ -360,7 +385,7 @@ class BaseRepository(ABC, Generic[T]):
             Number updated
         """
         try:
-            data["updated_at"] = datetime.now()
+            data["updated_at"] = utc_now_naive()
             result = self.collection.update_many(filter, {"$set": data})
             return result.modified_count
         except Exception as e:

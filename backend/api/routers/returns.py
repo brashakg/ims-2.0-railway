@@ -34,6 +34,7 @@ import re
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from api.utils.event_time import utc_now_naive
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Path, Query
@@ -2313,7 +2314,7 @@ def _keep_stock_task_open(coll: Any, doc: Dict[str, Any], step: Dict[str, Any]) 
                 task_id=stock_task_id(rid))
             tasks = getattr(repo, "collection", None)
             if not raised and tasks is not None:
-                now = datetime.now()
+                now = utc_now_naive()
                 tasks.update_one(
                     {"task_id": stock_task_id(rid), "status": {"$nin": sorted(_ACTIVE)}},
                     {"$set": {"status": "OPEN", "updated_at": now},
@@ -3311,7 +3312,7 @@ def _flip_sold_unit(
             raise RuntimeError("stock reactivate failed: the SOLD unit stays SOLD")
         return True
     try:
-        update: Dict[str, Any] = {"$set": {**fields, "updated_at": datetime.now()}}
+        update: Dict[str, Any] = {"$set": {**fields, "updated_at": utc_now_naive()}}
         if fields.get("return_slot"):
             update["$addToSet"] = {"return_slots": fields["return_slot"]}
         return coll.update_one({**(expect or {}), id_field: sid, "status": "SOLD"},

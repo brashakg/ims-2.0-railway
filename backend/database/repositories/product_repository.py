@@ -4,7 +4,7 @@ IMS 2.0 - Product Repository
 Product and Stock data access operations
 """
 
-from api.utils.event_time import utc_now_iso
+from api.utils.event_time import utc_now_iso, utc_now_naive
 
 import logging
 import re
@@ -542,7 +542,7 @@ class ProductRepository(BaseRepository):
             {
                 "mrp": mrp,
                 "offer_price": offer_price,
-                "price_updated_at": datetime.now(),
+                "price_updated_at": utc_now_naive(),
                 "price_updated_by": updated_by,
             },
         )
@@ -809,7 +809,7 @@ class StockRepository(BaseRepository):
 
     def reserve_stock(self, stock_id: str) -> bool:
         return self.update(
-            stock_id, {"status": "RESERVED", "reserved_at": datetime.now()}
+            stock_id, {"status": "RESERVED", "reserved_at": utc_now_naive()}
         )
 
     def release_stock(self, stock_id: str) -> bool:
@@ -846,7 +846,7 @@ class StockRepository(BaseRepository):
                 {
                     "$set": {
                         "status": "SOLD",
-                        "sold_at": datetime.now(),
+                        "sold_at": utc_now_naive(),
                         "order_id": order_id,
                     }
                 },
@@ -1050,7 +1050,7 @@ class StockRepository(BaseRepository):
         update = {
             "$set": {
                 "status": "SOLD",
-                "sold_at": datetime.now(),
+                "sold_at": utc_now_naive(),
                 "order_id": order_id,
             }
         }
@@ -1116,7 +1116,7 @@ class StockRepository(BaseRepository):
 
     def mark_barcode_printed(self, stock_id: str) -> bool:
         return self.update(
-            stock_id, {"barcode_printed": True, "barcode_printed_at": datetime.now()}
+            stock_id, {"barcode_printed": True, "barcode_printed_at": utc_now_naive()}
         )
 
     def claim_for_transfer(

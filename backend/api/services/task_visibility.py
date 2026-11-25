@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
+from api.utils.event_time import utc_now_naive
 from typing import Any, Dict, Optional
 
 from ..dependencies import user_store_scope
@@ -116,7 +117,7 @@ def visible(filters: Optional[Dict[str, Any]], current_user: dict) -> Dict[str, 
 
 def overdue_filter() -> Dict[str, Any]:
     """Open or in progress and past due (legacy rows carry due_date)."""
-    now = datetime.now()
+    now = utc_now_naive()
     return {
         "status": {"$in": ["OPEN", "IN_PROGRESS", "open", "in_progress"]},
         "$or": [{"due_at": {"$lt": now}}, {"due_date": {"$lt": now}}],

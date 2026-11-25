@@ -475,7 +475,14 @@ def test_26q_export_march_afternoon_still_defaults_to_the_old_fy_positive_contro
 
 def _last_grn(grns):
     db = _DB(grns=grns)
-    with _PatchAttrs(inventory_mod, datetime=_frozen(), _get_db=lambda: db):
+    from datetime import timezone
+
+    from api.utils import event_time as et_mod
+
+    # RUN-02: the cutoff reads the shared UTC clock (FROZEN_NOW is naive UTC).
+    with _PatchAttrs(inventory_mod, datetime=_frozen(), _get_db=lambda: db), _PatchAttrs(
+        et_mod, utc_now=lambda: FROZEN_NOW.replace(tzinfo=timezone.utc)
+    ):
         return inventory_mod._last_grn_by_product(STORE)
 
 

@@ -4,7 +4,7 @@ IMS 2.0 - Workshop Repository
 Workshop job data access operations
 """
 
-from api.utils.event_time import utc_event_iso, utc_now, utc_now_iso
+from api.utils.event_time import utc_event_iso, utc_now, utc_now_iso, utc_now_naive
 import uuid
 from typing import List, Optional, Dict, Any
 from datetime import datetime, date, timedelta
@@ -172,7 +172,7 @@ class WorkshopJobRepository(BaseRepository):
             job_id,
             {
                 "technician_id": technician_id,
-                "assigned_at": datetime.now(),
+                "assigned_at": utc_now_naive(),
             },
         )
 

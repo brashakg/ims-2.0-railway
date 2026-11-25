@@ -1,6 +1,7 @@
 """Goods receipt list, document upload/download and duplicate detection."""
 
 from datetime import datetime
+from api.utils.event_time import utc_now_naive
 
 from ...services.ap_engine import GRN_SUBTYPE_NO_PO
 from ...services.cost_mask import mask_receipt
@@ -67,7 +68,7 @@ def _number_receipt(grn_repo, grn_id: str, store_id) -> Optional[str]:
     if coll is None:
         number = generate_grn_number(store_id)
         return number if grn_repo.update(grn_id, {"grn_number": number}) else None
-    now = datetime.now()
+    now = utc_now_naive()
     claim = str(uuid.uuid4())
     won = coll.update_one(
         {
@@ -108,7 +109,9 @@ def _number_stranded_receipts(grn_repo, grn_id: Optional[str] = None) -> None:
     coll = getattr(grn_repo, "collection", None)
     if coll is None:
         return
-    stale = datetime.now() - _STRANDED_AFTER
+    # created_at is the repository's UTC stamp (RUN-02): age it on that clock,
+    # or on an IST host a receipt created this second looks 5h30m stranded.
+    stale = utc_now_naive() - _STRANDED_AFTER
     query = {"grn_number": {"$regex": _PLACEHOLDER_RE}, "created_at": {"$lt": stale}}
     if grn_id:
         query["grn_id"] = grn_id

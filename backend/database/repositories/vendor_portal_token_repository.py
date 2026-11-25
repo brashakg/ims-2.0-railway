@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional
 from datetime import datetime, timedelta
+from api.utils.event_time import utc_now_naive
 import uuid
 
 from .base_repository import BaseRepository
@@ -46,7 +47,7 @@ class VendorPortalTokenRepository(BaseRepository):
         ttl_days defaults to 365 — labs hate having to chase IT for a new
         link every quarter. Admin can revoke at any time via `revoke()`.
         """
-        now = datetime.now()
+        now = utc_now_naive()
         token_id = str(uuid.uuid4())
         doc = {
             "token_id": token_id,
@@ -90,7 +91,7 @@ class VendorPortalTokenRepository(BaseRepository):
                 # whether Mongo gave us a tz-aware datetime.
                 if exp.tzinfo is not None:
                     exp = exp.replace(tzinfo=None)
-                if exp < datetime.now():
+                if exp < utc_now_naive():
                     return None
             except (ValueError, TypeError):
                 # Bad expires_at: refuse the token rather than honor it
@@ -100,7 +101,7 @@ class VendorPortalTokenRepository(BaseRepository):
     def touch(self, token_id: str) -> bool:
         """Stamp last_used_at + bump use_count. Idempotent / fail-soft."""
         try:
-            now = datetime.now()
+            now = utc_now_naive()
             self.collection.update_one(
                 {"token_id": token_id},
                 {
@@ -116,7 +117,7 @@ class VendorPortalTokenRepository(BaseRepository):
             try:
                 doc = self.find_by_id(token_id) or {}
                 cnt = int(doc.get("use_count", 0) or 0) + 1
-                self.update(token_id, {"last_used_at": datetime.now(), "use_count": cnt})
+                self.update(token_id, {"last_used_at": utc_now_naive(), "use_count": cnt})
                 return True
             except Exception:
                 return False
@@ -131,5 +132,5 @@ class VendorPortalTokenRepository(BaseRepository):
     def revoke(self, token_id: str, by_user: str) -> bool:
         return self.update(
             token_id,
-            {"active": False, "revoked_at": datetime.now(), "revoked_by": by_user},
+            {"active": False, "revoked_at": utc_now_naive(), "revoked_by": by_user},
         )

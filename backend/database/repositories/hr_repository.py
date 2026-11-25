@@ -5,6 +5,7 @@ HR, Attendance, and Payroll data access operations
 """
 from typing import List, Optional, Dict
 from datetime import datetime, date, timedelta
+from api.utils.event_time import utc_now_naive
 from .base_repository import BaseRepository
 
 
@@ -104,7 +105,7 @@ class LeaveRepository(BaseRepository):
         return self.update(leave_id, {
             "status": "APPROVED",
             "approved_by": approved_by,
-            "approved_at": datetime.now()
+            "approved_at": utc_now_naive()
         })
     
     def reject(self, leave_id: str, rejected_by: str, reason: str) -> bool:
@@ -168,12 +169,12 @@ class PayrollRepository(BaseRepository):
         return self.update(payroll_id, {
             "status": "APPROVED",
             "approved_by": approved_by,
-            "approved_at": datetime.now()
+            "approved_at": utc_now_naive()
         })
     
     def mark_paid(self, payroll_id: str, payment_reference: str) -> bool:
         return self.update(payroll_id, {
             "status": "PAID",
-            "paid_at": datetime.now(),
+            "paid_at": utc_now_naive(),
             "payment_reference": payment_reference
         })

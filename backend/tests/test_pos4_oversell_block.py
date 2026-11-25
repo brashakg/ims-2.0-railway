@@ -282,11 +282,11 @@ def _sold(till):
 
 
 def _claimed_minutes_ago(till, order_id, minutes):
-    from datetime import datetime, timedelta
+    from datetime import datetime, timedelta, timezone
 
     till["db"].get_collection("stock_units").update_many(
         {"order_id": order_id},
-        {"$set": {"sold_at": datetime.now() - timedelta(minutes=minutes)}},
+        {"$set": {"sold_at": datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=minutes)}},
     )
 
 

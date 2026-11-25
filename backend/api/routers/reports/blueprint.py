@@ -3,6 +3,7 @@
 from fastapi import Depends, Query
 from typing import Any, Dict, Optional
 from datetime import datetime
+from api.utils.event_time import utc_now_naive
 from ...utils.ist import (
     now_ist,
 )
@@ -170,7 +171,7 @@ async def growth_blueprint(
             if existing:
                 age_hours = (
                     (
-                        datetime.now() - existing.get("generated_at", datetime.min)
+                        utc_now_naive() - existing.get("generated_at", datetime.min)
                     ).total_seconds()
                     / 3600
                     if isinstance(existing.get("generated_at"), datetime)
@@ -220,7 +221,7 @@ async def growth_blueprint(
             "model_used": None,
             "store_id": active_store,
             "month": month_key,
-            "generated_at": datetime.now().isoformat(),
+            "generated_at": utc_now_naive().isoformat(),
             "from_cache": False,
             "error": "no LLM provider configured",
         }
@@ -247,7 +248,7 @@ async def growth_blueprint(
             "model_used": model_id,
             "store_id": active_store,
             "month": month_key,
-            "generated_at": datetime.now().isoformat(),
+            "generated_at": utc_now_naive().isoformat(),
             "from_cache": False,
             "error": f"{type(e).__name__}: {e}",
         }
@@ -264,13 +265,13 @@ async def growth_blueprint(
             "model_used": model_id,
             "store_id": active_store,
             "month": month_key,
-            "generated_at": datetime.now().isoformat(),
+            "generated_at": utc_now_naive().isoformat(),
             "from_cache": False,
             "error": "empty LLM response",
         }
 
     model_used = model_id or llm_provider.default_model_id() or "default"
-    generated_at = datetime.now()
+    generated_at = utc_now_naive()
 
     # 5. Persist to cache
     if db is not None:

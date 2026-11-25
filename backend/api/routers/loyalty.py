@@ -21,7 +21,7 @@ Side-effect on order create:
 
 from __future__ import annotations
 
-from api.utils.event_time import utc_now_iso
+from api.utils.event_time import utc_now_iso, utc_now_naive
 
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Literal, Optional
@@ -48,6 +48,7 @@ from ..services.loyalty_engine import (
     calc_redeem,
     compute_tier,
     expirable_points_by_lot,
+    points_held_by_unexpired_lots,
     expiry_for_earn,
 )
 
@@ -226,12 +227,14 @@ async def get_account(
         }
 
     account = accounts.find_or_create(customer_id)
+    # The expiry sweep's internal per-lot markers are not part of this answer.
+    account = {k: v for k, v in account.items() if k != "money_ledger"}
     recent = txns.find_for_customer(customer_id, limit=20)
     settings = _settings_safe()
 
     # Derive expiring-soon points (any EARN with expires_at within 30 days
     # that hasn't been spent / expired).
-    now = datetime.now()
+    now = utc_now_naive()  # expires_at is stamped from the UTC clock
     expiring_soon = 0
     for t in recent:
         if t.get("type") != "EARN" or t.get("expired"):
@@ -403,7 +406,7 @@ async def earn(
             "tier_at_earn": earn_result.get("tier_at_earn"),
             "tier_multiplier": earn_result.get("tier_multiplier"),
             "created_by": current_user.get("user_id"),
-            "created_at": datetime.now(),
+            "created_at": utc_now_naive(),
         },
     )
     if claimed is None:
@@ -575,7 +578,7 @@ def _redeem_row(customer_id: str, order_id: Optional[str], claim: Dict[str, Any]
         "expires_at": None,
         "was_capped": bool(claim.get("was_capped")),
         "created_by": claim.get("created_by"),
-        "created_at": datetime.now(),
+        "created_at": utc_now_naive(),
     }
 
 
@@ -1052,7 +1055,7 @@ async def adjust(
             "reason": body.reason,
             "expires_at": None,
             "created_by": current_user.get("user_id"),
-            "created_at": datetime.now(),
+            "created_at": utc_now_naive(),
         }
     )
 
@@ -1184,13 +1187,93 @@ async def write_settings(
     return merged
 
 
+def _expire_lot(
+    txns: Any,
+    accounts: Any,
+    customer_id: str,
+    lot_id: str,
+    expirable: int,
+    actor: Optional[str],
+    run_id: str,
+    keep_points: int = 0,
+    seen: Optional[Dict[str, Any]] = None,
+) -> int:
+    """Expire ONE lot as a resumable operation; return the points THIS run
+    finished expiring (0 = nothing left to shed, or another run finished it).
+
+    Three writes, each confirmed from the STORED row before the next, the
+    "finished" mark last:
+      1. balance debit, keyed on the lot (its marker rides in the same write);
+      2. the EXPIRE ledger row, at a fixed id per lot (EXPIRE-<lot>);
+      3. the ``expired`` mark on the EARN lot.
+    A failure or a lost reply anywhere RAISES and leaves the lot due, so the
+    next sweep resumes at the first step that is not stored yet, with the
+    amount that was actually debited -- never a second debit, never a second
+    row, and never a lot marked finished with one of the two missing.
+    The debit takes all of ``expirable`` or nothing: when the balance does not
+    hold it above ``keep_points`` (the unexpired lots' share), or the account
+    changed after the sweep read it, the lot waits. The EXPIRE row records
+    what was actually debited (a resumed lot keeps its first debit).
+    """
+    debited = accounts.expiry_debited_points(customer_id, lot_id)
+    if debited is None and expirable > 0:
+        accounts.debit_for_expiry(
+            customer_id, lot_id, expirable, keep_points=keep_points, actor=actor,
+            seen=seen,
+        )
+        debited = accounts.expiry_debited_points(customer_id, lot_id)
+        if debited is None:
+            raise RuntimeError(f"expiry debit not confirmed for {lot_id}")
+    if debited:
+        expire_id = f"EXPIRE-{lot_id}"
+        if txns.collection.find_one({"txn_id": expire_id}) is None:
+            txns.create(
+                {
+                    "txn_id": expire_id,
+                    "customer_id": customer_id,
+                    "type": "EXPIRE",
+                    "points": debited,
+                    "rupee_value": 0.0,
+                    "order_id": None,
+                    "reason": f"Auto-expire of {lot_id}",
+                    "source_earn_txn_id": lot_id,
+                    "expires_at": None,
+                    "created_by": actor,
+                    "created_at": utc_now_naive(),
+                }
+            )
+            if txns.collection.find_one({"txn_id": expire_id}) is None:
+                raise RuntimeError(f"expiry ledger row not confirmed for {lot_id}")
+    marked_by_this_run = txns.mark_expired(lot_id, run_id)
+    return int(debited or 0) if marked_by_this_run else 0
+
+
+def _pending_reversal_credits(ledger: List[Dict[str, Any]], seen: Dict[str, Any]) -> List[str]:
+    """Reversal markers that restore points but whose balance move has not
+    landed yet: written FIRST, healed later by _ensure_reversal_applied, and
+    their txn_id is not in the account's applied_reversals as read in
+    ``seen``. Their points are on the ledger but not on the balance. A marker
+    without this guard's fields predates it and its money moved (as there)."""
+    applied = set(seen.get("applied_reversals") or [])
+    return [
+        r.get("txn_id")
+        for r in ledger
+        if str(r.get("type") or "").upper() == "ADJUST"
+        and int(r.get("points") or 0) > 0
+        and _REVERSAL_ORDER_FIELD in r
+        and "reversed_earn_points" in r
+        and r.get("txn_id") not in applied
+    ]
+
+
 @router.post("/expire")
 async def expire_sweep(
     current_user: Dict[str, Any] = Depends(get_current_user),
 ):
-    """Cron-style sweep: for every EARN row whose expires_at <= now, write a
-    balancing EXPIRE row for the lot's UNSPENT remainder, mark the source EARN
-    as expired, and decrement balance_points.
+    """Cron-style sweep: for every EARN row whose expires_at <= now, take the
+    lot's UNSPENT remainder off the balance, write the balancing EXPIRE row and
+    mark the source EARN as expired (see ``_expire_lot`` for the order and the
+    recovery rule).
 
     P2-C fix: the old code expired ``min(lot.points, account_balance)`` per lot.
     The account balance can belong to NEWER, non-expired lots, so a customer who
@@ -1199,16 +1282,27 @@ async def expire_sweep(
     per-lot FIFO (``expirable_points_by_lot``): redemptions consume the oldest
     lots first, so an expired lot only sheds the points it still holds -- newer
     lots are never touched.
+
+    Answers 200 only when every due lot is finished. If any lot could not be
+    finished (a failed read or write, or a balance that no longer covers it) the
+    answer is 503 with the counts of what did finish; running the sweep again
+    finishes the rest exactly once.
     """
     if not _is_admin(current_user):
         raise HTTPException(status_code=403, detail="Admin role required")
     txns = get_loyalty_transaction_repository()
     accounts = get_loyalty_account_repository()
     if txns is None or accounts is None:
-        return {"expired_txns": 0, "points_expired": 0}
+        raise HTTPException(status_code=503, detail="Loyalty store unavailable")
 
-    now = datetime.now()
-    candidates = txns.find_expired_unprocessed(now)
+    now = utc_now_naive()  # expires_at is stamped from the UTC clock (RUN-02)
+    try:
+        candidates = txns.find_expired_unprocessed(now)
+    except Exception:  # noqa: BLE001
+        logger.exception("[LOYALTY] expiry sweep could not read the due lots")
+        raise HTTPException(
+            status_code=503, detail="Loyalty store unavailable"
+        ) from None
 
     by_customer: Dict[str, List[Dict[str, Any]]] = {}
     for c in candidates:
@@ -1216,51 +1310,70 @@ async def expire_sweep(
         if cid:
             by_customer.setdefault(cid, []).append(c)
 
+    run_id = str(uuid.uuid4())
+    actor = current_user.get("user_id")
     expired_txns = 0
     total_points = 0
+    incomplete: List[Any] = []
 
     for customer_id, rows in by_customer.items():
         # Per-lot FIFO over the customer's FULL ledger decides how many points
         # each expired lot may shed (its unspent remainder), so we never expire
         # points that were already redeemed or belong to a newer, valid lot.
-        ledger = txns.find_for_customer(customer_id, limit=100000)
+        try:
+            # Read the account's last-write stamp BEFORE the ledger: the debit
+            # refuses if the account changed after this point (see
+            # debit_for_expiry), so a stale ledger can never price it.
+            seen = accounts.expiry_account_version(customer_id)
+            ledger = txns.ledger_for_expiry(customer_id)
+        except Exception:  # noqa: BLE001
+            logger.exception("[LOYALTY] expiry: ledger unreadable for %s", customer_id)
+            incomplete.extend(r.get("txn_id") for r in rows)
+            continue
         expirable_by_lot = expirable_points_by_lot(ledger, now)
+        keep_points = points_held_by_unexpired_lots(
+            ledger, now, not_in_balance=_pending_reversal_credits(ledger, seen),
+        )
 
         for row in rows:
             lot_id = row.get("txn_id")
-            # Always mark the lot processed so a future sweep skips it (even when
-            # it has nothing left to shed -- it was fully spent).
-            txns.mark_expired(lot_id)
-            expirable = int(expirable_by_lot.get(lot_id, 0))
-            if expirable <= 0:
+            try:
+                if not lot_id:
+                    raise RuntimeError("EARN lot without a txn_id")
+                points = _expire_lot(
+                    txns, accounts, customer_id, lot_id,
+                    int(expirable_by_lot.get(lot_id, 0)), actor, run_id,
+                    keep_points=keep_points, seen=seen,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("[LOYALTY] expiry not finished for lot %s", lot_id)
+                incomplete.append(lot_id)
                 continue
-            txn_id = str(uuid.uuid4())
-            txns.create(
-                {
-                    "txn_id": txn_id,
-                    "customer_id": customer_id,
-                    "type": "EXPIRE",
-                    "points": expirable,
-                    "rupee_value": 0.0,
-                    "order_id": None,
-                    "reason": f"Auto-expire of {lot_id}",
-                    "source_earn_txn_id": lot_id,
-                    "expires_at": None,
-                    "created_by": current_user.get("user_id"),
-                    "created_at": datetime.now(),
-                }
-            )
-            accounts.adjust_balance(customer_id, delta_points=-expirable)
-            expired_txns += 1
-            total_points += expirable
+            if points:
+                expired_txns += 1
+                total_points += points
 
+    summary = {"expired_txns": expired_txns, "points_expired": total_points}
     _audit(
         "loyalty.expire",
         current_user,
-        {"expired_txns": expired_txns, "points_expired": total_points},
+        {**summary, **({"incomplete_lots": incomplete} if incomplete else {})},
         "system",
     )
-    return {"expired_txns": expired_txns, "points_expired": total_points}
+    if incomplete:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                **summary,
+                "incomplete": len(incomplete),
+                "incomplete_lots": incomplete[:50],
+                "message": (
+                    "Some expired lots could not be finished. Nothing was "
+                    "lost or taken twice; run the sweep again to finish them."
+                ),
+            },
+        )
+    return summary
 
 
 # ============================================================================
@@ -1515,7 +1628,7 @@ def earn_for_order_internal(
                 "tier_multiplier": result.get("tier_multiplier"),
                 "store_id": store_id,
                 "created_by": user_id,
-                "created_at": datetime.now(),
+                "created_at": utc_now_naive(),
             },
         )
         if claimed is None:
@@ -1651,7 +1764,7 @@ def _apply_reversal_balance(
         inc["lifetime_earned"] = -earned
     if redeemed:
         inc["lifetime_redeemed"] = -redeemed
-    set_block: Dict[str, Any] = {"updated_at": datetime.now()}
+    set_block: Dict[str, Any] = {"updated_at": utc_now_naive()}
     if new_tier:
         set_block["tier"] = new_tier
     update: Dict[str, Any] = {
@@ -1806,7 +1919,7 @@ def _restore_late_debit(
             "points": points,
             "order_id": order_id,
             "reason": f"Restore {points} redeemed on cancelled order {order_id}",
-            "created_at": datetime.now(),
+            "created_at": utc_now_naive(),
         })
     except Exception as exc:  # noqa: BLE001
         logger.error("late redeem restore row failed: %s", exc)
@@ -1892,7 +2005,7 @@ def _restore_return_share(
                 "order_id": order_id,
                 _RETURN_RESTORE: return_id,
                 "reason": f"Return {return_id}: restore {points} redeemed on order {order_id}",
-                "created_at": datetime.now(),
+                "created_at": utc_now_naive(),
             })
         except Exception as exc:  # noqa: BLE001
             logger.error("return restore row failed: %s", exc)
@@ -2136,7 +2249,7 @@ def _reverse_order_loyalty(
             f"{reason_prefix}: claw {earned} earned + restore {redeemed} "
             f"redeemed on order {order_id}"
         ),
-        "created_at": datetime.now(),
+        "created_at": utc_now_naive(),
     }
     if extra_marker:
         marker.update(extra_marker)
@@ -2373,7 +2486,7 @@ def regate_earn_after_edit(
                     f"eligible for {min(target, net)} of {net} earned points"
                 ),
                 "created_by": user_id,
-                "created_at": datetime.now(),
+                "created_at": utc_now_naive(),
             }
         )
         accounts.adjust_balance(

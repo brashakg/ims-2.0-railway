@@ -15,6 +15,7 @@ No emoji (Windows cp1252).
 from __future__ import annotations
 
 from datetime import datetime
+from api.utils.event_time import utc_now_naive
 from typing import Dict, List, Optional
 import uuid
 
@@ -42,7 +43,7 @@ class ProductIncentiveLogRepository(BaseRepository):
         Raises DuplicateKeyError (mapped to 409 by the router) when the
         unique (order_id, sku) partial index rejects a repeat POS line.
         """
-        now = datetime.now()
+        now = utc_now_naive()
         entry_id = uuid.uuid4().hex
         doc = {
             **data,
@@ -109,10 +110,10 @@ class ProductIncentiveLogRepository(BaseRepository):
                 {"entry_id": entry_id},
                 {
                     "$set": {
-                        "deleted_at": datetime.now(),
+                        "deleted_at": utc_now_naive(),
                         "deleted_by": deleted_by,
                         "deleted_reason": reason,
-                        "updated_at": datetime.now(),
+                        "updated_at": utc_now_naive(),
                     }
                 },
             )
