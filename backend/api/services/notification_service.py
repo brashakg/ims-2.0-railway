@@ -25,6 +25,7 @@ from datetime import datetime
 import os
 import uuid
 import logging
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -106,13 +107,10 @@ TEMPLATES = {
 }
 
 
-def populate_template(template_id: str, variables: dict) -> str:
-    """Fill template variables. Returns the formatted message.
-
-    An owner-edited template (Settings -> Notification Templates) overrides the
-    hard-coded default when an ENABLED, non-empty saved doc matches this
-    template_id; otherwise the hard-coded TEMPLATES default is used (fail-soft,
-    so a missing/disabled/empty override never blanks a message)."""
+def _template_content(template_id: str) -> str:
+    """The wording the server sends for this template: an ENABLED, non-empty
+    owner-saved override (Settings -> Notification Templates) else the
+    hard-coded TEMPLATES default (fail-soft to the default)."""
     default = TEMPLATES.get(template_id, "")
     try:
         from api.services.notification_templates import resolve_template
@@ -124,25 +122,107 @@ def populate_template(template_id: str, variables: dict) -> str:
         )
     except Exception:  # noqa: BLE001 - resolver is fail-soft; keep the default
         content = default
+    return content
+
+
+def unfilled_placeholders(content: str, variables: dict) -> list:
+    """The {placeholders} in `content` that `variables` does not fill. A
+    malformed brace pattern counts as unfilled: it cannot be rendered into a
+    clean message either."""
+    import string
+
+    missing = []
+    try:
+        for _lit, field, _spec, _conv in string.Formatter().parse(content or ""):
+            if field is None:
+                continue
+            name = field.split(".")[0].split("[")[0]
+            if not name or name not in variables:
+                missing.append(field or "{}")
+    except ValueError:
+        missing.append("malformed braces")
+    return missing
+
+
+def populate_template(template_id: str, variables: dict) -> str:
+    """Fill template variables. Returns the formatted message.
+
+    An owner-edited template (Settings -> Notification Templates) overrides the
+    hard-coded default when an ENABLED, non-empty saved doc matches this
+    template_id; otherwise the hard-coded TEMPLATES default is used (fail-soft,
+    so a missing/disabled/empty override never blanks a message).
+
+    A placeholder the variables do not fill is left in the text here;
+    send_notification REFUSES to queue such a message (D56)."""
+    content = _template_content(template_id)
     if not content:
         return f"[Template {template_id} not found]"
     try:
         return content.format(**variables)
-    except KeyError as e:
+    except (KeyError, IndexError, ValueError) as e:
         logger.warning("Missing template variable %s for %s", e, template_id)
         return content
 
 
-def _default_consent_basis(category: str) -> str:
-    """Why this message is permitted under DLT/TRAI -- recorded for audit.
+# D56 -- THE one consent classification (queue writer AND MEGAPHONE drain).
+# Templates whose content is promotional whatever category a caller stamps on
+# them: a SERVICE / omitted category must never turn a birthday wish into a
+# message that ignores STOP (Codex 1419 round 1).
+PROMOTIONAL_TEMPLATES = frozenset({"BIRTHDAY_WISH", "WALKOUT_RECOVERY", "REFERRAL_INVITE"})
+# Recall reminders. D56: "a reminder tied to a specific order, Rx or
+# appointment is transactional; anything else ... is promotional". So these are
+# transactional ONLY as a REMINDER carrying one order / Rx / appointment (type
+# AND id); a SERVICE / OTP / omitted stamp never exempts them. Today every door
+# that sends them is promotional: the hand-sent Rx reminder is MARKETING, the
+# CL reorder door uses cl_subscription, a reminder RULE row is reminder_rule.
+RECALL_TEMPLATES = frozenset(
+    {"PRESCRIPTION_EXPIRY", "ANNUAL_CHECKUP_REMINDER", "CL_REORDER_REMINDER"}
+)
+# A REMINDER is transactional only when it is about ONE specific order,
+# prescription or appointment (D56); anything else is promotional.
+_SPECIFIC_REMINDER_ENTITIES = frozenset({"order", "prescription", "appointment"})
 
-    Transactional/service messages ride the 'transactional' basis (allowed even
-    to marketing-opt-outs); everything else is 'marketing_consent' (the caller
-    is responsible for having checked the opt-out before queueing)."""
+
+def consent_basis_for(
+    category: str,
+    template_id: str = None,
+    related_entity_type: str = None,
+    related_entity_id: str = None,
+) -> str:
+    """Why this message is permitted under DLT/TRAI -- recorded on the row and
+    re-derived by the drain right before the provider call (D56):
+
+      * a PROMOTIONAL_TEMPLATES template, or a row produced by a reminder RULE
+        (a segment, never one specific order/Rx/appointment): marketing_consent;
+      * REMINDER tied to one order / prescription / appointment (entity type
+        AND id): transactional -- including a RECALL_TEMPLATES template;
+      * a RECALL_TEMPLATES template any other way: marketing_consent;
+      * OTP / SERVICE / TRANSACTIONAL: transactional (allowed even to
+        marketing opt-outs: order ready, repair ready, review/NPS, OTPs);
+      * anything else (MARKETING, PROMOTIONAL, untied REMINDER, none):
+        marketing_consent.
+    """
     cat = (category or "").upper()
-    if cat in ("SERVICE", "TRANSACTIONAL", "REMINDER", "OTP"):
+    if (template_id or "") in PROMOTIONAL_TEMPLATES:
+        return "marketing_consent"
+    if (related_entity_type or "") == "reminder_rule":
+        return "marketing_consent"
+    if (
+        cat == "REMINDER"
+        and (related_entity_type or "") in _SPECIFIC_REMINDER_ENTITIES
+        and related_entity_id
+    ):
+        return "transactional"
+    if (template_id or "") in RECALL_TEMPLATES:
+        return "marketing_consent"
+    if cat in ("OTP", "SERVICE", "TRANSACTIONAL"):
         return "transactional"
     return "marketing_consent"
+
+
+def _default_consent_basis(category: str) -> str:
+    """Category-only view of consent_basis_for (kept for older callers)."""
+    return consent_basis_for(category)
 
 
 def queue_notification_row(
@@ -192,7 +272,16 @@ def queue_notification_row(
         "failure_reason": None,
         # --- DLT / TRAI per-message audit fields (additive) ---
         "pe_id": DLT_PE_ID,
-        "consent_basis": consent_basis or _default_consent_basis(category),
+        # The stricter of what the caller asked for and THE rule (D56): a
+        # caller can never downgrade a promotional message to transactional.
+        "consent_basis": (
+            "marketing_consent"
+            if consent_basis_for(
+                category, template_id, related_entity_type, related_entity_id
+            )
+            == "marketing_consent"
+            else (consent_basis or "transactional")
+        ),
         "provider_msg_id": None,  # set by the drain/provider once dispatched
         "delivery_status": "QUEUED",  # advances QUEUED->SENT->DELIVERED via DLR webhook
         "dispatch_mode": mode,  # the mode in effect when queued
@@ -204,10 +293,19 @@ def queue_notification_row(
     # NOTE: _get_db() returns a RAW pymongo Database on the happy path (Mongo up),
     # and pymongo Database.__bool__ raises NotImplementedError -- so `if db:` would
     # crash every outbound-comms call (BUG-032). Compare with None explicitly.
+    #
+    # `persisted` is the durable verdict (Codex 1419 round 1: a swallowed insert
+    # failure used to read as "queued"): True only when the row is on disk.
+    # `duplicate` is True when the unique dedupe_ref index refused the row
+    # because the same message is ALREADY queued (another door, an earlier try).
+    persisted = False
+    duplicate = False
     if db is not None:
+        coll = None
         try:
             coll = db.get_collection("notification_logs")
             coll.insert_one(notification)
+            persisted = True
             logger.info(
                 "Notification queued (status=PENDING, mode=%s): %s -> %s (%s)",
                 mode,
@@ -215,13 +313,70 @@ def queue_notification_row(
                 customer_phone,
                 channel,
             )
-        except Exception as e:
-            logger.warning("Failed to log notification: %s", e)
+        except Exception as e:  # noqa: BLE001
+            from pymongo.errors import DuplicateKeyError
+
+            if isinstance(e, DuplicateKeyError):
+                duplicate = True
+            else:
+                logger.warning("Failed to log notification: %s", e)
+                # Lost acknowledgement: the write may have landed and only the
+                # reply was lost. Read it back by its own id before saying no.
+                try:
+                    if coll is not None and coll.find_one(
+                        {"notification_id": notification["notification_id"]},
+                        {"_id": 1},
+                    ):
+                        persisted = True
+                except Exception:  # noqa: BLE001
+                    pass
 
     result = dict(notification)
     result.pop("_id", None)  # insert_one mutates the dict with an ObjectId
     result["dispatched"] = False
+    result["persisted"] = persisted
+    if duplicate:
+        result["duplicate"] = True
     return result
+
+
+# What staff read when a message has no wording set up (D98).
+_MESSAGE_LABELS = {
+    "repair_ready": "the repair ready message",
+    "CL_REORDER_REMINDER": "the contact lens reorder reminder",
+    "POOL_REDEEM_OTP": "the family wallet redemption code",
+}
+
+
+def not_sent_reason(res) -> Optional[str]:
+    """THE one reading of the queue writer's verdict for staff (D91, D98):
+    None when the message is stored; otherwise why it was not sent."""
+    res = res if isinstance(res, dict) else {}
+    if res.get("status") == "REFUSED":
+        if res.get("refused_reason") == "no_wording":
+            tid = res.get("template_id") or "this message"
+            return f"No approved wording is set up for {_MESSAGE_LABELS.get(tid, tid)}"
+        return (
+            "the template needs "
+            + ", ".join(res.get("missing_variables") or ["a value"])
+            + " and it was not supplied"
+        )
+    if not res.get("persisted"):
+        return "it could not be saved to the queue"
+    return None
+
+
+def raise_unless_stored(res) -> dict:
+    """HTTP doors: a refused message is a 422, an unsaved one a 503, never
+    "sent" / "queued" (Codex 1419 round 1, D91, D98)."""
+    why = not_sent_reason(res)
+    if why is None:
+        return res
+    from fastapi import HTTPException
+
+    if res.get("status") == "REFUSED":
+        raise HTTPException(status_code=422, detail=f"Message not sent: {why}.")
+    raise HTTPException(status_code=503, detail=f"Message not sent: {why}. Try again.")
 
 
 async def send_notification(
@@ -239,6 +394,7 @@ async def send_notification(
     consent_basis: str = None,
     customer_email: str = None,
     subject: str = None,
+    extra: dict = None,
 ) -> dict:
     """
     Queue a customer notification (does NOT itself send -- see module docstring).
@@ -275,13 +431,71 @@ async def send_notification(
                 except Exception as _short_exc:  # noqa: BLE001
                     logger.debug("shorturl wrap skipped: %s", _short_exc)
 
-    # Build message from template
+    # D98: no wording set up for this message (no built-in text and no
+    # switched-on saved template) -> REFUSED. It is never stored as the text
+    # "[Template X not found]" and no door may answer "sent" for it.
+    content = _template_content(template_id)
+    if not content:
+        logger.warning("Notification %s NOT queued: no approved wording", template_id)
+        return {
+            "notification_id": None,
+            "template_id": template_id,
+            "customer_id": customer_id,
+            "status": "REFUSED",
+            "refused_reason": "no_wording",
+            "missing_variables": [],
+            "dispatched": False,
+            "persisted": False,
+        }
+
+    # Build message from template. D56: a message with an unfilled
+    # placeholder is NEVER queued (the customer would read "{order_number}").
+    missing = unfilled_placeholders(content, variables)
+    # The sending shop's own name / phone are filled from its store record when
+    # the caller did not pass them (campaign and reminder segments carry only
+    # the customer's name). A store that cannot be read leaves them missing.
+    if {"store_name", "store_phone"} & set(missing) and store_id:
+        try:
+            _db = _get_db()
+            store = (
+                _db.get_collection("stores").find_one(
+                    {"store_id": store_id}, {"_id": 0, "name": 1, "store_name": 1, "phone": 1}
+                )
+                if _db is not None
+                else None
+            ) or {}
+        except Exception:  # noqa: BLE001
+            store = {}
+        name = store.get("store_name") or store.get("name")
+        if name and "store_name" in missing:
+            variables["store_name"] = name
+        if store.get("phone") and "store_phone" in missing:
+            variables["store_phone"] = store["phone"]
+        missing = unfilled_placeholders(content, variables)
+    if missing:
+        logger.warning(
+            "Notification %s NOT queued: unfilled placeholder(s) %s",
+            template_id,
+            missing,
+        )
+        return {
+            "notification_id": None,
+            "template_id": template_id,
+            "customer_id": customer_id,
+            "status": "REFUSED",
+            "refused_reason": "unfilled_placeholder",
+            "missing_variables": missing,
+            "dispatched": False,
+            "persisted": False,
+        }
     message = populate_template(template_id, variables)
 
     # EMAIL-channel rows additionally carry the address + subject so the drain
     # can dispatch them via the email transport; absent for the phone channels
     # (row shape unchanged for every pre-existing caller).
-    extra = {}
+    # `extra` fields land on the row in the SAME insert (campaign_id,
+    # dedupe_ref...): no second write that could fail after the queue row.
+    extra = dict(extra or {})
     if customer_email:
         extra["customer_email"] = customer_email
     if subject:

@@ -320,7 +320,7 @@ def _capture_otp(monkeypatch) -> Dict[str, Any]:
         box["category"] = kw.get("category")
         if kw.get("category") == "OTP":
             box["code"] = (kw.get("variables") or {}).get("otp")
-        return {"notification_id": "N1", "dispatched": False, "status": "PENDING"}
+        return {"notification_id": "N1", "dispatched": False, "status": "PENDING", "persisted": True}
 
     monkeypatch.setattr(ns, "send_notification", _cap)
     return box

@@ -380,51 +380,57 @@ def _store_otp(db, phone_norm: str, customer_id: str, otp: str) -> None:
     )
 
 
+_OTP_NOT_SENT = "The code could not be sent. Try again or ask the shop"
+
+
 async def _send_otp_transactional(
     phone_norm: str, customer_id: str, customer_name: str, store_id: str, otp: str
-) -> None:
-    """Send the OTP as a TRANSACTIONAL message.
+) -> bool:
+    """Send the OTP as a TRANSACTIONAL message; True only when it was sent.
 
     An OTP is transactional, NOT promotional, so it MUST bypass the
     MEGAPHONE promotional DND window (9PM-9AM). We therefore call the raw
-    provider send paths in agents.providers DIRECTLY -- those have no DND
-    gate (DND lives in the MEGAPHONE scheduler, not the transport) -- and we
-    also log the send to notification_logs with category='TRANSACTIONAL' for
-    the audit trail. Fail-soft: any send error is logged, never raised (the
-    endpoint still returns generic success so we don't leak existence).
+    provider send path in agents.providers DIRECTLY (no DND gate there).
+
+    D91: the message is first stored through THE queue-row writer (audit
+    trail, OTP masked). Not stored -> nothing is sent and the caller answers
+    "The code could not be sent". The row is written as SENDING, never
+    PENDING, so the MEGAPHONE drain can never send it a second time; it ends
+    on the transport's own status (SENT / SIMULATED / FAILED).
     """
     message = (
         f"Your Better Vision verification code is {otp}. "
         f"It expires in {_OTP_TTL_SECONDS // 60} minutes. Do not share it with anyone."
     )
-
-    # Audit log row (always written, even in DISPATCH_MODE=off) so there's a
-    # record an OTP was generated. category='TRANSACTIONAL' marks it as
-    # DND-exempt for any future reviewer. We NEVER persist the plaintext OTP.
     try:
-        from ..services.notification_service import send_notification
+        from ..services.notification_service import _get_db, queue_notification_row
 
-        await send_notification(
+        row = queue_notification_row(
             store_id=store_id or "",
             customer_id=customer_id,
             customer_phone=phone_norm,
             customer_name=customer_name or "",
             template_id="RX_PORTAL_OTP",
             channel="SMS",
-            variables={"otp": "******"},
+            message=message.replace(otp, "******"),  # NEVER the plaintext OTP
             category="TRANSACTIONAL",
             triggered_by="portal_rx_otp",
+            extra={"status": "SENDING"},
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("[PORTAL] OTP notification-log failed: %s", exc)
+        return False
+    if not row.get("persisted"):
+        return False
 
-    # Actual transport. send_sms / send_whatsapp are themselves fail-soft and
-    # honor DISPATCH_MODE (off -> SIMULATED). They do NOT apply any DND gate.
+    # Actual transport. send_sms honors DISPATCH_MODE (off -> SIMULATED).
+    status = "FAILED"
     try:
         from agents.providers import send_sms
 
         result = await send_sms(phone_norm, message)
-        if getattr(result, "status", "") == "SIMULATED":
+        status = str(getattr(result, "status", "") or "FAILED").upper()
+        if status == "SIMULATED":
             # In off/test mode the SMS isn't really sent. Log the OTP so a
             # developer/operator can complete the flow during testing.
             logger.info(
@@ -432,6 +438,16 @@ async def _send_otp_transactional(
             )
     except Exception as exc:  # noqa: BLE001
         logger.warning("[PORTAL] OTP SMS send failed: %s", exc)
+    try:
+        db = _get_db()
+        if db is not None:
+            db.get_collection("notification_logs").update_one(
+                {"notification_id": row["notification_id"]},
+                {"$set": {"status": status, "sent_at": _utcnow().isoformat()}},
+            )
+    except Exception as exc:  # noqa: BLE001 - row stays SENDING, never drained
+        logger.warning("[PORTAL] OTP log status update failed: %s", exc)
+    return status in ("SENT", "SIMULATED")
 
 
 def _generate_otp() -> str:
@@ -443,12 +459,14 @@ def _generate_otp() -> str:
 async def request_rx_otp(payload: RxOtpRequest, request: Request):
     """PUBLIC. Generate + send an OTP for Rx access.
 
-    ALWAYS returns a generic success regardless of whether the phone maps to
-    a real customer -- this is deliberate: revealing "no such customer" leaks
-    who is/isn't in the database. Rate-limited per phone.
+    Returns the same generic success whether or not the phone maps to a
+    real customer -- revealing "no such customer" leaks who is/isn't in the
+    database. Rate-limited per phone. D91: when the code could not be stored
+    or sent it answers 503 "The code could not be sent. Try again or ask the
+    shop", never "has been sent".
     """
     phone_norm = _normalize_phone(payload.phone)
-    # Generic envelope used for every outcome (existing, not-existing, db-down)
+    # Generic envelope for a sent code and for an unknown number alike
     generic = {
         "ok": True,
         "message": "If this number is registered with us, a verification code has been sent.",
@@ -467,7 +485,8 @@ async def request_rx_otp(payload: RxOtpRequest, request: Request):
         logger.warning("[PORTAL] db unavailable for OTP request: %s", exc)
         db = None
     if db is None:
-        return generic
+        # D91: nothing can be stored, for any number alike (no enumeration).
+        raise HTTPException(status_code=503, detail=_OTP_NOT_SENT)
 
     # Look up the customer. find_by_mobile matches both `mobile` and `phone`
     # fields; we also try the normalized 91-prefixed and bare 10-digit forms.
@@ -477,15 +496,25 @@ async def request_rx_otp(payload: RxOtpRequest, request: Request):
         cust_repo = get_customer_repository()
     except Exception:  # noqa: BLE001
         cust_repo = None
+    if cust_repo is None:
+        # D91: no lookup possible, for any number alike (no enumeration).
+        raise HTTPException(status_code=503, detail=_OTP_NOT_SENT)
 
+    # strict: a customers read that FAILS raises (the repository's default
+    # reads a failure as "no such customer", which answered "a code has been
+    # sent" during an outage, Codex 1419 R2-A). A genuine miss stays generic.
     customer = None
-    if cust_repo is not None:
+    try:
         for candidate in {phone_norm, phone_norm[-10:], payload.phone.strip()}:
             if not candidate:
                 continue
-            customer = cust_repo.find_by_mobile(candidate)
+            customer = cust_repo.find_by_mobile(candidate, strict=True)
             if customer:
                 break
+    except Exception as exc:  # noqa: BLE001
+        # D91: the lookup is down, for any number alike (no enumeration).
+        logger.warning("[PORTAL] customer lookup failed for OTP request: %s", exc)
+        raise HTTPException(status_code=503, detail=_OTP_NOT_SENT)
 
     if not customer:
         # No such customer -- still return generic success (no enumeration).
@@ -501,15 +530,17 @@ async def request_rx_otp(payload: RxOtpRequest, request: Request):
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("[PORTAL] OTP persist failed: %s", exc)
-        return generic
+        raise HTTPException(status_code=503, detail=_OTP_NOT_SENT)
 
-    await _send_otp_transactional(
+    if not await _send_otp_transactional(
         phone_norm,
         customer.get("customer_id") or "",
         customer.get("name") or "",
         customer.get("store_id") or customer.get("home_store_id") or "",
         otp,
-    )
+    ):
+        # D91: the code was not stored or not sent -- never "has been sent".
+        raise HTTPException(status_code=503, detail=_OTP_NOT_SENT)
 
     # In explicit debug mode, echo the OTP so automated/local testing can
     # complete the flow without a live SMS gateway. Guarded behind an env

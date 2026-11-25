@@ -16,7 +16,7 @@ from api.utils.event_time import utc_now, utc_now_iso
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field, field_validator
 from typing import List, Optional, Literal
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 import re
 import uuid
 import logging
@@ -41,7 +41,7 @@ def _check_notification_rate(user_id: str) -> Optional[str]:
 
 from ..dependencies import get_db as _dep_get_db
 from ..dependencies import validate_store_access
-from ..services.notification_service import send_notification, populate_template
+from ..services.notification_service import send_notification, raise_unless_stored
 from ..utils.ist import ist_date_str
 
 router = APIRouter()
@@ -117,6 +117,13 @@ def _enforce_promo_window(template_id: str) -> None:
                 f"templates only, or retry after 09:00 IST."
             ),
         )
+
+
+def _queued_or_raise(result: dict) -> dict:
+    """The queue writer's verdict, told truthfully to the caller (Codex 1419
+    round 1, D91, D98): refused (unfilled placeholder or no wording set up) is
+    a 422, a row that did not reach storage is a 503, never "queued"."""
+    return raise_unless_stored(result)
 
 
 # Indian mobile: 10 digits starting with 6-9.
@@ -228,16 +235,23 @@ async def send_marketing_notification(
                 )
 
     active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id", "")
-    result = await send_notification(
-        store_id=active_store,
-        customer_id=req.customer_id,
-        customer_phone=req.customer_phone,
-        customer_name=req.customer_name,
-        template_id=req.template_id,
-        channel=req.channel,
-        variables=req.variables,
-        category=req.category,
-        triggered_by=current_user.get("user_id", "unknown"),
+    # The category is NOT the caller's to choose for a promotional template
+    # (Codex 1419 round 1): this endpoint already treats every template outside
+    # _TRANSACTIONAL_TEMPLATES as promotional (quiet hours, consent above), so
+    # the stored row says MARKETING too and the drain's STOP check applies.
+    category = req.category if req.template_id in _TRANSACTIONAL_TEMPLATES else "MARKETING"
+    result = _queued_or_raise(
+        await send_notification(
+            store_id=active_store,
+            customer_id=req.customer_id,
+            customer_phone=req.customer_phone,
+            customer_name=req.customer_name,
+            template_id=req.template_id,
+            channel=req.channel,
+            variables=req.variables,
+            category=category,
+            triggered_by=current_user.get("user_id", "unknown"),
+        )
     )
     return {"message": "Notification queued", "notification": result}
 
@@ -307,7 +321,12 @@ async def send_bulk_notifications(
                 category="MARKETING",
                 triggered_by=current_user.get("user_id", "unknown"),
             )
-            results.append({"phone": r.phone, "status": "queued", "result": res})
+            if res.get("status") == "REFUSED":
+                results.append({"phone": r.phone, "status": "failed", "error": res.get("refused_reason") or "refused", "result": res})
+            elif not res.get("persisted"):
+                results.append({"phone": r.phone, "status": "failed", "error": "not_saved", "result": res})
+            else:
+                results.append({"phone": r.phone, "status": "queued", "result": res})
         except Exception as e:
             results.append({"phone": r.phone, "status": "failed", "error": str(e)})
     queued = sum(1 for r in results if r["status"] == "queued")
@@ -372,7 +391,7 @@ async def send_review_request(
         db.get_collection("customers").find_one({"customer_id": customer_id}) or {}
     )
 
-    result = await send_notification(
+    result = _queued_or_raise(await send_notification(
         store_id=order.get("store_id", current_user.get("active_store_id", "")),
         customer_id=customer_id,
         customer_phone=customer.get("mobile", order.get("customer_phone", "")),
@@ -387,7 +406,7 @@ async def send_review_request(
         triggered_by=current_user.get("user_id", "unknown"),
         related_entity_type="order",
         related_entity_id=order_id,
-    )
+    ))
     return {"message": "Review request sent", "notification": result}
 
 
@@ -513,7 +532,10 @@ async def send_rx_reminder(
     # once in a 24-hour window.  Repeat clicks (or UI retries) must not spam
     # the customer.  Only PENDING/SENT/SIMULATED logs count; FAILED entries
     # do NOT block a retry (the previous attempt didn't reach the customer).
-    cutoff_24h = (datetime.now() - timedelta(hours=24)).isoformat()
+    # Rows are stamped utc_now_iso() ("...+00:00"); a naive host-clock cutoff
+    # (datetime.now() on an IST host) compared as a string shortened the 24 h
+    # window to 18.5 h. Both sides are UTC ISO now.
+    cutoff_24h = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
     recent = db.get_collection("notification_logs").find_one(
         {
             "customer_id": customer_id,
@@ -558,7 +580,7 @@ async def send_rx_reminder(
                     ist_date_str(expiry), "%Y-%m-%d"
                 ).strftime("%d %b %Y")
 
-    result = await send_notification(
+    result = _queued_or_raise(await send_notification(
         store_id=store_id,
         customer_id=customer_id,
         customer_phone=phone,
@@ -570,11 +592,13 @@ async def send_rx_reminder(
             "store_phone": store.get("phone", ""),
             "expiry_date": expiry_date_str,
         },
-        category="REMINDER",
+        # D56: a hand-sent recall is about the customer, not one specific
+        # prescription -> promotional (needs consent; STOP wins at the drain).
+        category="MARKETING",
         triggered_by=current_user.get("user_id", "unknown"),
         related_entity_type="prescription",
         related_entity_id=customer_id,
-    )
+    ))
     return {"message": "Rx reminder sent", "notification": result}
 
 
@@ -660,8 +684,9 @@ async def send_referral_invite(
         }
         ref_coll.insert_one(referral)
 
-    # Send invite notification
-    result = await send_notification(
+    # Send invite notification. D91: only a stored message answers "sent";
+    # the INVITED referral row above is reused by a retry (same code).
+    result = _queued_or_raise(await send_notification(
         store_id=store_id,
         customer_id=customer_id,
         customer_phone=customer.get("mobile", ""),
@@ -677,7 +702,7 @@ async def send_referral_invite(
         triggered_by=current_user.get("user_id", "unknown"),
         related_entity_type="referral",
         related_entity_id=referral_code,
-    )
+    ))
     return {
         "message": "Referral invite sent",
         "referral_code": referral_code,
@@ -934,43 +959,28 @@ async def send_nps_survey(
     )
     store_id = order.get("store_id", current_user.get("active_store_id", ""))
 
-    nps_id = f"NPS-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
+    # ONE survey sender for this door and the automatic trigger: the row is
+    # PENDING_SEND until its message is stored (Codex 1419 R2-B), so a failed
+    # status write can never leave a phantom "sent" survey.
+    from ..services.nps_trigger import send_survey
 
-    nps_entry = {
-        "nps_id": nps_id,
-        "store_id": store_id,
-        "customer_id": order.get("customer_id", ""),
-        "customer_name": customer.get("name", order.get("customer_name", "")),
-        "order_id": order_id,
-        "score": None,
-        "feedback": None,
-        "status": "SENT",
-        "survey_sent_at": utc_now_iso(),
-        "responded_at": None,
-        "created_at": utc_now_iso(),
-    }
-
-    db.get_collection("nps_responses").insert_one(nps_entry)
-
-    store = db.get_collection("stores").find_one({"store_id": store_id}) or {}
-
-    await send_notification(
-        store_id=store_id,
-        customer_id=order.get("customer_id", ""),
-        customer_phone=customer.get("mobile", ""),
-        customer_name=customer.get("name", "Customer"),
-        template_id="NPS_SURVEY",
-        channel="WHATSAPP",
-        variables={
-            "store_name": store.get("name", "Better Vision"),
-            "survey_link": f"https://bettervision.in/nps/{nps_id}",
-        },
-        category="SERVICE",
-        triggered_by=current_user.get("user_id", "unknown"),
-        related_entity_type="order",
-        related_entity_id=order_id,
-    )
-
+    try:
+        res = await send_survey(
+            db,
+            order={**order, "order_id": order_id},
+            customer=customer,
+            store_id=store_id,
+            triggered_by=current_user.get("user_id", "unknown"),
+            auto=False,
+        )
+    except Exception as exc:  # noqa: BLE001 - the survey row itself was not saved
+        logger.warning("NPS survey for %s: survey row not saved: %s", order_id, exc)
+        raise HTTPException(
+            status_code=503,
+            detail="Message not sent: the survey could not be saved. Try again.",
+        )
+    _queued_or_raise(res)
+    nps_id = res["nps_id"]
     return {"message": "NPS survey sent", "nps_id": nps_id}
 
 
@@ -1050,18 +1060,21 @@ async def get_nps_dashboard(
     active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id", "")
     db = _get_db()
     if db is None:
-        return {
-            "avg_score": 0,
-            "promoters": 0,
-            "passives": 0,
-            "detractors": 0,
-            "response_rate": 0,
-            "responses": [],
-        }
+        # An unreadable database is not "no surveys" (the screen says it
+        # failed to load instead of showing zeros).
+        raise HTTPException(status_code=503, detail="Database unavailable")
 
     coll = db.get_collection("nps_responses")
-    all_surveys = list(
-        coll.find({"store_id": active_store}).sort("created_at", -1).limit(200)
+    from ..services.nps_trigger import counted_surveys
+
+    # A survey counts only when its message was stored (one rule, R2-B).
+    all_surveys = counted_surveys(
+        db,
+        list(
+            coll.find({"store_id": active_store, "status": {"$ne": "NOT_SENT"}})
+            .sort("created_at", -1)
+            .limit(200)
+        ),
     )
 
     responded = [s for s in all_surveys if s.get("score") is not None]
@@ -1581,37 +1594,88 @@ async def get_ad_audience_export(
 _CONSENT_LEDGER_COLL = "whatsapp_consent_ledger"
 
 
-def is_opted_out(customer_id: str, db) -> bool:
+def _consent_ts(value) -> Optional[datetime]:
+    """A stored consent timestamp as an aware UTC datetime, or None when it
+    cannot be read (the caller then treats the order of events as unproven)."""
+    try:
+        if not isinstance(value, datetime):
+            value = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def is_opted_out(
+    customer_id: str, db, strict: bool = False, phone: Optional[str] = None
+) -> bool:
     """Check if a customer is opted out via marketing_consent OR ledger.
-    
+
     Returns True if:
     - customers.marketing_consent is explicitly False, OR
-    - the most recent whatsapp_consent_ledger entry has event in {OPT_OUT, STOP}
-    
-    This unified check ensures all outbound paths honor all 3 opt-out signals:
+    - the most recent whatsapp_consent_ledger entry has event in {OPT_OUT, STOP}, OR
+    - `phone` is given and that mobile number itself sent STOP on WhatsApp,
+      unless this customer's consent was recorded again (OPT_IN) afterwards
+
+    This unified check ensures all outbound paths honor every opt-out signal:
     1. The customers.marketing_consent flag (direct state)
     2. INBOUND_STOP events in the ledger (TRAI/DPDP audit trail)
     3. Explicit OPT_OUT events (manual withdrawal)
+    4. The phone-keyed STOP record (whatsapp_opt_outs). The inbound STOP door
+       (whatsapp_intents._record_opt_out) flags only the FIRST customer found
+       for the number; a shared number, a number the lookup could not tie to
+       the customer, or a message with no customer is covered only by this
+       record (audit L1-F20). The newest signal wins: an OPT_IN recorded for
+       THIS customer after the STOP re-allows marketing to them.
+
+    strict=True is the FAIL-CLOSED form used at the last dispatch boundary
+    (MEGAPHONE's drain, L1-F20): a consent read that cannot be completed
+    RAISES instead of answering "consented". The default stays fail-soft for
+    the queueing doors, which the drain re-checks.
     """
     if db is None:
+        if strict:
+            raise RuntimeError("consent cannot be verified: database unavailable")
         return False
-    
-    # Check the direct flag first (fast path)
-    cust = db.get_collection("customers").find_one({"customer_id": customer_id}) or {}
-    if cust.get("marketing_consent") is False:
-        return True
-    
-    # Check the most recent ledger entry (fail-soft: a ledger lookup error must
-    # never 500 the send path -- the marketing_consent flag above is authoritative).
-    try:
-        latest_event = db.get_collection(_CONSENT_LEDGER_COLL).find_one(
-            {"customer_id": customer_id},
-            sort=[("recorded_at", -1)]
-        )
-        if latest_event and latest_event.get("event") in {"OPT_OUT", "STOP"}:
+
+    latest_event = None
+    if customer_id:
+        # Check the direct flag first (fast path)
+        cust = db.get_collection("customers").find_one({"customer_id": customer_id}) or {}
+        if cust.get("marketing_consent") is False:
             return True
-    except Exception:
-        pass
+
+        # Check the most recent ledger entry (fail-soft: a ledger lookup error must
+        # never 500 the send path -- the marketing_consent flag above is authoritative).
+        try:
+            latest_event = db.get_collection(_CONSENT_LEDGER_COLL).find_one(
+                {"customer_id": customer_id},
+                sort=[("recorded_at", -1)]
+            )
+            if latest_event and latest_event.get("event") in {"OPT_OUT", "STOP"}:
+                return True
+        except Exception:
+            if strict:
+                raise
+
+    if phone:
+        try:
+            from ..services.whatsapp_intents import find_phone_stop
+
+            stop = find_phone_stop(db, phone)
+        except Exception:
+            if strict:
+                raise
+            stop = None
+        if stop:
+            stopped_at = _consent_ts(stop.get("opted_out_at"))
+            opted_in_at = (
+                _consent_ts(latest_event.get("recorded_at"))
+                if latest_event and latest_event.get("event") == "OPT_IN"
+                else None
+            )
+            # Only a dated OPT_IN that is provably later than the STOP lifts it.
+            if not (stopped_at and opted_in_at and opted_in_at > stopped_at):
+                return True
 
     return False
 

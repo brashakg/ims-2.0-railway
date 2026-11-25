@@ -156,9 +156,10 @@ class BaseRepository(ABC, Generic[T]):
         RAISES on a database error (find_by_id reports that as None too)."""
         return self.collection.find_one({self.id_field: id}) is None
 
-    def find_one(self, filter: Dict) -> Optional[Dict]:
+    def find_one(self, filter: Dict, strict: bool = False) -> Optional[Dict]:
         """
-        Find single document by filter
+        Find single document by filter. ``strict``: a database error RAISES
+        instead of reading as "no such document" (same contract as find_many).
 
         Args:
             filter: MongoDB filter
@@ -169,6 +170,8 @@ class BaseRepository(ABC, Generic[T]):
         try:
             return self._clean_id(self.collection.find_one(filter))
         except Exception as e:
+            if strict:
+                raise
             print(f"Error finding {self.entity_name}: {e}")
             return None
 

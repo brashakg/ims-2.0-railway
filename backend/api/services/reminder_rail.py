@@ -221,6 +221,52 @@ def record_outbound(
 
 
 # ---------------------------------------------------------------------------
+# Cadence (D56): a CRON rule fires once per period, at or after its IST time
+# ---------------------------------------------------------------------------
+
+_IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def parse_cron(cron: Optional[str]) -> Optional[Tuple[str, int, int]]:
+    """'DAILY 09:00' / 'WEEKLY 10:00' -> (kind, hour, minute); anything else
+    -> None (a rule with an unknown cadence never fires on its own)."""
+    parts = (cron or "").strip().upper().split()
+    if len(parts) != 2 or parts[0] not in ("DAILY", "WEEKLY"):
+        return None
+    hm = parts[1].split(":")
+    if len(hm) != 2 or not all(x.isdigit() for x in hm):
+        return None
+    hour, minute = int(hm[0]), int(hm[1])
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    return parts[0], hour, minute
+
+
+def cron_period_due(cron: Optional[str], now: datetime) -> Optional[str]:
+    """The period key ('D2026-11-16' / 'W2026-47', IST) this rule may fire for
+    at `now`, or None when it is not yet its time today / this week or the
+    cadence is unknown. DAILY HH:MM fires once per IST day at or after HH:MM,
+    WEEKLY HH:MM once per IST (ISO) week at or after Monday HH:MM, whatever
+    the evaluation interval (MEGAPHONE ticks every 30 min). The caller claims
+    the key atomically on the rule (last_fired_period) so a second tick, or a
+    second worker, in the same period queues nothing."""
+    parsed = parse_cron(cron)
+    if parsed is None:
+        return None
+    kind, hour, minute = parsed
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    ist = now.astimezone(_IST)
+    if (ist.hour, ist.minute) < (hour, minute):
+        if kind == "DAILY" or ist.isoweekday() == 1:
+            return None
+    if kind == "DAILY":
+        return "D" + ist.date().isoformat()
+    year, week, _ = ist.isocalendar()
+    return f"W{year}-{week:02d}"
+
+
+# ---------------------------------------------------------------------------
 # Gate stack
 # ---------------------------------------------------------------------------
 
@@ -533,6 +579,11 @@ async def evaluate_rule(
                 related_entity_type="reminder_rule",
                 related_entity_id=rule.get("rule_id"),
             )
+            # Honest count (Codex 1419): a refused (unfilled placeholder, D56)
+            # or unsaved row is an error, never "queued", and uses no cap.
+            if isinstance(res, dict) and res.get("persisted") is False:
+                result["errors"] += 1
+                continue
             # Stamp rule_id + scheduled_for (defer) on the just-queued row.
             nid = res.get("notification_id") if isinstance(res, dict) else None
             if nid:
@@ -761,11 +812,15 @@ async def send_pool_redemption_otp(
             phone = ""
 
     # Queue the OTP message on the transactional path (DISPATCH_MODE-gated).
+    # D91 / D98: the door says "issued" only when the message is STORED; no
+    # mobile, no approved wording or an unsaved row -> the code could not be
+    # sent (the hashed code is cancelled so it can never be used).
+    from api.services import notification_service as ns
+
+    res = None
     if phone:
         try:
-            from api.services.notification_service import send_notification
-
-            await send_notification(
+            res = await ns.send_notification(
                 store_id="",
                 customer_id=primary_customer_id,
                 customer_phone=phone,
@@ -780,6 +835,16 @@ async def send_pool_redemption_otp(
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("OTP send failed: %s", exc)
+    why = ns.not_sent_reason(res) if phone else "the primary member has no mobile number"
+    if why is not None:
+        try:
+            db.get_collection("pool_otp").update_one(
+                {"otp_id": otp_id, "status": "PENDING"},
+                {"$set": {"status": "NOT_SENT", "not_sent_reason": why}},
+            )
+        except Exception as exc:  # noqa: BLE001 - nobody holds the code anyway
+            logger.warning("pool_otp %s NOT_SENT mark failed: %s", otp_id, exc)
+        return {"ok": False, "reason": f"The code could not be sent: {why}."}
 
     return {"ok": True, "otp_id": otp_id, "expires_at": doc["expires_at"]}
 

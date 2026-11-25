@@ -83,7 +83,7 @@ class FakeCustomerRepo:
     def __init__(self, customers: List[Dict[str, Any]]):
         self._customers = customers
 
-    def find_by_mobile(self, mobile: str) -> Optional[Dict[str, Any]]:
+    def find_by_mobile(self, mobile: str, strict: bool = False) -> Optional[Dict[str, Any]]:
         for c in self._customers:
             if mobile in (c.get("mobile"), c.get("phone")):
                 return c
@@ -152,6 +152,11 @@ class FakeDB:
 def fake_db(monkeypatch) -> FakeDB:
     db = FakeDB()
     monkeypatch.setattr(portal_module, "_get_db", lambda: db)
+    # D91: the OTP is answered "sent" only once its notification row is
+    # stored, so the queue writer writes into the same fake database.
+    from api.services import notification_service
+
+    monkeypatch.setattr(notification_service, "_get_db", lambda: db)
     return db
 
 

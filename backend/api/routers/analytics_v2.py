@@ -29,7 +29,7 @@ from ..dependencies import get_db as _dep_get_db, validate_store_access
 from ..services.cost_mask import mask_cost_list, can_see_cost
 from ..services import stock_value
 from ..services.margin_basis import margin_pct_ex_gst, price_ex_gst, product_gst_rate
-from ..services.notification_service import send_notification
+from ..services.notification_service import raise_unless_stored, send_notification
 from ..utils.ist import ist_date_str, ist_day_start_utc, ist_today, now_ist
 from ..services.name_resolver import order_actor_id, order_actor_name_map
 
@@ -741,7 +741,8 @@ async def cl_subscription_reminder(
     store_id = current_user.get("active_store_id", "")
     store = db.get_collection("stores").find_one({"store_id": store_id}) or {}
 
-    result = await send_notification(
+    # D98: no approved wording -> 422 "Message not sent: ...", never "sent".
+    result = raise_unless_stored(await send_notification(
         store_id=store_id,
         customer_id=customer_id,
         customer_phone=customer.get("mobile", ""),
@@ -756,7 +757,7 @@ async def cl_subscription_reminder(
         triggered_by=current_user.get("user_id", "unknown"),
         related_entity_type="cl_subscription",
         related_entity_id=customer_id,
-    )
+    ))
     return {"message": "Contact lens reorder reminder sent", "notification": result}
 
 
