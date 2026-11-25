@@ -30,6 +30,8 @@ vi.mock('../ReportsLayout', () => ({
 vi.mock('../reportsQueries', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../reportsQueries')>()),
   useSalesSummary: () => ({ data: undefined }),
+  useStockCount: () => ({ data: undefined }),
+  useCustomerAcquisition: () => ({ data: undefined }),
 }));
 
 import { ReportCardsGrid } from '../ReportCardsGrid';

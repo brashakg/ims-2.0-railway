@@ -44,7 +44,7 @@ export default function OutstandingPaymentsReport() {
   const loadOutstanding = async () => {
     setIsLoading(true);
     try {
-      const res = await orderApi.getOrders({ storeId: user?.activeStoreId });
+      const res = await orderApi.getOrders({ storeId: user?.activeStoreId, limit: 500 });
       const all = res?.orders || res || [];
       const now = new Date();
       const outstanding: OutstandingOrder[] = all

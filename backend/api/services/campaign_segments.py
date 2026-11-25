@@ -429,10 +429,11 @@ def _resolve_by_store(db, store_id: Optional[str], **_kw) -> List[Dict[str, Any]
 def _resolve_by_customer_type(
     db, store_id: Optional[str], customer_type: str = "B2C", **_kw
 ) -> List[Dict[str, Any]]:
-    ctype = (customer_type or "B2C").upper()
+    from database.repositories.customer_repository import CustomerRepository
+
     cust_coll = db.get_collection("customers")
     q = _customers_query(store_id)
-    q["customer_type"] = ctype
+    q.update(CustomerRepository.type_scope(customer_type or "B2C"))
     customers = list(cust_coll.find(q).limit(_SCAN_LIMIT))
     return [_audience_row(c) for c in customers]
 

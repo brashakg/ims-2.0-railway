@@ -184,6 +184,9 @@ class BaseRepository(ABC, Generic[T]):
         Find multiple documents. ``strict``: a database error RAISES instead of
         reading as an empty list (for screens where empty must mean empty).
 
+        strict=True re-raises a read error instead of answering [] -- for a
+        list or report a failed read must never look like "nothing there".
+
         Args:
             filter: MongoDB filter
             sort: Sort specification [(field, direction)]
@@ -205,6 +208,8 @@ class BaseRepository(ABC, Generic[T]):
 
             return [self._clean_id(doc) for doc in cursor]
         except Exception as e:
+            if strict:
+                raise
             print(f"Error finding {self.entity_name}s: {e}")
             if strict:
                 raise
@@ -293,9 +298,9 @@ class BaseRepository(ABC, Generic[T]):
         """
         return self.update(id, {"is_active": False, "deleted_at": datetime.now()})
 
-    def count(self, filter: Dict = None) -> int:
+    def count(self, filter: Dict = None, strict: bool = False) -> int:
         """
-        Count documents
+        Count documents (strict=True re-raises a read error instead of 0)
 
         Args:
             filter: MongoDB filter
@@ -306,6 +311,8 @@ class BaseRepository(ABC, Generic[T]):
         try:
             return self.collection.count_documents(filter or {})
         except Exception as e:
+            if strict:
+                raise
             print(f"Error counting {self.entity_name}s: {e}")
             return 0
 
@@ -441,12 +448,16 @@ class BaseRepository(ABC, Generic[T]):
             skip = max(0, skip - self.count(part)) if skip and not got else 0
         return page
 
-    def search_count(self, text: str, fields: List[str], filter: Dict = None) -> int:
+    def search_count(self, text: str, fields: List[str], filter: Dict = None,
+                     strict: bool = False) -> int:
         """Count of documents the SAME search() query would match (pre-slice),
-        so a paginated caller can render a true total. Fail-soft 0."""
+        so a paginated caller can render a true total. Fail-soft 0 unless
+        strict."""
         try:
-            return self.count(self._search_query(text, fields, filter))
+            return self.count(self._search_query(text, fields, filter), strict=strict)
         except Exception as e:
+            if strict:
+                raise
             print(f"Error counting {self.entity_name} search: {e}")
             return 0
 

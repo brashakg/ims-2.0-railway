@@ -299,9 +299,10 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
     // The /orders endpoint doesn't expose a server-side `search` filter on this
     // build, so we ask for a recent slice and filter client-side. The list is
     // already store-scoped by the user's JWT, so this stays within the operator's
-    // visibility. Limit=50 keeps the network round-trip small.
+    // visibility. limit=500 keeps the reach the palette had when GET /orders
+    // ignored limit on the shop branch (audit R30 made it honour limit).
     orderApi
-      .getOrders({ limit: 50 })
+      .getOrders({ limit: 500 })
       .then((res: any) => {
         if (cancelled) return;
         const list = res?.orders || (Array.isArray(res) ? res : []);

@@ -113,8 +113,12 @@ def _orders_in_window(
         # BUG-061: limit=0 returns ALL matching orders. The default limit=100
         # silently truncated every aggregation that feeds off this helper
         # (~15 sales/profit/discount/footfall reports) -> understated totals.
+        if strict:
+            return order_repo.find_many(flt, limit=0, strict=True) or []
         return order_repo.find_many(flt, limit=0) or []
     except Exception:
+        if strict:
+            raise
         return []
 
 
