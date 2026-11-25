@@ -1225,7 +1225,7 @@ def test_a_door_with_no_returns_collection_books_nothing():
     out = shopify_refund._post_locked(
         NoReturns(), refund_id="RF-NC", order={"order_id": "OC-NC", "customer_id": "CU-NC", "store_id": "S1"},
         return_lines=[], credit_note={"gross_refund": 1000.0, "gst_breakup": {"taxable": 952.38, "tax": 47.62}},
-        restock_store=None, settled_externally=True, restock_unverified=False, allowance=(0.0, "", None, False))
+        restock_store=None, settled_externally=True, restock_unverified=False, allowance=(0.0, "", None, False, 0.0))
     assert (out["status"], out["reason"], out["credit_note_issued"]) == ("error", "refund_not_claimed", False), out
 
 

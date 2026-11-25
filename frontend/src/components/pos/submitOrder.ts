@@ -281,7 +281,8 @@ async function pressOnce(
           // No refusal came back: the burn may have landed. Never claim it did not.
           : `The loyalty redeem could not be confirmed — check the customer's points before collecting ` +
             `₹${Math.round(pendingLoyalty.rupeeValue).toLocaleString('en-IN')} another way. If the points ` +
-            `were taken, ask an admin to record the loyalty payment on this order.`;
+            `were taken, ask an admin to record the loyalty payment on this order; on a cancelled ` +
+            `bill they return to the customer on their own.`;
       }
       store.clearPendingLoyaltyRedeem();
     }

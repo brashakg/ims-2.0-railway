@@ -75,7 +75,12 @@ def _order(order_id="ORD-1", grand_total=1000.0, **over):
 @pytest.fixture()
 def till(monkeypatch):
     """One StrictDB behind the order, loyalty and returns doors."""
-    db = StrictDB()
+    return _wire(monkeypatch, StrictDB())
+
+
+def _wire(monkeypatch, db):
+    """One database (the strict fake, or a native Mongo database:
+    test_d95_one_record_native) behind the order, loyalty and returns doors."""
     orders = OrderRepository(db.get_collection("orders"))
     accounts = LoyaltyAccountRepository(db.get_collection("loyalty_accounts"))
     txns = LoyaltyTransactionRepository(db.get_collection("loyalty_transactions"))

@@ -130,6 +130,28 @@ def _match(doc, filter_) -> bool:
     return True
 
 
+def _set_filtered(node, parts, value, array_filters) -> None:
+    """Mongo's $set on a path with `$[name]` segments: every element of that
+    array matching the array filters named `name` is walked."""
+    head, rest = parts[0], parts[1:]
+    if head.startswith("$[") and head.endswith("]"):
+        name = head[2:-1]
+        conds = [(k[len(name) + 1:] if k != name else None, v)
+                 for flt in array_filters for k, v in flt.items()
+                 if k == name or k.startswith(name + ".")]
+        for i, el in enumerate(node):
+            if all(el == v if f is None else isinstance(el, dict) and el.get(f) == v for f, v in conds):
+                if rest:
+                    _set_filtered(el, rest, value, array_filters)
+                else:
+                    node[i] = value
+        return
+    if rest:
+        _set_filtered(node.setdefault(head, {}), rest, value, array_filters)
+    else:
+        node[head] = value
+
+
 def _push_unset(doc, update) -> None:
     """$push (append; status_history is asserted on) and $unset."""
     for k, v in ((update or {}).get("$push") or {}).items():
@@ -247,10 +269,13 @@ class FakeCollection:
         _push_unset(target, update)
         return dict(target)
 
-    def update_one(self, filter_, update, upsert=False):
+    def update_one(self, filter_, update, upsert=False, array_filters=None):
         for d in self.docs:
             if _match(d, filter_):
                 for k, v in (update.get("$set") or {}).items():
+                    if "$[" in k:  # filtered positional path (a booking's take-over)
+                        _set_filtered(d, k.split("."), v, array_filters or [])
+                        continue
                     # Positional "arr.$.leaf": the first element the filter's
                     # "arr.<field>" conditions match, as Mongo.
                     arr, _, rest = k.partition(".$.")

@@ -130,8 +130,13 @@ def test_an_error_after_the_mark_keeps_the_claims_and_the_hold(till, monkeypatch
     def _boom(*a, **k):
         raise RuntimeError("loyalty store down")
 
+    async def _record_boom(*a, **k):
+        raise RuntimeError("the record's store is down")
+
     monkeypatch.setattr("api.routers.loyalty.reverse_for_return", _boom)
-    monkeypatch.setattr(returns_router, "_quarantine_damaged_units", _boom)
+    # D95 / D122: the stock step is fail-soft; the error after the mark is
+    # the record insert's.
+    monkeypatch.setattr(returns_router, "_own_record_or_refuse", _record_boom)
     with pytest.raises(RuntimeError):
         _advance_client().post("/api/v1/returns", json=payload, headers=_hdr("STORE_MANAGER"))
     assert released == [] and written_off == []
@@ -209,14 +214,15 @@ def test_owed_cash_must_say_where_it_came_from(till, monkeypatch):
 def test_owed_cash_paid_by_hq_is_never_on_the_drawer_and_is_audited_once(till, monkeypatch):
     audits = []
     monkeypatch.setattr(returns_router, "_close_task", lambda *a, **k: None)
-    monkeypatch.setattr(returns_router, "_audit_complete", lambda rid, *a, **k: audits.append(rid))
+    # By its fixed id: every press writes the stored payment's row, once.
+    monkeypatch.setattr(returns_router, "_audit_once", lambda log_id, row: audits.append(log_id) or True)
     _owed(till)
     _pay(method="CASH", cash_paid_from="HQ")
     _pay(method="CASH", cash_paid_from="HQ")
     payout = till["db"].get_collection("returns").find_one({"payout_of": "RET-O"})
     assert payout["refund_tenders"] == [] and payout["drawer_auto_netted"] is False
     assert payout["paid_outside_drawer"] == [{"method": "CASH", "amount": 600.0, "paid_from": "HQ"}]
-    assert audits == ["RET-O"]
+    assert sorted(set(audits)) == ["return_owed_paid:RET-O"]
 
 
 def test_owed_cash_from_the_drawer_carries_its_count_block(till, monkeypatch):
@@ -249,7 +255,11 @@ def test_a_recovered_record_keeps_the_return_line_shape(till, tasks):
                     net_amount=1800.0, gross_refund=1800.0, restocking_fee=0.0, round_off=0.0, gst_view=view,
                     return_type="RETURN")
     doc = _complete("RET-S", cash_leg_paid=True)
-    assert doc["items"] == [{"order_item_id": "li1", "item_id": "li1", "product_id": "P1", "return_qty": 1.0}]
+    # D85 round 8 / #1413 D6: a hold that never recorded the unit's condition
+    # keeps none, so its Retry stock step SETS THE PIECE ASIDE for a person to
+    # check (_retry_lines) -- never on sale blind.
+    assert doc["items"] == [{"order_item_id": "li1", "item_id": "li1", "product_id": "P1", "return_qty": 1.0,
+                             "sku": "", "product_name": ""}]
 
 
 # =========================================================================== #

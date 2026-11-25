@@ -197,6 +197,8 @@ class FakeOrderRepo:
     def find_by_id(self, order_id):
         return self._orders.get(order_id)
 
+    read_or_raise = find_by_id
+
 
 # ============================================================================
 # Fixture
