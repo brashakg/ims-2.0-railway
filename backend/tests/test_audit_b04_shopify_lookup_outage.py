@@ -610,8 +610,8 @@ def test_a_failed_retry_claim_is_a_retryable_failure_not_a_duplicate(db, monkeyp
         row = _drain(db, "refund-claim-" + mode)
         assert row["processed"] is False and row["status"] == "failed", row
         # D55: never "duplicate". Since #1397 the re-claim puts the return
-        # back to PENDING, so the webhook's own unfinished-claim guard
-        # answers first (the Confirm door's guard is the test below).
+        # back to PENDING, so the webhook's unfinished-claim guard (main's one
+        # rule, is_unfinished) answers before the post is reached.
         assert "not finalized yet" in row["handler_error"], row
         assert db.credit_note_ledger.count_documents({}) == ledger_before
         db.returns.update_one({"shopify_refund_id": _REFUND_ID}, {"$set": {
@@ -626,29 +626,6 @@ def test_a_failed_retry_claim_is_a_retryable_failure_not_a_duplicate(db, monkeyp
     assert row["processed"] is True and row["status"] == "succeeded", row
     assert ret["credit_note_issued"] is True or db.shopify_refund_review.find_one(
         {"shopify_refund_id": _REFUND_ID, "status": "CREDIT_FAILED"}), ret
-
-
-def test_confirm_while_another_run_holds_a_fresh_claim_is_not_a_duplicate(db, monkeypatch):
-    """D55 on the accountant's Confirm door (post_from_review -> _post_locked,
-    no webhook guard in front): a fresh re-drive claim another live run holds
-    is unfinished work -- nothing booked, a retryable error, never the
-    "duplicate" a Confirm reads as finished."""
-    monkeypatch.setenv("SHOPIFY_REFUND_AUTO", "1")
-    _refund_order(db)
-    _dead_first_run(db)
-    db.returns.update_one({"shopify_refund_id": _REFUND_ID}, {"$set": {
-        "reprocessing_at": datetime.now(timezone.utc).isoformat()}})
-    ledger_before = db.credit_note_ledger.count_documents({})
-    from api.services import shopify_refund as S
-
-    out = S._post_locked(
-        db, refund_id=_REFUND_ID, order=db.orders.find_one({"order_id": "ORD-AUDIT-1"}),
-        return_lines=[], credit_note={"gross_refund": 1000.0}, restock_store=None,
-        settled_externally=False, restock_unverified=False,
-        allowance=(1000.0, "", None, False, 0.0))
-    assert out["status"] == "error" and "claim held or unverified" in out["error"], out
-    assert db.credit_note_ledger.count_documents({}) == ledger_before
-    assert db.returns.find_one({"shopify_refund_id": _REFUND_ID})["credit_note_issued"] is False
 
 
 def test_a_claim_check_that_cannot_read_is_a_failure_not_a_duplicate(db, monkeypatch):

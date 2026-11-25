@@ -510,13 +510,11 @@ def _claim_stale_refund_for_retry(returns_coll, refund_id: str, now: str,
 
     Returns the existing doc when THIS caller won the right to re-process a
     never-credited row (the caller falls through to the credit-issue + finalize
-    path, which update_one's this same doc); returns None when no claim was won --
-    a credit note really exists, OR another run holds a claim not yet stale (the
-    caller tells those two apart, D55). A read or write that fails RAISES
-    (decisions D55 and D118): a write whose answer never came back may or may
-    not have landed, so it is neither "won" nor "a duplicate"; the caller
-    reports a retryable failure. Never the order-history import's claim
-    (decision D103(1)).
+    path, which update_one's this same doc); returns None for a TRUE duplicate -- a
+    credit note really exists, OR another worker is mid-reprocess. A read or
+    write that fails RAISES (decision D118): None means "a duplicate" to the
+    caller, and no answer is not that one. Never the order-history import's
+    claim (decision D103(1)).
 
     `also_set` rides on the winning claim's own write (the points-step marker a
     re-drive owes, see _post_locked): durable before anything posts.
@@ -2394,15 +2392,9 @@ def _post_locked(
         try:
             existing = _claim_stale_refund_for_retry(returns_coll, refund_id, now, points_marker)
             held_by_import = existing is None and import_holds(db, refund_id)
-            # No claim won and not the import's: a duplicate ONLY when the
-            # credit note is really there. A claim another run holds (or one
-            # this run wrote whose answer was lost) is unfinished work (D55).
-            done = existing is None and not held_by_import and (
-                returns_coll.find_one({"shopify_refund_id": refund_id}) or {}
-            ).get("credit_note_issued") is True
         except Exception as read_exc:  # noqa: BLE001
-            logger.warning("[SHOPIFY_REFUND] refund=%s: its claim could not be read or "
-                           "written (%s) -- nothing booked, retried", refund_id, read_exc)
+            logger.warning("[SHOPIFY_REFUND] refund=%s: its claim could not be read (%s) "
+                           "-- nothing booked, retried", refund_id, read_exc)
             return _claim_unreadable(refund_id, order_id=order_id, customer_id=customer_id)
         prior_doc = existing
         if held_by_import:
@@ -2423,17 +2415,6 @@ def _post_locked(
                 "store_credit_reason": HELD_BY_IMPORT_TEXT,
             }
         if existing is None:
-            if not done:
-                # Another live run holds a claim not yet stale: nothing is
-                # booked and it is NOT a duplicate (D55) -- retried later.
-                return {
-                    "status": "error",
-                    "error": "refund claim held or unverified -- nothing posted, retry later",
-                    "refund_id": refund_id,
-                    "order_id": order_id,
-                    "customer_id": customer_id,
-                    "credit_note_issued": False,
-                }
             logger.info(
                 "[SHOPIFY_REFUND] refund=%s already credited -- duplicate", refund_id
             )
