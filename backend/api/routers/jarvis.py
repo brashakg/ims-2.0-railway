@@ -1378,12 +1378,17 @@ class JarvisAnalyticsEngine:
         try:
             col = get_db_collection("budgets")
             if col is not None:
+                # The shape Budgeting writes: one row per (shop, YYYY-MM, head)
+                # with a planned_amount. This read used to pick `category` /
+                # `allocated` / `spent`, which no budget row has ever held, so
+                # the context was a list of blanks and zeros (audit L3-15).
+                # Actuals are derived, not stored: /budgets/variance has them.
                 ctx["budgets"] = [
                     {
-                        "category": b.get("category") or b.get("name") or "",
+                        "store_id": b.get("store_id") or "",
                         "period": b.get("period") or "",
-                        "allocated": float(b.get("allocated") or 0),
-                        "spent": float(b.get("spent") or 0),
+                        "head": b.get("head") or "",
+                        "planned_amount": float(b.get("planned_amount") or 0),
                     }
                     for b in col.find({}).limit(30)
                 ]
@@ -2240,7 +2245,7 @@ You have **full read access to the entire IMS 2.0 database** as the Superadmin's
 
 **Finance + payroll + incentives**
 - `expenses_mtd` — month-to-date expense total + category breakdown
-- `budgets` — allocated vs spent
+- `budgets` — planned amount per shop, month (YYYY-MM) and head; REVENUE is the income target (plans only, no actuals)
 - `payroll_mtd` — month-to-date payroll spend + record count
 - `salary_advances_open` — outstanding advances
 - `incentive_payouts_recent` — Pune model (Module i/ii/iii) payout snapshots
@@ -3210,9 +3215,14 @@ _ALWAYS_EXCLUDED_FIELDS = (
     "bank_ifsc",
 )
 
-# Per-collection extras on top of the global list. Empty today; kept so a
-# collection-specific field can be added without weakening the global rule.
-_COLLECTION_FIELD_EXCLUSIONS: Dict[str, tuple] = {}
+# Per-collection extras on top of the global list.
+#   webhook_inbox.payload -- the stored delivery as received: an inbound
+#     WhatsApp message keeps the customer's phone and words for 30 days, a
+#     Shopify/MSG91 delivery its buyer's contact details. Redacted at this
+#     Jarvis boundary (D57 option A, Codex round 2 on #1416); the inbox's
+#     restricted operator views elsewhere are unchanged. Status, vendor,
+#     attempts and errors stay readable.
+_COLLECTION_FIELD_EXCLUSIONS: Dict[str, tuple] = {"webhook_inbox": ("payload",)}
 
 
 def _excluded_fields_for(collection: str) -> tuple:

@@ -189,13 +189,24 @@ def _authorise_attachment(file_id: str, current_user: dict) -> None:
 def _ensure_may_close(task: dict, current_user: dict) -> None:
     """Closing a catalogue-flag task clears its flags (complete = fixed,
     cancel = withdrawn), so it takes the people who may clear a flag
-    (services/catalog_flags.clears_flags) -- the same as Mark fixed."""
+    (services/catalog_flags.clears_flags) -- the same as Mark fixed. Closing a
+    loyalty points exception takes an admin."""
     from ..services import catalog_flags
 
     if catalog_flags.is_flag_task(task) and not catalog_flags.clears_flags(current_user):
         raise HTTPException(
             status_code=403,
             detail="Only a catalogue manager or an admin can close a catalogue flag task",
+        )
+    # Closing a loyalty points exception stops its automatic retry for good
+    # (owner 2026-11-08: once an ADMIN closes it), a points waiver only an
+    # admin may make; a manager who reaches the shop still sees it.
+    from .loyalty import is_loyalty_exception
+
+    if is_loyalty_exception(task) and not {"ADMIN", "SUPERADMIN"} & set(task_roles(current_user)):
+        raise HTTPException(
+            status_code=403,
+            detail="Only an admin can close a loyalty points exception",
         )
 
 
@@ -870,6 +881,8 @@ async def update_task(
             )
         if new_status == "CANCELLED":
             _ensure_may_close(existing, current_user)
+            # A cancel closes the task by hand, as Complete does (D122(5)).
+            await _before_closed_by_hand(existing, current_user)
         update_data["status"] = new_status
         update_data["history"] = (existing.get("history") or []) + [
             {
@@ -919,6 +932,25 @@ async def update_task(
     return {"task_id": task_id, "message": "No changes made"}
 
 
+async def _before_closed_by_hand(task: dict, current_user: dict) -> None:
+    """THE rule for a person closing a task by hand, whichever door closes it
+    (Complete, or a manager's Cancel through the task update): the record the
+    task stands for is settled or asked first, BEFORE the task changes."""
+    ref = str(task.get("source_ref") or "")
+    if ref.startswith("return_restock_blocked:"):
+        # D122(5) / D109(3): while the return's units are still out the close
+        # is refused once (409: press Update stock); otherwise the return
+        # records who closed its task (503: the task stays open).
+        from .returns import note_stock_task_closed
+
+        await note_stock_task_closed(ref.split(":", 1)[1], current_user, task)
+    elif ref.startswith("return_cash_owed:"):
+        # D123: a payout already stored settles the return as paid.
+        from .returns import settle_owed_for_task
+
+        settle_owed_for_task(ref.split(":", 1)[1], current_user)
+
+
 @router.patch("/{task_id}/complete")
 async def complete_task(
     task_id: str,
@@ -943,6 +975,8 @@ async def complete_task(
             status_code=400,
             detail=f"Task is already in '{current_status}' status and cannot be completed.",
         )
+
+    await _before_closed_by_hand(task, current_user)
 
     now = datetime.now()
     result = repo.update(

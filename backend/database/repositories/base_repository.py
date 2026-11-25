@@ -144,6 +144,13 @@ class BaseRepository(ABC, Generic[T]):
             print(f"Error finding {self.entity_name}: {e}")
             return None
 
+    def read_or_raise(self, id: str) -> Optional[Dict]:
+        """The stored document, None only when there truly is none. A failed
+        read RAISES: find_by_id swallows it into None, which money doors must
+        not take for "absent" (an unreadable account is not an empty one, an
+        unreadable bill is not a live one)."""
+        return self._clean_id(self.collection.find_one({self.id_field: id}))
+
     def is_absent(self, id: str) -> bool:
         """True only when the database confirms there is no such document.
         RAISES on a database error (find_by_id reports that as None too)."""

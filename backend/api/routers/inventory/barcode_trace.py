@@ -37,9 +37,15 @@ async def barcode_lifecycle_trace(
     Sections returned (each is a list, empty when no records found):
       * stock_unit   - the minted serialized row (who, when, source GRN/PO)
       * purchase     - GRN line that created the unit (if any)
-      * sales        - order line(s) the barcode appeared in
+      * sales        - every sale of the unit, oldest first. `link` says how
+                       each was found: LINE (a bill line names the unit),
+                       UNIT (the unit is stamped sold on that bill), RETURN
+                       (the unit came back from it: its returned-from stamp,
+                       or a return that put this unit back was made against
+                       that bill). Never a sale guessed from the product.
       * transfers    - transfer line(s) the barcode was part of (ship+receive)
-      * returns      - return line(s) that restocked this barcode
+      * returns      - the returns that put this unit back in stock or set it
+                       aside as damaged (they name it), or whose line names it
       * audit_trail  - raw stock_audit rows keyed on this stock_unit's id
 
     Honest empty state: when a barcode is unknown an empty envelope is returned
@@ -77,6 +83,7 @@ async def barcode_lifecycle_trace(
     code = barcode
     stock_id = ""  # a failed unit lookup still lets the sales and returns run
     sold_on = None
+    su = None
     every_shop, my_shops = user_store_scope(current_user)
     shops = sorted(s for s in my_shops if isinstance(s, str) and s)
     if not every_shop and not shops:
@@ -132,9 +139,48 @@ async def barcode_lifecycle_trace(
     except Exception as exc:  # noqa: BLE001
         logger.warning("[INV-12] stock_unit lookup failed for barcode %s: %s", barcode, exc)
 
+    # The sales a return brought this unit back from: the unit keeps only its
+    # LATEST one (returned_from_order_id); each return that names the unit
+    # keeps its own bill, so a sold -> returned -> resold unit shows them all.
+    came_back_from: set = set()
+    if su:
+        came_back_from = {
+            str(su[k]) for k in ("returned_from_order_id", "prior_sold_order_id") if su.get(k)
+        }
     try:
-        # 4. Sales: the scanned unit on a line, its original barcode, or
-        #    the order stamped by a typed-item sale on the unit itself.
+        # 4. Returns: the returns that put THIS unit back (restock_stock_ids)
+        #    or set it aside as damaged (quarantined_stock_ids), and any
+        #    return line that names the barcode or the unit.
+        return_filter: list = [{"items.barcode": code}]
+        if stock_id:
+            return_filter += [
+                {"items.stock_id": stock_id},
+                {"restock_stock_ids": stock_id},
+                {"quarantined_stock_ids": stock_id},
+            ]
+        returns = list(
+            db.get_collection("returns").find(
+                _mine({"$or": return_filter}, "store_id"),
+                {"_id": 0, "return_id": 1, "return_number": 1, "return_type": 1,
+                 "order_id": 1, "order_number": 1, "created_at": 1, "store_id": 1,
+                 "status": 1, "items": 1, "restock_stock_ids": 1,
+                 "quarantined_stock_ids": 1},
+            ).sort("created_at", 1).limit(50)
+        )
+        result["returns"] = _scrub_list(returns)
+        if stock_id:
+            came_back_from |= {
+                str(r["order_id"]) for r in returns
+                if r.get("order_id") and stock_id in [
+                    *(r.get("restock_stock_ids") or []), *(r.get("quarantined_stock_ids") or [])]
+            }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[INV-12] returns lookup failed for barcode %s: %s", barcode, exc)
+
+    try:
+        # 5. Sales: the scanned unit on a line, its original barcode, the
+        #    order stamped by a typed-item sale on the unit itself, or a
+        #    sale the unit came back from (above).
         sales_filter: list = [
             {"items.barcode": code},
             {"order_items.barcode": code},
@@ -143,11 +189,13 @@ async def barcode_lifecycle_trace(
             sales_filter.append({"items.stock_id": stock_id})
         if sold_on:
             sales_filter.append({"order_id": sold_on})
+        if came_back_from:
+            sales_filter.append({"order_id": {"$in": sorted(came_back_from)}})
         orders = list(
             db.get_collection("orders").find(
                 _mine({"$or": sales_filter}, "store_id"),
-                {"_id": 0, "order_number": 1, "created_at": 1, "store_id": 1,
-                 "status": 1, "items": 1, "order_items": 1},
+                {"_id": 0, "order_id": 1, "order_number": 1, "created_at": 1,
+                 "store_id": 1, "status": 1, "items": 1, "order_items": 1},
             ).sort("created_at", 1).limit(50)
         )
         for order in orders:
@@ -161,13 +209,18 @@ async def barcode_lifecycle_trace(
                 "created_at": order.get("created_at"),
                 "store_id": order.get("store_id"),
                 "status": order.get("status"),
+                "link": (
+                    "LINE" if matching
+                    else "UNIT" if sold_on and order.get("order_id") == sold_on
+                    else "RETURN"
+                ),
                 "matched_lines": matching,
             })
     except Exception as exc:  # noqa: BLE001
         logger.warning("[INV-12] orders lookup failed for barcode %s: %s", barcode, exc)
 
     try:
-        # 5. Transfers: shipped_stock_ids / received_stock_ids on each transfer
+        # 6. Transfers: shipped_stock_ids / received_stock_ids on each transfer
         #    line hold the moved units' stock_ids.  Also check transfer_id
         #    stamped on the stock_unit itself.
         transfer_filter: list = [
@@ -195,22 +248,6 @@ async def barcode_lifecycle_trace(
         result["transfers"] = _scrub_list(transfers)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[INV-12] transfers lookup failed for barcode %s: %s", barcode, exc)
-
-    try:
-        # 6. Returns: return lines that reference this barcode or its stock_id
-        return_filter: list = [{"items.barcode": code}]
-        if stock_id:
-            return_filter.append({"items.stock_id": stock_id})
-        returns = list(
-            db.get_collection("returns").find(
-                _mine({"$or": return_filter}, "store_id"),
-                {"_id": 0, "return_number": 1, "created_at": 1, "store_id": 1,
-                 "status": 1, "items": 1},
-            ).sort("created_at", 1).limit(50)
-        )
-        result["returns"] = _scrub_list(returns)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[INV-12] returns lookup failed for barcode %s: %s", barcode, exc)
 
     # The unit's cost, a sale line's cost_at_sale, a transfer line's unit cost
     # and the receipt's prices go to the roles that see what we pay only

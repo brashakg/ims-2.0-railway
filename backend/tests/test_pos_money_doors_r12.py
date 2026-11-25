@@ -302,10 +302,11 @@ def test_a_doc_that_could_not_be_saved_raises_a_task_and_is_completed_from_the_h
     returns = till["db"].get_collection("returns")
     _crash_once(monkeypatch, returns, "insert_one", lambda doc, *a, **k: doc.get("status") == "COMPLETED")
     r = _advance_client().post("/api/v1/returns", json=payload, headers=_hdr("STORE_MANAGER"))
-    assert r.status_code == 201
-    rid = r.json()["return_id"]
-    assert [t["dedupe_ref"] for t in tasks] == [f"return_doc_missing:{rid}"]
-    assert tasks[0]["priority"] == "P1" and tasks[0]["extra"]["payload"]["doc"]["return_id"] == rid
+    # D95(3): never "Refund recorded" on a record that is not confirmed --
+    # the counter is told not to pay yet; the doc rides on the kept hold.
+    assert r.status_code == 503 and r.json()["detail"] == returns_router.RECORD_NOT_CONFIRMED_MESSAGE, r.text
+    rid = next(iter(_stored(till)["refund_holds"]))
+    assert _stored(till)["refund_holds"][rid]["doc"]["return_id"] == rid and tasks == []
     # Round 14: a hold younger than the reconciler's timeout may be a press
     # still running -- refused; this one is past it.
     with pytest.raises(HTTPException) as young:
@@ -314,18 +315,55 @@ def test_a_doc_that_could_not_be_saved_raises_a_task_and_is_completed_from_the_h
     holds = _stored(till)["refund_holds"]
     holds[rid]["at"] = _ago(30)
     till["db"].get_collection("orders").update_one({"order_id": "ORD-1"}, {"$set": {"refund_holds": holds}})
+    # Never pressed again: the stuck-hold sweep puts it in front of a person.
+    assert returns_router.sweep_stuck_return_holds() == 1
+    assert [t["dedupe_ref"] for t in tasks] == [f"return_doc_missing:{rid}"]
+    assert tasks[0]["priority"] == "P1" and tasks[0]["extra"]["payload"]["doc"]["return_id"] == rid
     doc = _complete(rid, paid=True)
     assert doc["status"] == "COMPLETED" and doc["net_refund"] == 1800.0
     assert returns.count_documents({"return_id": rid}) == 1
+
+
+@pytest.mark.usefixtures("gst_numbers")
+def test_a_doc_insert_that_raised_while_the_record_exists_raises_no_false_alarm(till, monkeypatch, tasks):
+    """#1413 review: the press's insert raises but the record IS there (its own
+    write with the reply lost, or the one Accounts rebuilt in Needs completing
+    while the press stalled). No P1 'record not saved' task: it would send
+    Accounts after a record that exists."""
+    payload = _two_unit_bill(till, monkeypatch)
+    returns = till["db"].get_collection("returns")
+    real = returns.insert_one
+
+    def landed_then_raised(doc, *a, **k):
+        out = real(doc, *a, **k)
+        if doc.get("status") == "COMPLETED":
+            raise RuntimeError("reply lost")
+        return out
+
+    monkeypatch.setattr(returns, "insert_one", landed_then_raised)
+    r = _advance_client().post("/api/v1/returns", json=payload, headers=_hdr("STORE_MANAGER"))
+    assert r.status_code == 201
+    rid = r.json()["return_id"]
+    assert returns.count_documents({"return_id": rid}) == 1
+    assert [t["dedupe_ref"] for t in tasks] == [], "a false 'record not saved' alarm"
 
 
 def test_the_reconcilers_heal_of_a_return_credit_raises_the_task(till, monkeypatch, tasks):
     till["db"].get_collection("orders").insert_one(_order(refund_holds={}, refund_holds_v=1))
     _customer(till, store_credit=1200.0)
     _ledger(till).insert_one(_row("RET-H:credit", delta=1200.0, undo_on_void=_spec("RET-H")))
-    landed = iter([False, True])  # not landed at the read, landed at the void's re-read
-    monkeypatch.setattr(cust_router, "_guard_landed", lambda *a, **k: next(landed))
+    customers = till["db"].get_collection("customers")
+
+    def lands_right_after_the_read(*a, **k):
+        # Not landed at the reconciler's read; the press's move lands before
+        # the void's own look -- which now FENCES the move (D79) and so reads
+        # the real guard on the customer.
+        customers.update_one({"customer_id": "CUST-1"}, {"$push": {cust_router.STORE_CREDIT_REFS: "RET-H:credit"}})
+        return False
+
+    monkeypatch.setattr(cust_router, "_guard_landed", lands_right_after_the_read)
     cust_router.reconcile_pending_credits(_repo(till), ledger=_ledger(till))
+    assert "RET-H:credit" not in (customers.find_one({"customer_id": "CUST-1"}).get(cust_router.STORE_CREDIT_FENCED) or [])
     assert _ledger(till).find_one({"entry_id": "RET-H:credit"})["type"] == "ISSUED"
     assert [t["dedupe_ref"] for t in tasks] == ["return_credit_settled:RET-H:credit"]
 
@@ -549,7 +587,7 @@ def test_the_shopify_allowance_is_capped_at_shopifys_total_on_a_mismatch(env):
     from api.services import shopify_refund as sr
 
     rr._order(env, amount_paid=1000.0, shopify_totals_check={"status": "MISMATCH", "shopify_total": 600.0})
-    credit, _why, label, _ask = sr._store_credit_allowance(env, "ord-1", "700001", 1000.0, 0.0)
+    credit, _why, label, _ask, _pts = sr._store_credit_allowance(env, "ord-1", "700001", 1000.0, 0.0)
     assert credit == 600.0 and label == "PARTIAL"
 
 

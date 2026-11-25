@@ -392,6 +392,33 @@ class DatabaseConnection:
             name="stock_units_transfer_in_transit",
             background=True,
         )
+        # D45(a): one returned piece is one stock record. Every unit a return
+        # puts back or sets aside -- flipped or minted -- carries its return
+        # slot "<return>|<kind>|<product>|<n>" (returns._return_slot_keys), so
+        # a retry that stalled past its claim and the retry that took it over
+        # can never both move the same piece: the second write is refused.
+        # PARTIAL on a string slot: every older unit carries none (the build
+        # cannot fail on existing data).
+        _backstop(
+            "stock_units",
+            "return_slot",
+            unique=True,
+            partialFilterExpression={"return_slot": {"$type": "string"}},
+            name="uniq_stock_unit_return_slot",
+            background=True,
+        )
+        # ...and every slot a unit ever carried (#1413 round 1, P1-A): a later
+        # return of the same unit (resold meanwhile) writes its own slot over
+        # `return_slot`, which freed the old one for a second record of the
+        # piece. `return_slots` keeps them all (multikey, unique across units).
+        _backstop(
+            "stock_units",
+            "return_slots",
+            unique=True,
+            partialFilterExpression={"return_slots": {"$type": "string"}},
+            name="uniq_stock_unit_return_slots",
+            background=True,
+        )
         # F8: DB-level backstop behind the GRN accept claim (vendors.py
         # _accept_grn_claimed). Every unit minted for a goods receipt now carries
         # a per-line ordinal `line_unit_seq` derived from the count already

@@ -1890,7 +1890,7 @@ def test_one_frame_of_a_historical_order_is_one_stock_in_task_goods_back_and_ret
     oid, rid = 60182 + goods_first, 700382 + goods_first
     row = _historical_refund(swept, monkeypatch, oid, rid, status="DELIVERED")
     real = returns_router._returns_coll
-    blip = _ScanFailsOnce(real())
+    blip = _ScanFailsOnce(real(), skip=1)
     monkeypatch.setattr(returns_router, "_returns_coll", lambda: blip)
     res = _confirm(row)["result"]
     assert (res["restock_applied"], res["historical"]) == (False, True), "its returns could not be read"
@@ -1919,8 +1919,11 @@ def test_a_stock_in_task_that_did_not_land_leaves_the_frame_to_the_next_door(swe
     """The task insert fails (BaseRepository.create swallows it and answers
     None). Goods back answered stock_in with the id of a task that does not
     exist and kept the booking, so the confirm restocked nothing, the retry
-    said "Already restocked": no task, no stock row, no door left. A task
-    that did not land is no booking: released, and the next door raises it."""
+    said "Already restocked": no task, no stock row, no door left. Since the
+    review of 22f53ec0 the booking stays (its run is named on it) and the
+    next door raises ITS task under that run's fixed id (settle_bookings):
+    released, a later run booked the frame again under a new run and could
+    raise a second task beside one whose save was only unknown."""
     from fastapi import HTTPException
 
     oid, rid = 60188, 700388
@@ -1936,11 +1939,16 @@ def test_a_stock_in_task_that_did_not_land_leaves_the_frame_to_the_next_door(swe
         _goods_back(row)
     assert no.value.status_code == 503 and "stock_in_task_not_saved" in no.value.detail
     line = _doc(swept, oid)["items"][0]
-    assert not line.get("returned_qty") and not (line.get("restocked_refunds") or {}).get(str(rid))
+    assert (line.get("returned_qty"), (line.get("restocked_refunds") or {}).get(str(rid))) == (1, 1)
+    assert _stock_in(swept, oid) == []
     monkeypatch.setattr(tasks, "insert_one", real)
     res = _confirm(swept["review"].find_one({"review_id": row["review_id"]}))["result"]
-    assert res["stock_in_task"] and res["restock_applied"] is True
+    # The confirm raised the stopped run's task (settle_bookings), under that
+    # run's fixed id; the frame stays booked once.
+    assert res["restock_applied"] is True
     assert _minted(swept) == [] and len(_stock_in(swept, oid)) == 1, "one frame, one task"
+    line = _doc(swept, oid)["items"][0]
+    assert (line.get("returned_qty"), (line.get("restocked_refunds") or {}).get(str(rid))) == (1, 1)
 
 
 def test_a_stock_in_task_whose_reply_was_lost_is_one_task(swept, monkeypatch):
@@ -2096,14 +2104,14 @@ def test_a_booking_that_errors_part_way_releases_the_line_it_booked(monkeypatch)
     lines = [ReturnLine(order_item_id=i, product_id=i, return_qty=1, unit_price=0.0) for i in "ab"]
     calls = []
 
-    def claim(oid, orig, qty, rid, units, token):
+    def claim(oid, orig, qty, rid, units, token, **_kw):
         if orig["item_id"] == "b":
             raise RuntimeError("orders write down")
         calls.append(("claim", orig["item_id"]))
         return True
 
     monkeypatch.setattr(returns_router, "_claim_returnable_qty", claim)
-    monkeypatch.setattr(returns_router, "_release_returnable_qty",
+    monkeypatch.setattr(returns_router, "_release_qty",
                         lambda oid, orig, qty, rid, token: calls.append(("release", orig["item_id"])))
     with pytest.raises(RuntimeError):
         shopify_refund._hold_returned_qty(order, lines, "R1")
@@ -2557,15 +2565,20 @@ def test_a_partly_landed_goods_back_keeps_its_mark_at_the_units_that_landed(swep
 
 
 class _ScanFailsOnce:
-    """The returns collection; its first find raises (a blip)."""
+    """The returns collection; its first find raises (a blip). ``skip``:
+    finds let through first (the confirm's already-returned check reads the
+    returns before the restock does, #1397 round 8)."""
 
-    def __init__(self, real):
-        self.real, self.failed = real, False
+    def __init__(self, real, skip=0):
+        self.real, self.failed, self.skip = real, False, skip
 
     def __getattr__(self, name):
         return getattr(self.real, name)
 
     def find(self, *a, **kw):
+        if self.skip:
+            self.skip -= 1
+            return self.real.find(*a, **kw)
         if not self.failed:
             self.failed = True
             raise RuntimeError("returns scan timed out")
@@ -2739,7 +2752,7 @@ def test_a_stampless_historical_frame_goes_to_the_retrying_shops_manager(swept, 
     oid, rid = 60210, 700410
     row = _historical_refund(swept, monkeypatch, oid, rid, status="DELIVERED")
     _set(swept, oid, fulfillment_stores=None)
-    blip = _ScanFailsOnce(returns_router._returns_coll())
+    blip = _ScanFailsOnce(returns_router._returns_coll(), skip=1)
     monkeypatch.setattr(returns_router, "_returns_coll", lambda: blip)
     assert _confirm(row)["result"]["restock_applied"] is False
     out = _retry(swept["returns"].find_one({"shopify_refund_id": str(rid)}))
@@ -2907,7 +2920,9 @@ def test_a_historical_booking_whose_task_and_release_both_failed_still_raises_it
                                                                                       monkeypatch):
     """The stock-in task insert fails and so does the release of the booking.
     Left on the line, the next Goods back answered stock_in with no task, the
-    confirm finalized the restock, and no task ever asked for the frame."""
+    confirm finalized the restock, and no task ever asked for the frame.
+    Since the review of 22f53ec0 no release is even tried (the booking names
+    its run): the next door raises that run's task."""
     from fastapi import HTTPException
 
     oid, rid = 60213, 700413
@@ -2923,11 +2938,11 @@ def test_a_historical_booking_whose_task_and_release_both_failed_still_raises_it
     monkeypatch.setattr(returns_router, "_orders_coll", lambda: lossy)
     with pytest.raises(HTTPException) as no:
         _goods_back(row)
-    assert no.value.status_code == 503 and lossy.failed
+    assert no.value.status_code == 503 and not lossy.failed  # the booking is never taken back
     monkeypatch.setattr(tasks, "insert_one", real)
     back = _goods_back(swept["review"].find_one({"review_id": row["review_id"]}))["result"]
-    [task] = _stock_in(swept, oid)
-    assert (back["status"], back["stock_in_task"]) == ("stock_in", task["task_id"])
+    [task] = _stock_in(swept, oid)  # raised by this press for the first press's booking
+    assert back["status"] == "stock_in" and task["status"] == "OPEN"
     _confirm(swept["review"].find_one({"review_id": row["review_id"]}))
     assert _minted(swept) == [] and len(_stock_in(swept, oid)) == 1, "one frame, one task"
 
