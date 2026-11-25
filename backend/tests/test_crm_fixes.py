@@ -238,6 +238,7 @@ def test_cl_refill_daily_disposable(monkeypatch):
         {
             "order_id": "ORD-001",
             "customer_id": "cust-1",
+            "status": "DELIVERED",  # b18 (L1-F18): only received lenses are supply
             "created_at": order_date,
             "items": [
                 {
@@ -296,16 +297,21 @@ def test_cl_refill_no_history(monkeypatch):
 
 
 def test_cl_refill_no_db(monkeypatch):
-    """No DB => fail-soft empty result."""
+    """No DB => 503 (b18, L1-F19): an unreadable history is never reported as
+    "no contact-lens history"."""
+    from fastapi import HTTPException
+
     monkeypatch.setattr(crm_mod, "_crm_get_db", lambda: None)
+    monkeypatch.setattr(crm_mod.db, "query_customer", lambda cid: {"customer_id": cid, "home_store_id": "S1"})
     import asyncio
-    result = asyncio.run(
-        crm_mod.get_cl_refill_status(
-            customer_id="cust-99",
-            current_user={"user_id": "u1"},
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            crm_mod.get_cl_refill_status(
+                customer_id="cust-99",
+                current_user={"user_id": "u1", "roles": ["STORE_MANAGER"], "store_ids": ["S1"]},
+            )
         )
-    )
-    assert result["has_cl_history"] is False
+    assert exc.value.status_code == 503
 
 
 # ---------------------------------------------------------------------------

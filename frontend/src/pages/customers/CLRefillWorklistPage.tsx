@@ -37,6 +37,8 @@ export function CLRefillWorklistPage() {
   const [overdueCount, setOverdueCount] = useState(0);
   const [loading, setLoading] = useState(false);
   const [creating, setCreating] = useState(false);
+  // L1-F19: a failed read is a failure, never "nobody is due".
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!storeId) return;
@@ -45,12 +47,15 @@ export function CLRefillWorklistPage() {
       const res = await crmApi.getCLRefillWorklist(storeId, dueWithin);
       setRows(res.items || []);
       setOverdueCount(res.overdue_count || 0);
-    } catch {
-      toastError('Could not load the refill worklist.');
+      setLoadError(null);
+    } catch (e: unknown) {
+      setRows([]);
+      setOverdueCount(0);
+      setLoadError(getErrorMessage(e, 'Order history unavailable; try again'));
     } finally {
       setLoading(false);
     }
-  }, [storeId, dueWithin, toastError]);
+  }, [storeId, dueWithin]);
 
   useEffect(() => {
     load();
@@ -127,7 +132,7 @@ export function CLRefillWorklistPage() {
             <button
               className="btn-primary flex items-center gap-2 ml-auto"
               onClick={handleCreateReminders}
-              disabled={creating || !storeId || rows.length === 0}
+              disabled={creating || !storeId || rows.length === 0 || !!loadError}
             >
               {creating ? <Loader2 className="w-4 h-4 animate-spin" /> : <BellPlus className="w-4 h-4" />}
               Create follow-up tasks
@@ -135,20 +140,29 @@ export function CLRefillWorklistPage() {
           )}
         </div>
 
-        <div className="flex gap-4 text-sm text-gray-500">
-          <span>
-            <span className="font-semibold text-gray-900">{rows.length}</span> due
-          </span>
-          <span>
-            <span className="font-semibold text-bv-red-600">{overdueCount}</span> overdue
-          </span>
-        </div>
+        {!loadError && (
+          <div className="flex gap-4 text-sm text-gray-500">
+            <span>
+              <span className="font-semibold text-gray-900">{rows.length}</span> due
+            </span>
+            <span>
+              <span className="font-semibold text-bv-red-600">{overdueCount}</span> overdue
+            </span>
+          </div>
+        )}
       </div>
 
       <div className="card overflow-hidden">
         {loading ? (
           <div className="flex items-center justify-center py-16 text-gray-400">
             <Loader2 className="w-6 h-6 animate-spin" />
+          </div>
+        ) : loadError ? (
+          <div role="alert" className="py-16 text-center text-sm text-red-700 space-y-3">
+            <p>Could not load the refill worklist: {loadError}</p>
+            <button className="btn-secondary" onClick={load}>
+              Retry
+            </button>
           </div>
         ) : rows.length === 0 ? (
           <div className="py-16 text-center text-sm text-gray-400">
