@@ -81,8 +81,11 @@ def test_merge_drops_orphan_completion_entries():
 def test_toggle_adds_new_completed_entry():
     items = apply_item_toggle([], STEPS, 2, True, by="u1", at="2026-05-22")
     assert len(items) == 1
+    # Audit R28: the tick records the step's identity and the instruction it
+    # was given for (step_id is None on a template never re-saved since ids).
     assert items[0] == {
-        "step_number": 2, "completed": True, "completed_by": "u1", "completed_at": "2026-05-22",
+        "step_id": None, "step_number": 2, "instruction": "Lights on",
+        "completed": True, "completed_by": "u1", "completed_at": "2026-05-22",
     }
 
 
@@ -97,13 +100,18 @@ def test_toggle_uncheck_clears_attribution():
 def test_toggle_keeps_other_items_and_sorts():
     items = [{"step_number": 3, "completed": True}]
     out = apply_item_toggle(items, STEPS, 1, True, by="u1", at="t")
-    assert [i["step_number"] for i in out] == [1, 3]
+    assert sorted(i["step_number"] for i in out) == [1, 3]
 
 
-def test_toggle_drops_steps_not_in_template():
+def test_toggle_keeps_ticks_for_removed_steps_as_evidence_but_never_shows_them():
+    # Audit R28: completion evidence is not rewritten by a later toggle; a tick
+    # for a step no longer in the template is kept stored, never displayed.
     items = [{"step_number": 99, "completed": True}]
     out = apply_item_toggle(items, STEPS, 1, True, by="u1", at="t")
-    assert [i["step_number"] for i in out] == [1]  # orphan 99 dropped
+    assert sorted(i["step_number"] for i in out) == [1, 99]
+    merged, progress = merge_checklist(STEPS, out)
+    assert [m["step_number"] for m in merged] == [1, 2, 3]
+    assert progress["done"] == 1
 
 
 # --- completion_status ------------------------------------------------------

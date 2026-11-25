@@ -33,6 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from api.routers import tasks as tasks_mod  # noqa: E402
 from api.routers.auth import get_current_user  # noqa: E402
+from api.services.sop_checklist import steps_revision  # noqa: E402
 from tests.strict_fakes import StrictCollection  # noqa: E402
 
 A, B = "AUDTA", "AUDTB"
@@ -80,7 +81,8 @@ def _client(user):
 
 def _tick(user, tid, **kw):
     return _client(user).post("/tasks/sop-checklist/item",
-                              json={"template_id": tid, "step_number": 1, "completed": True, **kw})
+                              json={"template_id": tid, "step_number": 1, "completed": True,
+                                    "revision": steps_revision(STEPS), **kw})
 
 
 def _frozen(world):

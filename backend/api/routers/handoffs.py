@@ -13,7 +13,8 @@ plus an optional single-line comment.
 
 Auto-deletion (TTL):
   - Mongo TTL index on `expires_at` removes the handoff doc.
-  - The orphaned GridFS blob is cleaned up by NEXUS's hourly sweep.
+  - The GridFS blob is NOT freed on TTL expiry: no sweep exists. Bytes are
+    freed only by revoke / an abandoned forward (_release_file).
 
 Reshare (per user direction):
   - Creates a NEW handoff doc with `parent_handoff_id` set + the SAME
@@ -47,6 +48,8 @@ from ..dependencies import (
     get_prescription_repository,
     get_audit_repository,
 )
+from ..utils.event_time import parse_event_utc
+from database.repositories.handoff_repository import FORWARD_PENDING
 from ..services.file_store import (
     ANY_KIND,
     get_file_store,
@@ -212,18 +215,12 @@ def _is_visible_on_hub(my_recipient: Dict, now: datetime) -> bool:
         return True  # explicit keep overrides everything
     if my_recipient.get("dismissed"):
         return False
-    snooze = my_recipient.get("snooze_until")
-    if snooze:
-        try:
-            snooze_dt = (
-                snooze
-                if isinstance(snooze, datetime)
-                else datetime.fromisoformat(str(snooze).replace("Z", "+00:00"))
-            )
-            if snooze_dt > now:
-                return False
-        except Exception:
-            pass
+    # Audit R22: ordinary PyMongo hands snooze_until back NAIVE (UTC), and
+    # comparing that with the aware `now` raised a TypeError that was
+    # swallowed -- so every snoozed card stayed on the Hub. Read it as UTC.
+    snooze_dt = parse_event_utc(my_recipient.get("snooze_until"))
+    if snooze_dt is not None and snooze_dt > now:
+        return False
     return True
 
 
@@ -382,15 +379,24 @@ async def create_handoff(
     return _scrub(saved)
 
 
+def _read_rows(read) -> List[Dict]:
+    """A list read that cannot be done is 503, never a false empty list."""
+    repo = get_handoff_repository()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Handoffs are unavailable right now")
+    try:
+        return read(repo)
+    except Exception:
+        logger.exception("[HANDOFF] list read failed")
+        raise HTTPException(status_code=503, detail="Handoffs are unavailable right now")
+
+
 @router.get("/inbox")
 async def list_inbox(current_user: dict = Depends(get_current_user)):
     """Return handoffs visible on THIS user's Hub (pending or kept,
     not dismissed, not currently snoozed)."""
-    repo = get_handoff_repository()
-    if repo is None:
-        return {"handoffs": [], "total": 0}
     uid = current_user.get("user_id")
-    rows = repo.find_inbox_for_user(uid)
+    rows = _read_rows(lambda repo: repo.find_inbox_for_user(uid))
     now = _now()
     visible: List[Dict] = []
     for h in rows:
@@ -409,10 +415,7 @@ async def list_inbox(current_user: dict = Depends(get_current_user)):
 @router.get("/sent")
 async def list_sent(current_user: dict = Depends(get_current_user)):
     """List handoffs uploaded by the current user."""
-    repo = get_handoff_repository()
-    if repo is None:
-        return {"handoffs": [], "total": 0}
-    rows = repo.find_sent_by_user(current_user.get("user_id"))
+    rows = _read_rows(lambda repo: repo.find_sent_by_user(current_user.get("user_id")))
     return {"handoffs": [_scrub(r) for r in rows], "total": len(rows)}
 
 
@@ -430,11 +433,10 @@ async def list_clinical_inbox(
 
     MUST be registered before GET /{handoff_id} so the literal path wins over the
     {handoff_id} param (FastAPI matches in registration order)."""
-    repo = get_handoff_repository()
-    if repo is None:
-        return {"handoffs": [], "total": 0}
     uid = current_user.get("user_id")
-    rows = repo.find_inbox_for_user(uid, handoff_type=HANDOFF_TYPE_CLINICAL)
+    rows = _read_rows(
+        lambda repo: repo.find_inbox_for_user(uid, handoff_type=HANDOFF_TYPE_CLINICAL)
+    )
     now = _now()
     visible: List[Dict] = []
     for h in rows:
@@ -632,13 +634,49 @@ async def reshare_handoff(
         "expires_at": parent_expires,
         "validity_days": parent.get("validity_days"),
         "parent_handoff_id": parent.get("handoff_id"),
+        # Audit R23 / decision D47: hidden from every read until committed.
+        "forward_state": FORWARD_PENDING,
     }
+    file_id = parent_file.get("file_id")
 
+    # Insert the child FIRST (pending, so nobody can open or forward it), so
+    # any revoke that runs after our commit below sees it as a reference and
+    # keeps the bytes.
     saved = repo.create(new_doc)
     if saved is None:
+        # The insert may still have landed (lost reply): take it back.
+        _abandon_forward(repo, new_handoff_id, file_id)
         raise HTTPException(
             status_code=500, detail="Failed to persist reshared handoff"
         )
+    # Commit: one write on the parent row proves it is still live. Revoke
+    # deletes that row, so either we commit first (its reference check will see
+    # our child) or the parent is gone and we take the child back. Never a 201
+    # for a copy whose file may be gone.
+    try:
+        committed = repo.commit_reshare(handoff_id)
+    except Exception:
+        _abandon_forward(repo, new_handoff_id, file_id)
+        raise HTTPException(
+            status_code=503,
+            detail="Could not confirm the forward; nothing was forwarded. Try again.",
+        )
+    if not committed:
+        _abandon_forward(repo, new_handoff_id, file_id)
+        raise HTTPException(
+            status_code=409,
+            detail="The sender withdrew this handoff while you were forwarding it; nothing was forwarded",
+        )
+    if not _publish_forward(repo, new_handoff_id):
+        # Committed, so its bytes are safe either way. The copy is most likely
+        # still pending (invisible, removed by the TTL index) and the card stays
+        # on this recipient's desk, so trying again is safe: at worst the
+        # recipient gets the same file twice. No screen lists Sent handoffs.
+        raise HTTPException(
+            status_code=503,
+            detail="Could not confirm the forward; it may not have gone through. Please try again.",
+        )
+    saved["forward_state"] = "live"
 
     # Mark the parent recipient's record as 'reshared'
     repo.update_recipient(
@@ -704,7 +742,7 @@ async def revoke_handoff(
     current_user: dict = Depends(get_current_user),
 ):
     """Uploader can revoke a handoff before TTL. Best-effort GridFS
-    cleanup happens here too (orphan sweep is the fallback)."""
+    cleanup happens here too (no sweep exists; bytes it cannot free stay)."""
     repo = get_handoff_repository()
     if repo is None:
         raise HTTPException(status_code=503, detail="Database not available")
@@ -723,14 +761,59 @@ async def revoke_handoff(
 
     file_id = (handoff.get("file") or {}).get("file_id")
     repo.delete(handoff_id)
-    if file_id:
-        fs = get_file_store()
-        if fs is not None:
-            try:
-                fs.delete(file_id)
-            except Exception:
-                pass
+    _release_file(repo, file_id)
     return {"deleted": True, "handoff_id": handoff_id}
+
+
+def _abandon_forward(repo, child_id: str, file_id: Optional[str]) -> None:
+    """Take back a reshare child that was never committed. It is still pending,
+    so even if this delete fails the row stays invisible to every route (the
+    TTL index removes the row; its bytes are then never freed, storage only);
+    its bytes are freed here only when nothing uses them."""
+    repo.delete(child_id)
+    _release_file(repo, file_id)
+
+
+def _publish_forward(repo, child_id: str) -> bool:
+    """Flip a committed child to live; on an unclear driver reply read back
+    the real state. Two tries."""
+    for _ in range(2):
+        try:
+            if repo.publish_reshare(child_id):
+                return True
+        except Exception:
+            pass
+        try:
+            row = repo.find_raw(child_id)
+            if row and row.get("forward_state") == "live":
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def _release_file(repo, file_id: Optional[str]) -> None:
+    """Free a handoff's bytes once no handoff uses them (audit R23). A
+    reshare points its child at the SAME blob, so revoking one handoff never
+    breaks the original's (or a forwarded) copy. Runs only AFTER the handoff
+    doc is deleted. Safe against in-flight forwards (D47): a forward inserts
+    its pending child BEFORE committing on its live parent, so a zero count
+    here means every handoff using this file is already gone and any later
+    forward's commit fails; a pending child is counted too. A failed check
+    keeps the bytes (storage only; no sweep frees them later)."""
+    if not file_id:
+        return
+    try:
+        if repo.file_still_referenced(file_id):
+            return
+    except Exception:
+        return
+    fs = get_file_store()
+    if fs is not None:
+        try:
+            fs.delete(file_id)
+        except Exception:
+            pass
 
 
 # ============================================================================

@@ -130,8 +130,8 @@ class FileStore:
 
     def list_ids_with_metadata_key(self, key: str) -> list:
         """Return all file_ids whose metadata contains the given key.
-        Used by the orphan sweep (find files with metadata.handoff_id
-        whose handoff doc no longer exists)."""
+        Meant for an orphan sweep (files with metadata.handoff_id whose
+        handoff doc no longer exists). No caller yet: no sweep is built."""
         raise NotImplementedError
 
 

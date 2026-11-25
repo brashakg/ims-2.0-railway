@@ -4,7 +4,7 @@
 // Small "what needs you" panel shown on the Hub right after login. Lists the
 // most recent unread notifications and links to the full Notifications screen.
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Bell, ChevronRight } from 'lucide-react';
 import { notificationsApi, type AppNotification } from '../../services/api/notifications';
@@ -20,6 +20,10 @@ export function DashboardNotifications() {
   const [items, setItems] = useState<AppNotification[]>([]);
   const [unread, setUnread] = useState(0);
   const [loaded, setLoaded] = useState(false);
+  // Audit R40: "You're all caught up" only after a read that succeeded.
+  const [failed, setFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  const retry = useCallback(() => setAttempt((n) => n + 1), []);
 
   useEffect(() => {
     let alive = true;
@@ -29,11 +33,12 @@ export function DashboardNotifications() {
         if (!alive) return;
         setItems(r.notifications || []);
         setUnread(r.unread_count || 0);
+        setFailed(false);
       })
-      .catch(() => { /* fail-soft: widget just stays empty */ })
+      .catch(() => { if (alive) setFailed(true); })
       .finally(() => alive && setLoaded(true));
     return () => { alive = false; };
-  }, []);
+  }, [attempt]);
 
   // Don't take up dashboard space until we know there's something (or it loaded empty).
   if (!loaded) return null;
@@ -52,7 +57,13 @@ export function DashboardNotifications() {
         </Link>
       </div>
 
-      {items.length === 0 ? (
+      {failed && (
+        <div role="alert" className="flex items-center justify-between gap-2 text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded px-2 py-1.5 mb-2">
+          <span>{items.length > 0 ? "Couldn't refresh notifications - showing what was last loaded." : "Couldn't load notifications."}</span>
+          <button type="button" onClick={retry} className="text-xs font-semibold text-bv-red-600 hover:underline">Retry</button>
+        </div>
+      )}
+      {failed && items.length === 0 ? null : items.length === 0 ? (
         <p className="text-sm text-gray-400 py-2">You're all caught up.</p>
       ) : (
         <ul className="divide-y divide-gray-100">
