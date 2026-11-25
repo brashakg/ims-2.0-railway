@@ -362,12 +362,15 @@ export function CatalogFiltersBar({
         </div>
       )}
 
-      {/* Category chips (the ONE shared browse vocabulary) */}
-      <div className="flex flex-wrap gap-1.5">
+      {/* Category chips (the ONE shared browse vocabulary). CAT-04 / UI-02
+          (D74, F-1435-B): a 44px x 44px tap target each, with a gap a thumb
+          can tell apart, on a 1024px tablet. */}
+      <div className="flex flex-wrap gap-2" data-testid="category-chips">
         <button
           type="button"
           onClick={() => set({ category: '' })}
-          className={clsx('ims-chip', f.category === '' && 'ims-chip--on')}
+          aria-pressed={f.category === ''}
+          className={clsx('ims-chip min-h-11 min-w-[44px] justify-center', f.category === '' && 'ims-chip--on')}
         >
           All
         </button>
@@ -383,7 +386,7 @@ export function CatalogFiltersBar({
               onClick={() =>
                 set({ category: joinList(on ? cats.filter((c) => c !== o.value) : [...cats, o.value]) })
               }
-              className={clsx('ims-chip', on && 'ims-chip--on')}
+              className={clsx('ims-chip min-h-11 min-w-[44px] justify-center', on && 'ims-chip--on')}
             >
               {o.label}
             </button>

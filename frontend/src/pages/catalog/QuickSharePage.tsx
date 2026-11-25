@@ -71,6 +71,9 @@ export default function QuickSharePage() {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<PickerProduct[]>([]);
   const [searching, setSearching] = useState(false);
+  // A failed search is not "no match" (CAT-06); Retry re-runs the same query.
+  const [searchFailed, setSearchFailed] = useState(false);
+  const [retryTick, setRetryTick] = useState(0);
 
   // Selection tray keyed by product_id (preserves insertion order via array).
   const [selected, setSelected] = useState<PickerProduct[]>([]);
@@ -98,28 +101,38 @@ export default function QuickSharePage() {
     void loadTemps();
   }, [loadTemps]);
 
-  // Debounced search.
+  // Debounced search. Only the CURRENT query owns results / loading / error
+  // (CAT-05): an answer for a query that was since changed or cleared is
+  // dropped, never shown under the new one.
   useEffect(() => {
     const q = query.trim();
+    setSearchFailed(false);
     if (!q) {
       setResults([]);
       setSearching(false);
       return;
     }
+    let current = true;
     setSearching(true);
     const handle = window.setTimeout(async () => {
       try {
         const data = await productApi.getProducts({ search: q, limit: SEARCH_LIMIT });
+        if (!current) return;
         const list = (data?.products ?? []) as PickerProduct[];
         setResults(list.filter((p) => p && p.product_id));
       } catch {
+        if (!current) return;
         setResults([]);
+        setSearchFailed(true);
       } finally {
-        setSearching(false);
+        if (current) setSearching(false);
       }
     }, 300);
-    return () => window.clearTimeout(handle);
-  }, [query]);
+    return () => {
+      current = false;
+      window.clearTimeout(handle);
+    };
+  }, [query, retryTick]);
 
   const addProduct = (p: PickerProduct) => {
     if (selectedIds.has(p.product_id)) return;
@@ -214,6 +227,18 @@ export default function QuickSharePage() {
             <div className="card p-8 text-center text-gray-400">
               <Loader2 size={18} className="animate-spin mx-auto mb-2" />
               Searching…
+            </div>
+          ) : query.trim() && searchFailed ? (
+            <div className="card p-8 text-center text-sm text-red-700" role="alert">
+              Search failed — the product list could not be reached. Check the connection and
+              try again.
+              <button
+                type="button"
+                onClick={() => setRetryTick((n) => n + 1)}
+                className="btn-secondary mx-auto mt-3 flex min-h-[44px] items-center"
+              >
+                Retry
+              </button>
             </div>
           ) : query.trim() && results.length === 0 ? (
             <div className="card p-8 text-center text-sm text-gray-500">

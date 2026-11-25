@@ -27,7 +27,15 @@ export function movePhoto<T>(list: T[], from: number, to: number): T[] {
 
 export function useProductImages(setImages: React.Dispatch<React.SetStateAction<string[]>>) {
   const toast = useToast();
-  const [uploadingImages, setUploadingImages] = useState(false);
+  // A COUNT, not a flag: one finished batch must not clear "uploading" while
+  // another batch is still in flight (CAT-01).
+  const [pendingUploads, setPendingUploads] = useState(0);
+  const uploadingImages = pendingUploads > 0;
+  // The form's photo generation (CAT-01). Bumped by discardPending whenever the
+  // form moves to another product / colour / blank form: an upload or a
+  // background removal started under an older generation never touches the
+  // images of the form that is open now.
+  const generationRef = useRef(0);
   // URLs currently being background-removed (per-image spinner + disabled btn).
   const [editingImages, setEditingImages] = useState<Set<string>>(new Set());
   const [dragActive, setDragActive] = useState(false);
@@ -47,7 +55,8 @@ export function useProductImages(setImages: React.Dispatch<React.SetStateAction<
         if (files.length > 0) toast.error('Only image files can be uploaded.');
         return;
       }
-      setUploadingImages(true);
+      const gen = generationRef.current;
+      setPendingUploads((n) => n + 1);
       let failed = 0;
       let lastError = '';
       const uploaded: string[] = [];
@@ -61,6 +70,15 @@ export function useProductImages(setImages: React.Dispatch<React.SetStateAction<
           if (err instanceof Error && err.message) lastError = err.message;
         }
       }
+      // The form moved on while this batch uploaded: these photos belong to
+      // the product that WAS open, never the one open now (CAT-01). The
+      // counter was already zeroed by discardPending.
+      if (gen !== generationRef.current) {
+        if (uploaded.length > 0) {
+          toast.warning('A photo finished uploading after you moved on, so it was not added to this product.');
+        }
+        return;
+      }
       if (uploaded.length > 0) {
         setImages((prev) => [...prev, ...uploaded]);
       }
@@ -71,7 +89,7 @@ export function useProductImages(setImages: React.Dispatch<React.SetStateAction<
       } else if (uploaded.length > 0) {
         toast.success(`${uploaded.length} image${uploaded.length > 1 ? 's' : ''} uploaded.`);
       }
-      setUploadingImages(false);
+      setPendingUploads((n) => Math.max(0, n - 1));
     },
     // setImages is a useState setter (stable by contract) - naming it here is a
     // no-op at runtime; the rule just can't see that across the module edge.
@@ -120,6 +138,7 @@ export function useProductImages(setImages: React.Dispatch<React.SetStateAction<
   // Remove-background button works on every image, not only manual uploads.
   const editImage = useCallback(
     async (url: string) => {
+      const gen = generationRef.current;
       setEditingImages((prev) => new Set(prev).add(url));
       try {
         let fileId = fileIdFromImageUrl(url);
@@ -132,6 +151,7 @@ export function useProductImages(setImages: React.Dispatch<React.SetStateAction<
           }
         }
         const res = await productApi.editProductImage(fileId);
+        if (gen !== generationRef.current) return; // moved on (CAT-01)
         if (res?.url) {
           setImages((prev) => prev.map((u) => (u === url ? res.url : u)));
           toast.success('Background removed.');
@@ -150,7 +170,7 @@ export function useProductImages(setImages: React.Dispatch<React.SetStateAction<
           toast.error("Couldn't remove background, please try again.");
         }
       } finally {
-        setEditingImages((prev) => {
+        if (gen === generationRef.current) setEditingImages((prev) => {
           const next = new Set(prev);
           next.delete(url);
           return next;
@@ -160,8 +180,17 @@ export function useProductImages(setImages: React.Dispatch<React.SetStateAction<
     [fileIdFromImageUrl, setImages, toast]
   );
 
+  // The form is moving to another product / colour / a blank form: every
+  // upload or background removal still in flight is abandoned (CAT-01).
+  const discardPending = useCallback(() => {
+    generationRef.current += 1;
+    setPendingUploads(0);
+    setEditingImages(new Set());
+  }, []);
+
   return {
     uploadingImages,
+    discardPending,
     editingImages,
     dragActive,
     setDragActive,

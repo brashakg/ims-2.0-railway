@@ -1,6 +1,6 @@
 import type { ProductFormValues } from './formModel';
 import { resolveHsnGst } from './formModel';
-import { CANONICAL_TO_PICKER } from './categoryFields';
+import { CANONICAL_TO_PICKER, CATEGORY_FIELDS } from './categoryFields';
 
 // ============================================================================
 // Clone support (Phase C): map a persisted product doc back into the Quick Add
@@ -61,6 +61,36 @@ export interface ProductDoc {
   [k: string]: unknown;
 }
 
+/** ONE spelling per attribute (CAT-07): an older record can store a
+ *  camelCase twin (modelName beside model_name). The snake_case key is the
+ *  canonical one the form, the registry and the save use: a twin of a filled
+ *  canonical key is dropped (the canonical value is what the form shows), and
+ *  a twin of a blank / absent one supplies its value under the canonical key.
+ *  A camelCase key is only a twin when its snake_case spelling is stored
+ *  beside it or is a known form field; any other key (a camelCase custom
+ *  field such as vendorDisplayHint, a spaced import label) passes unchanged,
+ *  so a save never manufactures a second stored spelling of it (D51). */
+const KNOWN_FIELDS: ReadonlySet<string> = new Set(
+  Object.values(CATEGORY_FIELDS).flatMap((fs) => fs.map((f) => f.name)),
+);
+const toSnake = (k: string) => k.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
+
+export function canonicalAttributes(src: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  const isTwin = (k: string) => /^[a-z][a-z0-9]*[A-Z][a-zA-Z0-9]*$/.test(k)
+    && (toSnake(k) in src || KNOWN_FIELDS.has(toSnake(k)));
+  Object.entries(src).forEach(([k, v]) => {
+    if (!isTwin(k)) out[k] = v;
+  });
+  Object.entries(src).forEach(([k, v]) => {
+    if (!isTwin(k)) return;
+    const snake = toSnake(k);
+    if (str(out[snake]).trim()) return;
+    if (str(v).trim() || !(snake in out)) out[snake] = v;
+  });
+  return out;
+}
+
 export function productToFormValues(product: ProductDoc): ProductFormValues {
   // The form speaks PICKER codes ('SG', 'FR', ...); a spine stores the
   // canonical name ('SUNGLASS'). Left canonical, the edit page lost every
@@ -71,7 +101,7 @@ export function productToFormValues(product: ProductDoc): ProductFormValues {
   // Start from the stored attributes (canonical), then ensure the top-level
   // identity + power fields are represented so the form prefills fully.
   const attributes: Record<string, string> = {};
-  const srcAttrs = product.attributes || {};
+  const srcAttrs = canonicalAttributes(product.attributes || {});
   Object.keys(srcAttrs).forEach((k) => {
     attributes[k] = str(srcAttrs[k]);
   });

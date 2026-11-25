@@ -817,7 +817,8 @@ def product_online_state(doc: Dict[str, Any], refusal: Optional[str]) -> Dict[st
                             the gate now refuses it (see `note`)
                    NOT_FOR_WEBSITE  not live and the gate refuses it
                    BLOCKED  not live and no usable photo: the push refuses it
-                   QUEUED   has a photo, waiting for a human to press push
+                   QUEUED   has a photo, waiting for the next sync (the
+                            scheduled run publishes new products too)
                    OFF      not live, not queued
                    (DELIBERATELY not collection_registry.listing_facts:
                    LIVE here includes a Shopify Draft -- it still syncs
@@ -944,6 +945,7 @@ def catalog_counts(db) -> Dict[str, int]:
         "own": 0,
         "no_photo": 0,
         "live": 0,
+        "published": 0,
         "pending": 0,
         "needs_review": 0,
     }
@@ -972,6 +974,10 @@ def catalog_counts(db) -> Dict[str, int]:
                 out["no_photo"] += 1
             if state["online"] == "LIVE":
                 out["live"] += 1
+                # CAT-08: LIVE includes a Shopify DRAFT (it still syncs stock);
+                # only a PUBLISHED one is a listing a shopper can open.
+                if _ecom_sellable(doc.get("ecom") or {}):
+                    out["published"] += 1
     except Exception as exc:  # noqa: BLE001
         logger.warning("[ONLINE_CATALOG] catalog counts failed: %s", exc)
     return out

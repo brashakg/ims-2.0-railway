@@ -16,8 +16,8 @@ export function SaveBar({ form }: { form: QuickAddForm }) {
     isReviewMode, queuePos, reviewDirty, isSubmitting, reviewApproving,
     reviewDryLoading, reviewDry, reviewGapView,
     handleReviewPrev, handleReviewSkip, handleReviewSave, handleReviewApprove,
-    handleSubmit, editMode, variantCtx, navigate, liveErrors, jumpToField,
-    selectedCategory, editQueuePos, handleEditSkip, editListPath, uploadingImages, editBusy,
+    handleSubmit, editMode, variantCtx, liveErrors, jumpToField,
+    selectedCategory, editQueuePos, handleEditSkip, handleEditCancel, editBusy, imagesBusy,
   } = form;
 
   return (
@@ -44,7 +44,8 @@ export function SaveBar({ form }: { form: QuickAddForm }) {
         <button
           type="button"
           onClick={() => handleSubmit(false)}
-          disabled={isSubmitting || editBusy}
+          disabled={isSubmitting || editBusy || imagesBusy}
+          title={imagesBusy ? 'Wait for the photo to finish uploading' : undefined}
           className="btn-primary flex items-center gap-2"
         >
           {isSubmitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
@@ -57,7 +58,7 @@ export function SaveBar({ form }: { form: QuickAddForm }) {
             <button
               type="button"
               onClick={() => handleSubmit(false, true)}
-              disabled={isSubmitting || uploadingImages || editBusy}
+              disabled={isSubmitting || imagesBusy || editBusy}
               className="btn-secondary flex items-center gap-2"
               title="Save, then open the next product of the list (Ctrl+Shift+Enter)"
             >
@@ -67,7 +68,7 @@ export function SaveBar({ form }: { form: QuickAddForm }) {
             <button
               type="button"
               onClick={handleEditSkip}
-              disabled={isSubmitting || uploadingImages || editBusy}
+              disabled={isSubmitting || imagesBusy || editBusy}
               className="rounded-lg px-3 py-2 text-sm text-gray-600 hover:bg-gray-100 disabled:opacity-50"
               title="Open the next product without saving"
             >
@@ -81,7 +82,7 @@ export function SaveBar({ form }: { form: QuickAddForm }) {
         {editMode?.kind === 'spine' ? (
           <button
             type="button"
-            onClick={() => navigate(editListPath)}
+            onClick={handleEditCancel}
             disabled={isSubmitting}
             className="btn-secondary flex items-center gap-2"
           >
@@ -92,7 +93,7 @@ export function SaveBar({ form }: { form: QuickAddForm }) {
           <button
             type="button"
             onClick={() => handleSubmit(true)}
-            disabled={isSubmitting}
+            disabled={isSubmitting || imagesBusy}
             className="btn-secondary flex items-center gap-2"
           >
             <RotateCcw className="w-4 h-4" />

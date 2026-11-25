@@ -100,6 +100,9 @@ async function typeTheSunglass() {
 }
 
 beforeEach(() => {
+  // D89(1): a new form holding typed work asks before its own doors (chip,
+  // Open it, the duplicate popup) move; here the staff member answers "leave".
+  vi.spyOn(window, 'confirm').mockReturnValue(true);
   seen = [];
   createProduct.mockReset();
   similar.mockReset();
@@ -117,6 +120,8 @@ describe('an item a manager already ordered', () => {
     const finish = await screen.findByRole('button', { name: /Finish the ordered item/ });
     await user.click(finish);
     await waitFor(() => expect(seen).toContain('/catalog/add?edit=P-DRAFT'));
+    // The typed sunglass is unsaved work: the popup asked before leaving it (D89).
+    expect(window.confirm).toHaveBeenCalledTimes(1);
   });
 
   it('any other existing product still opens in the stock ledger', async () => {
